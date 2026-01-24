@@ -26,6 +26,8 @@ import busio
 import digitalio
 import adafruit_rfm9x
 
+from led import RgbLed
+
 # Configuration
 RADIO_FREQ_MHZ = 915.0  # Use 868.0 for EU, 915.0 for US
 CS_PIN = board.D24  # Chip select (GPIO 24) - use a regular GPIO, not CE0/CE1
@@ -57,12 +59,13 @@ def send_messages(rfm9x):
         time.sleep(2)
 
 
-def receive_messages(rfm9x):
+def receive_messages(rfm9x, led):
     """Listen for incoming messages."""
     print("Waiting for messages...")
     while True:
         packet = rfm9x.receive(timeout=5.0)
         if packet is not None:
+            led.flash(255, 0, 0, 0.5)  # Flash red for 500ms
             try:
                 message = packet.decode("utf-8")
                 rssi = rfm9x.last_rssi
@@ -80,15 +83,19 @@ def main():
 
     mode = sys.argv[1].lower()
     rfm9x = setup_radio()
+    led = RgbLed(red_bcm=17, green_bcm=27, blue_bcm=22, common_anode=True)
 
-    if mode == "send":
-        send_messages(rfm9x)
-    elif mode == "receive":
-        receive_messages(rfm9x)
-    else:
-        print(f"Unknown mode: {mode}")
-        print("Use 'send' or 'receive'")
-        sys.exit(1)
+    try:
+        if mode == "send":
+            send_messages(rfm9x)
+        elif mode == "receive":
+            receive_messages(rfm9x, led)
+        else:
+            print(f"Unknown mode: {mode}")
+            print("Use 'send' or 'receive'")
+            sys.exit(1)
+    finally:
+        led.close()
 
 
 if __name__ == "__main__":
