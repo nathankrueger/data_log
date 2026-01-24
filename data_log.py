@@ -8,7 +8,10 @@ from datetime import datetime
 from pathlib import Path
 from typing import Callable, Union
 
-from bme280 import init_bme280, c_to_f
+from sensors import init_bme280
+
+def c_to_f(c: float) -> float:
+    return (c * 9.0/5.0) + 32
 
 class DataLogger:
     def __init__(
