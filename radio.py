@@ -34,16 +34,18 @@ CS_PIN = board.D24  # Chip select (GPIO 24) - use a regular GPIO, not CE0/CE1
 RESET_PIN = board.D25  # Reset (GPIO 25)
 
 # RSSI to brightness mapping
-RSSI_MAX = -50   # Strong signal -> full brightness (255)
-RSSI_MIN = -100  # Weak signal (RFM9x sensitivity limit: -120) -> LED off (0)
+RSSI_MAX = -50   # Strong signal -> LED_MAX brightness
+RSSI_MIN = -100  # Weak signal (RFM9x sensitivity limit: -120) -> LED_MIN brightness
+LED_MAX = 100    # Maximum LED brightness (0-255)
+LED_MIN = 0      # Minimum LED brightness (0-255)
 
 
 def rssi_to_brightness(rssi: float) -> int:
-    """Convert RSSI (dBm) to LED brightness (0-255)."""
+    """Convert RSSI (dBm) to LED brightness (LED_MIN to LED_MAX)."""
     # Clamp RSSI to our range
     rssi = max(RSSI_MIN, min(RSSI_MAX, rssi))
-    # Linear interpolation: -120 -> 0, -50 -> 255
-    brightness = int((rssi - RSSI_MIN) / (RSSI_MAX - RSSI_MIN) * 255)
+    # Linear interpolation: RSSI_MIN -> LED_MIN, RSSI_MAX -> LED_MAX
+    brightness = int((rssi - RSSI_MIN) / (RSSI_MAX - RSSI_MIN) * (LED_MAX - LED_MIN) + LED_MIN)
     return brightness
 
 
