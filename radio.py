@@ -33,6 +33,19 @@ RADIO_FREQ_MHZ = 915.0  # Use 868.0 for EU, 915.0 for US
 CS_PIN = board.D24  # Chip select (GPIO 24) - use a regular GPIO, not CE0/CE1
 RESET_PIN = board.D25  # Reset (GPIO 25)
 
+# RSSI to brightness mapping
+RSSI_MAX = -50   # Strong signal -> full brightness (255)
+RSSI_MIN = -100  # Weak signal (RFM9x sensitivity limit: -120) -> LED off (0)
+
+
+def rssi_to_brightness(rssi: float) -> int:
+    """Convert RSSI (dBm) to LED brightness (0-255)."""
+    # Clamp RSSI to our range
+    rssi = max(RSSI_MIN, min(RSSI_MAX, rssi))
+    # Linear interpolation: -120 -> 0, -50 -> 255
+    brightness = int((rssi - RSSI_MIN) / (RSSI_MAX - RSSI_MIN) * 255)
+    return brightness
+
 
 def setup_radio():
     """Initialize the RFM9x radio module."""
@@ -65,13 +78,14 @@ def receive_messages(rfm9x, led):
     while True:
         packet = rfm9x.receive(timeout=5.0)
         if packet is not None:
-            led.flash(255, 0, 0, 0.5)  # Flash red for 500ms
+            rssi = rfm9x.last_rssi
+            brightness = rssi_to_brightness(rssi)
+            led.flash(brightness, 0, 0, 0.5)  # Flash red, brightness based on RSSI
             try:
                 message = packet.decode("utf-8")
-                rssi = rfm9x.last_rssi
-                print(f"Received: {message} (RSSI: {rssi} dB)")
+                print(f"Received: {message} (RSSI: {rssi} dB, brightness: {brightness})")
             except UnicodeDecodeError:
-                print(f"Received raw bytes: {packet}")
+                print(f"Received raw bytes: {packet} (RSSI: {rssi} dB)")
         else:
             print("No message received, still listening...")
 
@@ -83,19 +97,21 @@ def main():
 
     mode = sys.argv[1].lower()
     rfm9x = setup_radio()
-    led = RgbLed(red_bcm=17, green_bcm=27, blue_bcm=22, common_anode=True)
+    led = None
 
     try:
         if mode == "send":
             send_messages(rfm9x)
         elif mode == "receive":
+            led = RgbLed(red_bcm=17, green_bcm=27, blue_bcm=22, common_anode=True)
             receive_messages(rfm9x, led)
         else:
             print(f"Unknown mode: {mode}")
             print("Use 'send' or 'receive'")
             sys.exit(1)
     finally:
-        led.close()
+        if led:
+            led.close()
 
 
 if __name__ == "__main__":
