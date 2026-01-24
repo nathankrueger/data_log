@@ -14,6 +14,7 @@ from led import RgbLed
 from sensors import BME280Temperature, Sensor
 
 SAMPLE_FLASH_S = 0.2
+SAVING_FILE_S = 0.5
 
 
 class DataLogger:
@@ -25,6 +26,7 @@ class DataLogger:
         flush_interval: int = 10,
         led: RgbLed | None = None,
         rec_sample_color: tuple[int, int, int] = (0, 0, 255),
+        saving_file_color: tuple[int, int, int] = (15, 0, 255),
     ):
         """
         Initialize the data logger.
@@ -36,6 +38,7 @@ class DataLogger:
             flush_interval: Number of samples before flushing to disk
             led: Optional RgbLed instance for visual feedback
             rec_sample_color: RGB color to flash when recording a sample
+            saving_file_color: RGB color to flash when flushing to disk
         """
         self.sensors = sensors
         self.csv_file = csv_file
@@ -43,6 +46,7 @@ class DataLogger:
         self.flush_interval = flush_interval
         self.led = led
         self.rec_sample_color = rec_sample_color
+        self.saving_file_color = saving_file_color
         self._buffer: list[list] = []
         self._sample_count = 0
 
@@ -53,6 +57,8 @@ class DataLogger:
 
     def _flush(self, file_handle, writer):
         """Flush buffered samples to disk."""
+        if self.led:
+            self.led.flash(*self.saving_file_color, SAVING_FILE_S)
         for row in self._buffer:
             writer.writerow(row)
         file_handle.flush()
@@ -120,6 +126,10 @@ if __name__ == "__main__":
     with open(args.config) as f:
         config = json.load(f)
 
+    running_color = tuple(config.get("running_color", [0, 255, 0]))
+    rec_sample_color = tuple(config.get("rec_sample_color", [0, 0, 255]))
+    saving_file_color = tuple(config.get("saving_file_color", [15, 0, 255]))
+
     # Initialize LED
     led = RgbLed(
         red_bcm=config["led_r_bcm"],
@@ -127,9 +137,6 @@ if __name__ == "__main__":
         blue_bcm=config["led_b_bcm"],
         common_anode=config["led_common_anode"],
     )
-
-    running_color = tuple(config.get("running_color", [0, 255, 0]))
-    rec_sample_color = tuple(config.get("rec_sample_color", [0, 0, 255]))
 
     # Set running color
     led.set_base_color(*running_color)
@@ -149,6 +156,7 @@ if __name__ == "__main__":
         flush_interval=args.flush_interval,
         led=led,
         rec_sample_color=rec_sample_color,
+        saving_file_color=saving_file_color,
     )
 
     logger.init_sensors()

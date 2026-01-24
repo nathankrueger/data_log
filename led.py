@@ -8,6 +8,8 @@ class RgbLed:
     def __init__(self, red_bcm: int, green_bcm: int, blue_bcm: int, common_anode: bool = True):
         self._led = RGBLED(red=red_bcm, green=green_bcm, blue=blue_bcm, active_high=not common_anode)
         self._base_color: tuple[int, int, int] = (0, 0, 0)
+        self._flash_gen = 0
+        self._flash_lock = threading.Lock()
 
     def set_rgb(self, r: int, g: int, b: int) -> None:
         """Sets the LED color using 0-255 values for R, G, and B."""
@@ -19,17 +21,22 @@ class RgbLed:
         self.set_rgb(r, g, b)
 
     def flash(self, r: int, g: int, b: int, duration: float) -> None:
-        """Flash a color for duration seconds, then restore previous color. Non-blocking."""
-        # Read current state before flashing
-        current = self._led.color
-        prev_r = int(current[0] * 255)
-        prev_g = int(current[1] * 255)
-        prev_b = int(current[2] * 255)
+        """Flash a color for duration seconds, then restore base color. Non-blocking.
+
+        If a new flash is requested while one is in progress, the newer flash
+        takes priority and the older flash's restoration is cancelled.
+        """
+        with self._flash_lock:
+            self._flash_gen += 1
+            my_gen = self._flash_gen
 
         def _flash():
             self.set_rgb(r, g, b)
             sleep(duration)
-            self.set_rgb(prev_r, prev_g, prev_b)
+            with self._flash_lock:
+                # Only restore if no newer flash has started
+                if self._flash_gen == my_gen:
+                    self.set_rgb(*self._base_color)
 
         thread = threading.Thread(target=_flash, daemon=True)
         thread.start()
