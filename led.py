@@ -19,11 +19,17 @@ class RgbLed:
         self.set_rgb(r, g, b)
 
     def flash(self, r: int, g: int, b: int, duration: float) -> None:
-        """Flash a color for duration seconds, then return to base color. Non-blocking."""
+        """Flash a color for duration seconds, then restore previous color. Non-blocking."""
+        # Read current state before flashing
+        current = self._led.color
+        prev_r = int(current[0] * 255)
+        prev_g = int(current[1] * 255)
+        prev_b = int(current[2] * 255)
+
         def _flash():
             self.set_rgb(r, g, b)
             sleep(duration)
-            self.set_rgb(*self._base_color)
+            self.set_rgb(prev_r, prev_g, prev_b)
 
         thread = threading.Thread(target=_flash, daemon=True)
         thread.start()
