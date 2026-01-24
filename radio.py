@@ -35,7 +35,7 @@ RESET_PIN = board.D25  # Reset (GPIO 25)
 
 # RSSI to brightness mapping
 RSSI_MAX = -50   # Strong signal -> LED_MAX brightness
-RSSI_MIN = -100  # Weak signal (RFM9x sensitivity limit: -120) -> LED_MIN brightness
+RSSI_MIN = -120  # Weak signal (RFM9x sensitivity limit: -120) -> LED_MIN brightness
 LED_MAX = 50     # Maximum LED brightness (0-255)
 LED_MIN = 0      # Minimum LED brightness (0-255)
 
