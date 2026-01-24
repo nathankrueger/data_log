@@ -33,4 +33,7 @@ sudo systemctl start data_log.service
 - Check status: `sudo systemctl status data_log.service`
 - View logs: `journalctl -u data_log.service`
 - Stop service: `sudo systemctl stop data_log.service`
+- Start service: `sudo systemctl start data_log.service`
+- Restart service: `sudo systemctl restart data_log.service`
 - Disable on boot: `sudo systemctl disable data_log.service`
+- Refresh service: `systemctl daemon-reload`
