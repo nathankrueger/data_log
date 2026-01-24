@@ -28,15 +28,18 @@ import adafruit_rfm9x
 
 # Configuration
 RADIO_FREQ_MHZ = 915.0  # Use 868.0 for EU, 915.0 for US
-CS_PIN = digitalio.DigitalInOut(board.CE1)  # Chip select (GPIO 7)
-RESET_PIN = digitalio.DigitalInOut(board.D25)  # Reset (GPIO 25)
+CS_PIN = board.D24  # Chip select (GPIO 24) - use a regular GPIO, not CE0/CE1
+RESET_PIN = board.D25  # Reset (GPIO 25)
 
 
 def setup_radio():
     """Initialize the RFM9x radio module."""
     spi = busio.SPI(board.SCK, MOSI=board.MOSI, MISO=board.MISO)
 
-    rfm9x = adafruit_rfm9x.RFM9x(spi, CS_PIN, RESET_PIN, RADIO_FREQ_MHZ)
+    cs = digitalio.DigitalInOut(CS_PIN)
+    reset = digitalio.DigitalInOut(RESET_PIN)
+
+    rfm9x = adafruit_rfm9x.RFM9x(spi, cs, reset, RADIO_FREQ_MHZ)
     rfm9x.tx_power = 23  # Max power (range: 5-23 dBm)
 
     print(f"Radio initialized at {RADIO_FREQ_MHZ} MHz")
