@@ -5,6 +5,7 @@ import argparse
 import csv
 import time
 from datetime import datetime
+from pathlib import Path
 from typing import Callable, Union
 
 from bme280 import init_bme280, c_to_f
@@ -42,6 +43,7 @@ class DataLogger:
 
     def run(self):
         """Start the data logging loop."""
+        Path(self.csv_file).parent.mkdir(parents=True, exist_ok=True)
         with open(self.csv_file, "w", newline="") as f:
             writer = csv.writer(f)
             writer.writerow(["timestamp", "value"])
