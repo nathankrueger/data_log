@@ -27,6 +27,7 @@ import digitalio
 import adafruit_rfm9x
 
 from led import RgbLed
+from sensors import BME280Temperature
 
 # Configuration
 RADIO_FREQ_MHZ = 915.0  # Use 868.0 for EU, 915.0 for US
@@ -64,10 +65,13 @@ def setup_radio():
 
 
 def send_messages(rfm9x):
-    """Continuously send 'Hello World' messages."""
+    """Continuously send messages with BME280 temperature."""
     counter = 0
+    bme = BME280Temperature()
+    bme.init()
     while True:
-        message = f"Hello World #{counter}"
+        temp = bme.read()
+        message = f"Temp: {temp:.1f}F #{counter}"
         print(f"Sending: {message}")
         rfm9x.send(bytes(message, "utf-8"))
         counter += 1
