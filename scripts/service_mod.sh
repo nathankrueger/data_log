@@ -2,7 +2,7 @@
 # service_mod.sh - Manage systemd services from the services/ folder
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-SERVICES_DIR="$SCRIPT_DIR/services"
+SERVICES_DIR="$SCRIPT_DIR/../services"
 
 usage() {
     cat << EOF
