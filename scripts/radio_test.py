@@ -16,14 +16,14 @@ Wiring (RFM9x to Pi):
     RST  -> GPIO 25 (configurable)
 
 Usage:
-    python3 radio.py send       # Run on transmitter Pi
-    python3 radio.py receive    # Run on receiver Pi
+    python3 radio_test.py -s    # Run on transmitter Pi
+    python3 radio_test.py -r    # Run on receiver Pi
 
 Requires:
     pip3 install adafruit-circuitpython-rfm9x
 """
 
-import sys
+import argparse
 import time
 
 from utils.led import RgbLed
@@ -71,11 +71,14 @@ def receive_messages(radio: RFM9xRadio, led: RgbLed) -> None:
 
 
 def main():
-    if len(sys.argv) < 2:
-        print("Usage: python3 radio.py [send|receive]")
-        sys.exit(1)
+    parser = argparse.ArgumentParser(
+        description="Simple LoRa radio communication demo using RFM9x module."
+    )
+    group = parser.add_mutually_exclusive_group(required=True)
+    group.add_argument("-s", "--send", action="store_true", help="Send messages")
+    group.add_argument("-r", "--receive", action="store_true", help="Receive messages")
+    args = parser.parse_args()
 
-    mode = sys.argv[1].lower()
     led = None
 
     # Create radio with default configuration
@@ -89,15 +92,11 @@ def main():
     try:
         radio.init()
 
-        if mode == "send":
+        if args.send:
             send_messages(radio)
-        elif mode == "receive":
+        else:
             led = RgbLed(red_bcm=17, green_bcm=27, blue_bcm=22, common_anode=True)
             receive_messages(radio, led)
-        else:
-            print(f"Unknown mode: {mode}")
-            print("Use 'send' or 'receive'")
-            sys.exit(1)
     finally:
         radio.close()
         if led:
