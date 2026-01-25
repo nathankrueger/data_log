@@ -1,5 +1,5 @@
 {
-    "node_id": "indoor-gateway",
+    "node_id": "pz2w1-indoor-gateway",
     "local_sensors": [
         {"class": "BME280TempPressureHumidity"}
     ],

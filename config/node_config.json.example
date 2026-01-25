@@ -1,10 +1,10 @@
 {
-    "node_id": "patio",
+    "node_id": "pz2w2-shop",
     "sensors": [
         {"class": "BME280TempPressureHumidity"},
         {"class": "MMA8452Accelerometer"}
     ],
-    "broadcast_interval_sec": 30,
+    "broadcast_interval_sec": 5,
     "lora": {
         "frequency_mhz": 915.0,
         "tx_power": 23,
