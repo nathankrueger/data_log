@@ -17,6 +17,8 @@ from .protocol import (
     SensorReading,
     build_lora_message,
     parse_lora_message,
+    build_lora_packets,
+    parse_lora_packet,
     # TCP protocol
     MSG_TYPE_DISCOVER,
     MSG_TYPE_SENSORS,
@@ -48,6 +50,8 @@ __all__ = [
     "SensorReading",
     "build_lora_message",
     "parse_lora_message",
+    "build_lora_packets",
+    "parse_lora_packet",
     # TCP protocol
     "MSG_TYPE_DISCOVER",
     "MSG_TYPE_SENSORS",

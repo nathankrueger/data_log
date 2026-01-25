@@ -19,6 +19,9 @@ hardware = [
     "pimoroni-bme280",
     "smbus2",
 ]
+dev = [
+    "pytest>=7.0",
+]
 
 [tool.setuptools.packages.find]
 where = ["."]
@@ -29,3 +32,7 @@ py-modules = [
     "node_broadcast",
     "gateway_server",
 ]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+python_files = ["test_*.py"]

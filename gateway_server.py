@@ -49,7 +49,7 @@ from utils.protocol import (
     build_error_message,
     build_sensors_response,
     make_sensor_id,
-    parse_lora_message,
+    parse_lora_packet,
     parse_tcp_message,
 )
 
@@ -186,7 +186,7 @@ class LoRaReceiver(threading.Thread):
         """Validate CRC, parse JSON, update sensor cache."""
         rssi = self._radio.get_last_rssi()
 
-        result = parse_lora_message(packet)
+        result = parse_lora_packet(packet)
         if result is None:
             logger.warning(f"Invalid LoRa packet (RSSI: {rssi} dB): {packet[:50]}...")
             return

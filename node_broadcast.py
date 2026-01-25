@@ -36,7 +36,7 @@ from pathlib import Path
 import sensors as sensors_module
 from radio import RFM9xRadio
 from sensors import Sensor
-from utils.protocol import SensorReading, build_lora_message
+from utils.protocol import SensorReading, build_lora_packets
 
 # Configure logging
 logging.basicConfig(
@@ -173,15 +173,23 @@ def broadcast_loop(
             readings = read_all_sensors(sensors)
 
             if readings:
-                # Build and send message
-                message = build_lora_message(node_id, readings)
-                success = radio.send(message)
+                # Build compact packets (auto-splits if too large)
+                packets = build_lora_packets(node_id, readings)
 
                 broadcast_count += 1
-                if success:
+                all_success = True
+                total_bytes = 0
+
+                for i, packet in enumerate(packets):
+                    success = radio.send(packet)
+                    total_bytes += len(packet)
+                    if not success:
+                        all_success = False
+
+                if all_success:
                     logger.info(
                         f"Broadcast #{broadcast_count}: {len(readings)} readings, "
-                        f"{len(message)} bytes"
+                        f"{len(packets)} packet(s), {total_bytes} bytes"
                     )
                 else:
                     logger.warning(f"Broadcast #{broadcast_count} failed")

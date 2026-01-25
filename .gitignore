@@ -1,7 +1,9 @@
 **/*__pycache__/*
+.pytest_cache
 logs/*
 *.egg-info
 .claude
+.venv
 
 # Config files (use .example as templates)
 config/*.json

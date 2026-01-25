@@ -1,11 +1,10 @@
 import threading
 from time import sleep
 
-from gpiozero import RGBLED
-
 
 class RgbLed:
     def __init__(self, red_bcm: int, green_bcm: int, blue_bcm: int, common_anode: bool = True):
+        from gpiozero import RGBLED
         self._led = RGBLED(red=red_bcm, green=green_bcm, blue=blue_bcm, active_high=not common_anode)
         self._base_color: tuple[int, int, int] = (0, 0, 0)
         self._flash_gen = 0
