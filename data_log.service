@@ -5,7 +5,7 @@ After=network.target
 [Service]
 Type=simple
 ExecStartPre=/bin/sleep 15
-ExecStart=/bin/bash -c '/home/nkrueger/dev/data_log/.venv/bin/python /home/nkrueger/dev/data_log/data_log.py --csv_file=/home/nkrueger/dev/data_log/logs/$(date +%%d_%%m_%%Y__%%H_%%M_%%S)___datalog.csv'
+ExecStart=/bin/bash -c '/home/nkrueger/dev/data_log/.venv/bin/python /home/nkrueger/dev/data_log/scripts/logger.py --csv_file=/home/nkrueger/dev/data_log/logs/$(date +%%d_%%m_%%Y__%%H_%%M_%%S)___datalog.csv'
 User=nkrueger
 WorkingDirectory=/home/nkrueger/dev/data_log
 

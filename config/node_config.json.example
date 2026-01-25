@@ -1,0 +1,14 @@
+{
+    "node_id": "patio",
+    "sensors": [
+        {"class": "BME280TempPressureHumidity"},
+        {"class": "MMA8452Accelerometer"}
+    ],
+    "broadcast_interval_sec": 30,
+    "lora": {
+        "frequency_mhz": 915.0,
+        "tx_power": 23,
+        "cs_pin": 24,
+        "reset_pin": 25
+    }
+}

@@ -51,18 +51,25 @@ class RgbLed:
 
 
 if __name__ == "__main__":
+    dly = 1
     led = RgbLed(red_bcm=17, green_bcm=27, blue_bcm=22, common_anode=True)
     try:
         while True:
+            print("RED")
             led.set_rgb(255, 0, 0)
-            sleep(1)
+            sleep(dly)
+
+            print("GREEN")
             led.set_rgb(0, 255, 0)
             sleep(1)
+
+            print("BLUE")
             led.set_rgb(0, 0, 255)
             sleep(1)
+
+            print("PURPLE")
             led.set_rgb(15, 0, 255)
             sleep(1)
-            led.off()
-            sleep(1)
+
     except KeyboardInterrupt:
         led.close()

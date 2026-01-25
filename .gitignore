@@ -1,2 +1,8 @@
-__pycache__/*
+**/*__pycache__/*
 logs/*
+*.egg-info
+.claude
+
+# Config files (use .example as templates)
+config/*.json
+!config/*.json.example

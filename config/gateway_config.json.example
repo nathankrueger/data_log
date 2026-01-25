@@ -1,0 +1,14 @@
+{
+    "node_id": "indoor-gateway",
+    "local_sensors": [
+        {"class": "BME280TempPressureHumidity"}
+    ],
+    "local_sensor_interval_sec": 5,
+    "tcp_port": 5000,
+    "lora": {
+        "enabled": true,
+        "frequency_mhz": 915.0,
+        "cs_pin": 24,
+        "reset_pin": 25
+    }
+}
