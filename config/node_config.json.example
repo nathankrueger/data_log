@@ -1,7 +1,7 @@
 {
     "node_id": "pz2w2-shop",
     "sensors": [
-        {"class": "BME280TempPressureHumidity"},
+        {"class": "BME280TempPressureHumidity", "config": {"smbus": 1}},
         {"class": "MMA8452Accelerometer"}
     ],
     "broadcast_interval_sec": 5,

@@ -5,5 +5,8 @@
     "led_common_anode": true,
     "running_color": [0, 255, 0],
     "rec_sample_color": [0, 0, 255],
-    "saving_file_color": [15, 0, 255]
+    "saving_file_color": [15, 0, 255],
+    "sensors": [
+        {"class": "BME280TempPressureHumidity", "config": {"smbus": 1}}
+    ]
 }
