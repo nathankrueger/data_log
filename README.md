@@ -1,34 +1,62 @@
-# Data Logger
+# Data Log
+
+Sensor data collection and LoRa radio communication for Raspberry Pi.
+
+## Architecture
+
+```
+[Sensor Node]  --LoRa-->  [Gateway]  <--TCP-->  [Pi5 Dashboard]
+   (Pi Zero)              (Pi Zero)              (rpi_server_cockpit)
+```
+
+- **Sensor Node** (`node_broadcast.py`): Reads sensors, broadcasts via LoRa
+- **Gateway** (`gateway_server.py`): Receives LoRa, serves TCP clients (default: port 5001)
 
 ## Setup
 
-1. Make the install script executable and run it:
 ```bash
 chmod +x install.sh
 source install.sh
 ```
 
-## Systemd Service
+## Configuration
 
-To run the data logger automatically on boot:
+Copy example configs and edit for your setup:
+```bash
+cp config/node_config.json.example config/node_config.json
+cp config/gateway_config.json.example config/gateway_config.json
+```
 
-1. Copy the service file:
+Key settings:
+- `node_id`: Unique identifier for this device
+- `sensors`: List of sensor classes to read
+- `tcp_port`: Gateway TCP port (default 5001)
+- `lora`: Radio frequency, pins, etc.
+
+## Running
+
+**Sensor Node:**
+```bash
+./scripts/launch_node_broadcast.sh
+```
+
+**Gateway:**
+```bash
+./scripts/launch_gateway_server.sh
+```
+
+## Systemd Service (CSV Logger)
+
+The `data_log.service` runs the CSV logger on boot if so configured:
+
 ```bash
 sudo cp data_log.service /etc/systemd/system/
-```
-
-2. Reload systemd and enable the service:
-```bash
 sudo systemctl daemon-reload
 sudo systemctl enable data_log.service
-```
-
-3. Start the service:
-```bash
 sudo systemctl start data_log.service
 ```
 
-### Useful Commands
+### Useful Service Commands
 
 - Check status: `sudo systemctl status data_log.service`
 - View logs: `journalctl -u data_log.service`

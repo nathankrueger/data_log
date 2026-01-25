@@ -12,7 +12,7 @@ Configuration is loaded from config/gateway_config.json:
         {"class": "BME280TempPressureHumidity"}
     ],
     "local_sensor_interval_sec": 5,
-    "tcp_port": 5000,
+    "tcp_port": 5001,
     "lora": {
         "enabled": true,
         "frequency_mhz": 915.0,
@@ -498,7 +498,7 @@ async def run_gateway(config: dict) -> None:
             local_reader.start()
 
     # Start TCP server
-    tcp_port = config.get("tcp_port", 5000)
+    tcp_port = config.get("tcp_port", 5001)
     tcp_server = GatewayTCPServer(cache, port=tcp_port)
 
     try:

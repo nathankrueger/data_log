@@ -4,7 +4,7 @@
         {"class": "BME280TempPressureHumidity"}
     ],
     "local_sensor_interval_sec": 5,
-    "tcp_port": 5000,
+    "tcp_port": 5001,
     "lora": {
         "enabled": true,
         "frequency_mhz": 915.0,
