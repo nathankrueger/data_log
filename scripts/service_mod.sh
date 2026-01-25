@@ -14,12 +14,16 @@ OPTIONS:
     -i, --install SERVICE_NAME      Install a service from services/ folder
     -u, --uninstall SERVICE_NAME    Uninstall and fully remove a service
     -l, --list                      List all services in services/ folder and their status
+    -f, --follow SERVICE_NAME       Follow service logs in real-time (Ctrl+C to stop)
+    -b, --logs SERVICE_NAME         Show service logs since last boot
     -h, --help                      Show this help message
 
 EXAMPLES:
     $(basename "$0") --install gateway_server.service
     $(basename "$0") --uninstall data_log.service
     $(basename "$0") --list
+    $(basename "$0") --follow gateway_server
+    $(basename "$0") --logs gateway_server
 
 EOF
 }
@@ -120,27 +124,27 @@ install_service() {
 
 uninstall_service() {
     local service_name="$1"
-    
+
     # Add .service extension if not provided
     if [[ ! "$service_name" =~ \.service$ ]]; then
         service_name="${service_name}.service"
     fi
-    
+
     if [ ! -f "/etc/systemd/system/$service_name" ]; then
         echo "Error: Service not installed: $service_name"
         exit 1
     fi
-    
+
     echo "Uninstalling service: $service_name"
-    
+
     # Stop service
     echo "Stopping service..."
     sudo systemctl stop "$service_name"
-    
+
     # Disable service
     echo "Disabling service..."
     sudo systemctl disable "$service_name"
-    
+
     # Remove service file
     echo "Removing service file..."
     sudo rm /etc/systemd/system/"$service_name"
@@ -148,19 +152,45 @@ uninstall_service() {
         echo "Error: Failed to remove service file"
         exit 1
     fi
-    
+
     # Reload systemd
     sudo systemctl daemon-reload
     if [ $? -ne 0 ]; then
         echo "Error: Failed to reload systemd"
         exit 1
     fi
-    
+
     # Reset failed state if any
     sudo systemctl reset-failed "$service_name" 2>/dev/null
-    
+
     echo ""
     echo "Service uninstalled successfully!"
+}
+
+follow_logs() {
+    local service_name="$1"
+
+    # Add .service extension if not provided
+    if [[ ! "$service_name" =~ \.service$ ]]; then
+        service_name="${service_name}.service"
+    fi
+
+    echo "Following logs for $service_name (Ctrl+C to stop)..."
+    echo ""
+    journalctl -u "$service_name" -f
+}
+
+show_logs() {
+    local service_name="$1"
+
+    # Add .service extension if not provided
+    if [[ ! "$service_name" =~ \.service$ ]]; then
+        service_name="${service_name}.service"
+    fi
+
+    echo "Logs for $service_name since last boot:"
+    echo ""
+    journalctl -u "$service_name" -b
 }
 
 # Main script logic
@@ -194,6 +224,24 @@ case "$1" in
             exit 1
         fi
         uninstall_service "$2"
+        exit 0
+        ;;
+    -f|--follow)
+        if [ -z "$2" ]; then
+            echo "Error: Service name required for follow"
+            usage
+            exit 1
+        fi
+        follow_logs "$2"
+        exit 0
+        ;;
+    -b|--logs)
+        if [ -z "$2" ]; then
+            echo "Error: Service name required for logs"
+            usage
+            exit 1
+        fi
+        show_logs "$2"
         exit 0
         ;;
     *)
