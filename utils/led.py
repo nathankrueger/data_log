@@ -51,7 +51,7 @@ class RgbLed:
 
 if __name__ == "__main__":
     dly = 1
-    led = RgbLed(red_bcm=17, green_bcm=27, blue_bcm=22, common_anode=True)
+    led = RgbLed(red_bcm=17, green_bcm=22, blue_bcm=27, common_anode=True)
     try:
         while True:
             print("RED")
