@@ -46,15 +46,6 @@ def format_rate(bytes_per_sec: float) -> str:
         return f"{bytes_per_sec:.2f} B/s"
 
 
-def format_bitrate(bytes_per_sec: float) -> str:
-    """Format transfer rate as bits per second."""
-    bits_per_sec = bytes_per_sec * 8
-    if bits_per_sec >= 1_000_000:
-        return f"{bits_per_sec / 1_000_000:.2f} Mbps"
-    elif bits_per_sec >= 1_000:
-        return f"{bits_per_sec / 1_000:.2f} Kbps"
-    else:
-        return f"{bits_per_sec:.2f} bps"
 
 
 def create_radio(radio_type: str) -> Radio:
@@ -93,7 +84,7 @@ def run_server(radio: Radio) -> None:
             num_packets = struct.unpack(">I", packet[2:6])[0]
             print(f"Client connected, expecting {num_packets} packets")
             print("-" * 60)
-            print(f"{'Interval':<15} {'Transfer':<15} {'Bitrate':<15} {'RSSI':<10}")
+            print(f"{'Interval':<15} {'Transfer':<15} {'Rate':<15} {'RSSI':<10}")
             print("-" * 60)
 
             # Receive data packets
@@ -128,7 +119,7 @@ def run_server(radio: Radio) -> None:
                     avg_rssi = rssi_sum / packets_received if packets_received > 0 else 0
 
                     interval_str = f"{elapsed - 1:.1f}-{elapsed:.1f} sec"
-                    print(f"{interval_str:<15} {format_bytes(interval_bytes):<15} {format_bitrate(interval_rate):<15} {avg_rssi:.0f} dBm")
+                    print(f"{interval_str:<15} {format_bytes(interval_bytes):<15} {format_rate(interval_rate):<15} {avg_rssi:.0f} dBm")
 
                     interval_start = now
                     interval_bytes = 0
@@ -145,7 +136,7 @@ def run_server(radio: Radio) -> None:
             print("-" * 60)
             print(f"Duration:        {total_time:.2f} seconds")
             print(f"Transfer:        {format_bytes(bytes_received)}")
-            print(f"Bitrate:         {format_bitrate(avg_rate)}")
+            print(f"Rate:         {format_rate(avg_rate)}")
             print(f"Packets:         {packets_received}/{num_packets} ({packet_loss:.1f}% loss)")
             print(f"Avg RSSI:        {avg_rssi:.0f} dBm")
             print("-" * 60)
@@ -174,7 +165,7 @@ def run_client(radio: Radio, duration: int = 10, num_packets: int | None = None)
     # Generate test data (fill packet with incrementing bytes)
     test_data = bytes([i % 256 for i in range(PACKET_SIZE)])
 
-    print(f"{'Interval':<15} {'Transfer':<15} {'Bitrate':<15}")
+    print(f"{'Interval':<15} {'Transfer':<15} {'Rate':<15}")
     print("-" * 60)
 
     # Send data packets
@@ -201,7 +192,7 @@ def run_client(radio: Radio, duration: int = 10, num_packets: int | None = None)
             interval_rate = interval_bytes / (now - interval_start)
 
             interval_str = f"{elapsed - 1:.1f}-{elapsed:.1f} sec"
-            print(f"{interval_str:<15} {format_bytes(interval_bytes):<15} {format_bitrate(interval_rate):<15}")
+            print(f"{interval_str:<15} {format_bytes(interval_bytes):<15} {format_rate(interval_rate):<15}")
 
             interval_start = now
             interval_bytes = 0
@@ -232,7 +223,7 @@ def run_client(radio: Radio, duration: int = 10, num_packets: int | None = None)
     print("-" * 60)
     print(f"Duration:        {total_time:.2f} seconds")
     print(f"Transfer:        {format_bytes(bytes_sent)}")
-    print(f"Bitrate:         {format_bitrate(avg_rate)}")
+    print(f"Rate:         {format_rate(avg_rate)}")
     print(f"Packets sent:    {packets_sent}")
     if packets_received > 0:
         print(f"Packets recv:    {packets_received} ({packet_loss:.1f}% loss)")
@@ -243,16 +234,10 @@ def main():
     parser = argparse.ArgumentParser(
         description="Radio bandwidth test tool (like iperf3 for radios)"
     )
-    parser.add_argument("mode", choices=["server", "client", "s", "c"],
-                        help="Run as server (receiver) or client (sender)")
-    parser.add_argument("-t", "--time", type=int, default=10,
-                        help="Test duration in seconds (default: 10)")
-    parser.add_argument("-n", "--num", type=int, default=None,
-                        help="Number of packets to send")
-    parser.add_argument("-r", "--radio", type=str, default="rfm9x",
-                        choices=["rfm9x"],
-                        help="Radio type to use (default: rfm9x)")
-
+    parser.add_argument("mode", choices=["server", "client", "s", "c"], help="Run as server (receiver) or client (sender)")
+    parser.add_argument("-t", "--time", type=int, default=60, help="Test duration in seconds (default: 60)")
+    parser.add_argument("-n", "--num", type=int, default=None, help="Number of packets to send")
+    parser.add_argument("-r", "--radio", type=str, default="rfm9x", choices=["rfm9x"], help="Radio type to use (default: rfm9x)")
     args = parser.parse_args()
 
     radio = create_radio(args.radio)
