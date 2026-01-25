@@ -1,0 +1,13 @@
+[Unit]
+Description=Radio Temperature Sender
+After=network.target
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sleep 15
+ExecStart=/bin/bash -c '/home/nkrueger/dev/data_log/.venv/bin/python /home/nkrueger/dev/data_log/radio.py send'
+User=nkrueger
+WorkingDirectory=/home/nkrueger/dev/data_log
+
+[Install]
+WantedBy=multi-user.target
