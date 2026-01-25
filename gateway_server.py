@@ -1,18 +1,18 @@
 #!/usr/bin/env python3
 """
-Indoor gateway server.
+Indoor gateway - collects sensor data and POSTs to Pi5 dashboard.
 
 Receives sensor data via LoRa from outdoor nodes, optionally reads local sensors,
-and serves multiple Pi5 dashboard clients via TCP.
+and POSTs all data to the Pi5 dashboard's /api/timeseries/ingest endpoint.
 
 Configuration is loaded from config/gateway_config.json:
 {
     "node_id": "indoor-gateway",
+    "dashboard_url": "http://192.168.1.100:5000",
     "local_sensors": [
         {"class": "BME280TempPressureHumidity"}
     ],
     "local_sensor_interval_sec": 5,
-    "tcp_port": 5001,
     "lora": {
         "enabled": true,
         "frequency_mhz": 915.0,
@@ -26,31 +26,23 @@ Usage:
 """
 
 import argparse
-import asyncio
-import inspect
 import json
 import logging
+import inspect
 import sys
 import threading
 import time
 from pathlib import Path
+from urllib.request import Request, urlopen
+from urllib.error import URLError, HTTPError
 
 import sensors as sensors_module
 from radio import RFM9xRadio
 from sensors import Sensor
 from utils.protocol import (
-    MSG_TYPE_DATA,
-    MSG_TYPE_DISCOVER,
-    MSG_TYPE_SUBSCRIBE,
-    DataReading,
-    SensorInfo,
     SensorReading,
-    build_data_message,
-    build_error_message,
-    build_sensors_response,
     make_sensor_id,
     parse_lora_packet,
-    parse_tcp_message,
 )
 
 # Configure logging
@@ -63,89 +55,124 @@ logger = logging.getLogger(__name__)
 
 
 # =============================================================================
-# Sensor Cache
+# Dashboard Client
 # =============================================================================
 
 
-class SensorCache:
-    """
-    Thread-safe cache for sensor readings from LoRa and local sources.
+class DashboardClient:
+    """HTTP client for posting sensor data to the Pi5 dashboard."""
 
-    Stores readings indexed by sensor_id, along with metadata for discovery.
-    """
+    def __init__(self, base_url: str, gateway_id: str, timeout: float = 10.0):
+        """
+        Initialize the dashboard client.
 
-    def __init__(self, gateway_id: str):
+        Args:
+            base_url: Dashboard URL (e.g., "http://192.168.1.100:5000")
+            gateway_id: Gateway identifier to include with all data
+            timeout: HTTP request timeout in seconds
+        """
+        self._base_url = base_url.rstrip('/')
         self._gateway_id = gateway_id
+        self._timeout = timeout
+        self._ingest_url = f"{self._base_url}/api/timeseries/ingest"
+
+    def post_readings(self, readings: list[dict]) -> bool:
+        """
+        POST sensor readings to the dashboard.
+
+        Args:
+            readings: List of reading dicts with id, name, units, value, timestamp
+
+        Returns:
+            True if successful, False otherwise
+        """
+        if not readings:
+            return True
+
+        payload = {
+            "gateway": self._gateway_id,
+            "datapoints": readings
+        }
+
+        try:
+            data = json.dumps(payload).encode('utf-8')
+            req = Request(
+                self._ingest_url,
+                data=data,
+                headers={'Content-Type': 'application/json'},
+                method='POST'
+            )
+            with urlopen(req, timeout=self._timeout) as response:
+                result = json.loads(response.read().decode('utf-8'))
+                if result.get('success'):
+                    logger.debug(f"Posted {result.get('count', len(readings))} readings")
+                    return True
+                else:
+                    logger.error(f"Dashboard rejected data: {result.get('error')}")
+                    return False
+        except HTTPError as e:
+            logger.error(f"HTTP error posting to dashboard: {e.code} {e.reason}")
+            return False
+        except URLError as e:
+            logger.error(f"Connection error posting to dashboard: {e.reason}")
+            return False
+        except Exception as e:
+            logger.error(f"Error posting to dashboard: {e}")
+            return False
+
+
+# =============================================================================
+# Sensor Data Collector
+# =============================================================================
+
+
+class SensorDataCollector:
+    """
+    Collects sensor readings from LoRa and local sources, posts to dashboard.
+    """
+
+    def __init__(self, gateway_id: str, dashboard_client: DashboardClient):
+        self._gateway_id = gateway_id
+        self._dashboard_client = dashboard_client
         self._lock = threading.Lock()
-        # sensor_id -> (SensorInfo, latest DataReading)
-        self._sensors: dict[str, tuple[SensorInfo, DataReading | None]] = {}
-        # Callbacks to notify when data updates
-        self._update_callbacks: list[callable] = []
+        # Buffer readings for batch posting
+        self._pending_readings: list[dict] = []
 
-    def register_callback(self, callback: callable) -> None:
-        """Register a callback to be called when data updates."""
-        with self._lock:
-            self._update_callbacks.append(callback)
-
-    def unregister_callback(self, callback: callable) -> None:
-        """Unregister an update callback."""
-        with self._lock:
-            if callback in self._update_callbacks:
-                self._update_callbacks.remove(callback)
-
-    def update_readings(
-        self, node_id: str, readings: list[SensorReading], is_local: bool = False
-    ) -> None:
+    def add_readings(self, node_id: str, readings: list[SensorReading], is_local: bool = False) -> None:
         """
-        Update cache with new sensor readings.
+        Add sensor readings to the pending buffer and post to dashboard.
 
-        Creates SensorInfo for new sensors, updates DataReadings for existing ones.
+        Args:
+            node_id: ID of the node that produced the readings
+            readings: List of SensorReading objects
+            is_local: True if readings are from local sensors (vs LoRa)
         """
-        data_readings = []
+        datapoints = []
 
-        with self._lock:
-            for reading in readings:
-                sensor_id = make_sensor_id(node_id, reading.sensor_class, reading.name)
+        for reading in readings:
+            sensor_id = make_sensor_id(node_id, reading.sensor_class, reading.name)
 
-                # Create or update sensor info
-                info = SensorInfo(
-                    sensor_id=sensor_id,
-                    node_id=node_id,
-                    name=reading.name,
-                    units=reading.units,
-                    sensor_class=reading.sensor_class,
-                    is_local=is_local,
-                )
+            # Build display name: "NodeId SensorClass ReadingName"
+            # e.g., "Patio BME280 Temperature"
+            display_name = f"{node_id} {reading.name}"
 
-                # Create data reading
-                data_reading = DataReading(
-                    sensor_id=sensor_id,
-                    value=reading.value,
-                    timestamp=reading.timestamp,
-                )
+            datapoints.append({
+                "id": sensor_id,
+                "name": display_name,
+                "units": reading.units,
+                "value": reading.value,
+                "timestamp": reading.timestamp,
+                "category": "Local Sensors" if is_local else "Remote Sensors",
+                "tags": [node_id, reading.sensor_class.lower(), "local" if is_local else "lora"],
+            })
 
-                self._sensors[sensor_id] = (info, data_reading)
-                data_readings.append(data_reading)
-
-            # Copy callbacks to call outside lock
-            callbacks = list(self._update_callbacks)
-
-        # Notify subscribers (outside lock to avoid deadlocks)
-        for callback in callbacks:
-            try:
-                callback(data_readings)
-            except Exception as e:
-                logger.error(f"Callback error: {e}")
-
-    def get_all_sensors(self) -> list[SensorInfo]:
-        """Get metadata for all known sensors."""
-        with self._lock:
-            return [info for info, _ in self._sensors.values()]
-
-    def get_all_readings(self) -> list[DataReading]:
-        """Get latest readings for all sensors."""
-        with self._lock:
-            return [reading for _, reading in self._sensors.values() if reading]
+        # Post immediately
+        if datapoints:
+            success = self._dashboard_client.post_readings(datapoints)
+            if success:
+                logger.info(f"Posted {len(datapoints)} readings from '{node_id}'")
+            else:
+                logger.warning(f"Failed to post {len(datapoints)} readings from '{node_id}'")
 
     @property
     def gateway_id(self) -> str:
@@ -158,12 +185,12 @@ class SensorCache:
 
 
 class LoRaReceiver(threading.Thread):
-    """Background thread that receives LoRa packets and updates the cache."""
+    """Background thread that receives LoRa packets and forwards to collector."""
 
-    def __init__(self, radio: RFM9xRadio, cache: SensorCache):
+    def __init__(self, radio: RFM9xRadio, collector: SensorDataCollector):
         super().__init__(daemon=True)
         self._radio = radio
-        self._cache = cache
+        self._collector = collector
         self._running = False
 
     def run(self) -> None:
@@ -183,7 +210,7 @@ class LoRaReceiver(threading.Thread):
         self._running = False
 
     def _process_packet(self, packet: bytes) -> None:
-        """Validate CRC, parse JSON, update sensor cache."""
+        """Validate CRC, parse JSON, forward to collector."""
         rssi = self._radio.get_last_rssi()
 
         result = parse_lora_packet(packet)
@@ -196,7 +223,7 @@ class LoRaReceiver(threading.Thread):
             f"LoRa received from '{node_id}': {len(readings)} readings (RSSI: {rssi} dB)"
         )
 
-        self._cache.update_readings(node_id, readings, is_local=False)
+        self._collector.add_readings(node_id, readings, is_local=False)
 
 
 # =============================================================================
@@ -205,19 +232,19 @@ class LoRaReceiver(threading.Thread):
 
 
 class LocalSensorReader(threading.Thread):
-    """Background thread that reads local sensors and updates the cache."""
+    """Background thread that reads local sensors and forwards to collector."""
 
     def __init__(
         self,
         node_id: str,
         sensors: list[tuple[Sensor, str]],
-        cache: SensorCache,
+        collector: SensorDataCollector,
         interval_sec: float = 5.0,
     ):
         super().__init__(daemon=True)
         self._node_id = node_id
         self._sensors = sensors
-        self._cache = cache
+        self._collector = collector
         self._interval_sec = interval_sec
         self._running = False
 
@@ -232,7 +259,7 @@ class LocalSensorReader(threading.Thread):
             try:
                 readings = self._read_sensors()
                 if readings:
-                    self._cache.update_readings(
+                    self._collector.add_readings(
                         self._node_id, readings, is_local=True
                     )
             except Exception as e:
@@ -268,140 +295,6 @@ class LocalSensorReader(threading.Thread):
                 logger.error(f"Error reading local {class_name}: {e}")
 
         return readings
-
-
-# =============================================================================
-# TCP Server
-# =============================================================================
-
-
-class GatewayTCPServer:
-    """Multi-client TCP server handling discovery and data streaming."""
-
-    def __init__(self, cache: SensorCache, host: str = "0.0.0.0", port: int = 5000):
-        self._cache = cache
-        self._host = host
-        self._port = port
-        self._server = None
-
-    async def start(self) -> None:
-        """Start the TCP server."""
-        self._server = await asyncio.start_server(
-            self._handle_client, self._host, self._port
-        )
-        addr = self._server.sockets[0].getsockname()
-        logger.info(f"TCP server listening on {addr[0]}:{addr[1]}")
-
-        async with self._server:
-            await self._server.serve_forever()
-
-    async def stop(self) -> None:
-        """Stop the TCP server."""
-        if self._server:
-            self._server.close()
-            await self._server.wait_closed()
-
-    async def _handle_client(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
-        """Handle a single client connection."""
-        addr = writer.get_extra_info("peername")
-        logger.info(f"Client connected: {addr}")
-
-        try:
-            while True:
-                data = await reader.readline()
-                if not data:
-                    break  # Client disconnected
-
-                await self._process_message(data, reader, writer)
-
-        except asyncio.CancelledError:
-            pass
-        except Exception as e:
-            logger.error(f"Client {addr} error: {e}")
-        finally:
-            logger.info(f"Client disconnected: {addr}")
-            writer.close()
-            await writer.wait_closed()
-
-    async def _process_message(
-        self,
-        data: bytes,
-        reader: asyncio.StreamReader,
-        writer: asyncio.StreamWriter,
-    ) -> None:
-        """Process a single message from a client."""
-        message = parse_tcp_message(data)
-        if message is None:
-            writer.write(build_error_message("Invalid message format"))
-            await writer.drain()
-            return
-
-        msg_type = message.get("type")
-
-        if msg_type == MSG_TYPE_DISCOVER:
-            await self._handle_discover(writer)
-        elif msg_type == MSG_TYPE_SUBSCRIBE:
-            await self._handle_subscribe(reader, writer)
-        else:
-            writer.write(build_error_message(f"Unknown message type: {msg_type}"))
-            await writer.drain()
-
-    async def _handle_discover(self, writer: asyncio.StreamWriter) -> None:
-        """Handle a discover request."""
-        sensors = self._cache.get_all_sensors()
-        response = build_sensors_response(self._cache.gateway_id, sensors)
-        writer.write(response)
-        await writer.drain()
-        logger.info(f"Sent discovery response: {len(sensors)} sensors")
-
-    async def _handle_subscribe(
-        self, reader: asyncio.StreamReader, writer: asyncio.StreamWriter
-    ) -> None:
-        """Handle a subscribe request - stream data updates to client."""
-        addr = writer.get_extra_info("peername")
-        logger.info(f"Client {addr} subscribed to data stream")
-
-        # Create async queue for this client
-        queue: asyncio.Queue[list[DataReading]] = asyncio.Queue()
-
-        # Callback to push data to queue (called from other threads)
-        def on_data(readings: list[DataReading]) -> None:
-            try:
-                # Use call_soon_threadsafe since callback is from another thread
-                asyncio.get_event_loop().call_soon_threadsafe(
-                    queue.put_nowait, readings
-                )
-            except Exception:
-                pass  # Queue might be closed
-
-        self._cache.register_callback(on_data)
-
-        try:
-            # Send initial data
-            initial_readings = self._cache.get_all_readings()
-            if initial_readings:
-                writer.write(build_data_message(initial_readings))
-                await writer.drain()
-
-            # Stream updates
-            while True:
-                # Wait for new data with timeout (allows checking if client disconnected)
-                try:
-                    readings = await asyncio.wait_for(queue.get(), timeout=30.0)
-                    writer.write(build_data_message(readings))
-                    await writer.drain()
-                except asyncio.TimeoutError:
-                    # Send heartbeat/keepalive (empty data message)
-                    writer.write(build_data_message([]))
-                    await writer.drain()
-
-        except (asyncio.CancelledError, ConnectionResetError, BrokenPipeError):
-            pass
-        finally:
-            self._cache.unregister_callback(on_data)
-            logger.info(f"Client {addr} unsubscribed from data stream")
 
 
 # =============================================================================
@@ -458,12 +351,20 @@ def load_config(config_path: str) -> dict:
         return json.load(f)
 
 
-async def run_gateway(config: dict) -> None:
-    """Run the gateway server."""
+def run_gateway(config: dict) -> None:
+    """Run the gateway."""
     node_id = config.get("node_id", "gateway")
+    dashboard_url = config.get("dashboard_url")
 
-    # Create sensor cache
-    cache = SensorCache(node_id)
+    if not dashboard_url:
+        logger.error("dashboard_url not configured")
+        sys.exit(1)
+
+    # Create dashboard client and collector
+    dashboard_client = DashboardClient(dashboard_url, node_id)
+    collector = SensorDataCollector(node_id, dashboard_client)
+
+    logger.info(f"Gateway '{node_id}' posting to {dashboard_url}")
 
     # Start LoRa receiver if enabled
     lora_receiver = None
@@ -479,7 +380,7 @@ async def run_gateway(config: dict) -> None:
                 reset_pin=lora_config.get("reset_pin", 25),
             )
             radio.init()
-            lora_receiver = LoRaReceiver(radio, cache)
+            lora_receiver = LoRaReceiver(radio, collector)
             lora_receiver.start()
             logger.info(f"LoRa receiver enabled at {radio.frequency_mhz} MHz")
         except Exception as e:
@@ -494,17 +395,18 @@ async def run_gateway(config: dict) -> None:
         local_sensors = instantiate_sensors(local_sensor_configs)
         if local_sensors:
             interval = config.get("local_sensor_interval_sec", 5.0)
-            local_reader = LocalSensorReader(node_id, local_sensors, cache, interval)
+            local_reader = LocalSensorReader(node_id, local_sensors, collector, interval)
             local_reader.start()
 
-    # Start TCP server
-    tcp_port = config.get("tcp_port", 5001)
-    tcp_server = GatewayTCPServer(cache, port=tcp_port)
-
+    # Run forever (threads are daemon threads, so Ctrl+C will stop everything)
     try:
-        await tcp_server.start()
+        while True:
+            time.sleep(1)
+    except KeyboardInterrupt:
+        pass
     finally:
         # Cleanup
+        logger.info("Shutting down...")
         if lora_receiver:
             lora_receiver.stop()
         if local_reader:
@@ -515,7 +417,7 @@ async def run_gateway(config: dict) -> None:
 
 def main():
     parser = argparse.ArgumentParser(
-        description="Indoor gateway server",
+        description="Indoor gateway - posts sensor data to Pi5 dashboard",
         formatter_class=argparse.RawDescriptionHelpFormatter,
         epilog=__doc__,
     )
@@ -535,10 +437,7 @@ def main():
         sys.exit(1)
 
     # Run gateway
-    try:
-        asyncio.run(run_gateway(config))
-    except KeyboardInterrupt:
-        logger.info("Shutting down...")
+    run_gateway(config)
 
 
 if __name__ == "__main__":

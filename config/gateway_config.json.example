@@ -1,10 +1,10 @@
 {
     "node_id": "pz2w1-indoor-gateway",
+    "dashboard_url": "http://192.168.1.100:5000",
     "local_sensors": [
         {"class": "BME280TempPressureHumidity"}
     ],
     "local_sensor_interval_sec": 5,
-    "tcp_port": 5001,
     "lora": {
         "enabled": true,
         "frequency_mhz": 915.0,
