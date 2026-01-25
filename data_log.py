@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from led import RgbLed
-from sensors import BME280Temperature, MMA8452Accelerometer, Sensor
+from sensors import BME280TempPressureHumidity, MMA8452Accelerometer, Sensor
 
 SAMPLE_FLASH_S = 0.2
 SAVING_FILE_S = 0.5
@@ -69,9 +69,12 @@ class DataLogger:
         Path(self.csv_file).parent.mkdir(parents=True, exist_ok=True)
         with open(self.csv_file, "w", newline="") as f:
             writer = csv.writer(f)
-            header = ["timestamp"] + [
-                f"{s.get_name()} ({s.get_units()})" for s in self.sensors
-            ]
+            header = ["timestamp"]
+            for s in self.sensors:
+                names = s.get_names()
+                units = s.get_units()
+                for name, unit in zip(names, units):
+                    header.append(f"{name} ({unit})")
             writer.writerow(header)
             f.flush()
 
@@ -81,8 +84,10 @@ class DataLogger:
                         self.led.flash(*self.rec_sample_color, SAMPLE_FLASH_S)
 
                     timestamp = datetime.now().isoformat()
-                    values = [s.read() for s in self.sensors]
-                    self._buffer.append([timestamp] + values)
+                    row = [timestamp]
+                    for s in self.sensors:
+                        row.extend(s.read())
+                    self._buffer.append(row)
                     self._sample_count += 1
 
                     if self._sample_count % self.flush_interval == 0:
@@ -150,7 +155,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, lambda sig, frame: (cleanup(), exit(0)))
 
     logger = DataLogger(
-        sensors=[BME280Temperature(), MMA8452Accelerometer()],
+        sensors=[BME280TempPressureHumidity(), MMA8452Accelerometer()],
         csv_file=args.csv_file,
         sample_period=args.sample_period,
         flush_interval=args.flush_interval,

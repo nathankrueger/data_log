@@ -2,7 +2,6 @@
 
 from abc import ABC, abstractmethod
 from time import sleep
-from typing import Union
 
 from bme280 import BME280
 from smbus2 import SMBus
@@ -19,22 +18,22 @@ class Sensor(ABC):
         pass
 
     @abstractmethod
-    def read(self) -> Union[int, float]:
-        """Return the current sensor value."""
+    def read(self) -> tuple:
+        """Return the current sensor value(s) as a tuple."""
         pass
 
     @abstractmethod
-    def get_name(self) -> str:
-        """Return the sensor name."""
+    def get_names(self) -> tuple[str, ...]:
+        """Return the sensor name(s). Tuple length matches read() output count."""
         pass
 
     @abstractmethod
-    def get_units(self) -> str:
-        """Return the units of measurement."""
+    def get_units(self) -> tuple[str, ...]:
+        """Return the units of measurement. Tuple length matches read() output count."""
         pass
 
 
-class BME280Temperature(Sensor):
+class BME280TempPressureHumidity(Sensor):
     def __init__(self, smbus: int = 1):
         self._smbus = smbus
         self._bme = None
@@ -46,14 +45,17 @@ class BME280Temperature(Sensor):
         self._bme.get_temperature()
         sleep(1.0)
 
-    def read(self) -> float:
-        return c_to_f(self._bme.get_temperature())
+    def read(self) -> tuple[float, float, float]:
+        temp = c_to_f(self._bme.get_temperature())
+        pressure = self._bme.get_pressure()
+        humidity = self._bme.get_humidity()
+        return (temp, pressure, humidity)
 
-    def get_name(self) -> str:
-        return "BME280 Temperature"
+    def get_names(self) -> tuple[str, ...]:
+        return ("Temperature", "Pressure", "Humidity")
 
-    def get_units(self) -> str:
-        return "°F"
+    def get_units(self) -> tuple[str, ...]:
+        return ("°F", "hPa", "%")
 
 
 class MMA8452Accelerometer(Sensor):
@@ -140,8 +142,8 @@ class MMA8452Accelerometer(Sensor):
             value -= 4096
         return value
 
-    def get_name(self) -> str:
-        return "MMA8452 Accelerometer"
+    def get_names(self) -> tuple[str, ...]:
+        return ("Accel X", "Accel Y", "Accel Z")
 
-    def get_units(self) -> str:
-        return "g"
+    def get_units(self) -> tuple[str, ...]:
+        return ("g", "g", "g")
