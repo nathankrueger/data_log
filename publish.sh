@@ -64,17 +64,20 @@ done
 # Combine default and extra destinations
 DESTINATIONS=("${DEFAULT_DESTINATIONS[@]}" "${EXTRA_DESTINATIONS[@]}")
 
-# Pr
-    if [ "$REINSTALL" = true ]; then
-        ssh "${username}@${hostname}" "cd ${repo_path} && git pull && ./install.sh -r"
-    else
-        ssh "${username}@${hostname}" "cd ${repo_path} && git pull"
-    fi
+# SSH options for reliability on weak wifi connections
+SSH_OPTS="-o ServerAliveInterval=60 -o ServerAliveCountMax=5 -o ConnectTimeout=10 -o ConnectionAttempts=10"
+
+# Process each destination
 for entry in "${DESTINATIONS[@]}"; do
     IFS=':' read -r username hostname repo_path <<< "$entry"
 
     echo "Updating $hostname..."
-    ssh "${username}@${hostname}" "cd ${repo_path} && git pull"
+    
+    if [ "$REINSTALL" = true ]; then
+        ssh $SSH_OPTS "${username}@${hostname}" "cd ${repo_path} && git pull && ./install.sh -r"
+    else
+        ssh $SSH_OPTS "${username}@${hostname}" "cd ${repo_path} && git pull"
+    fi
 
     if [[ $? -eq 0 ]]; then
         echo "Successfully updated $hostname"
