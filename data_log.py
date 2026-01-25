@@ -11,7 +11,7 @@ from datetime import datetime
 from pathlib import Path
 
 from led import RgbLed
-from sensors import BME280Temperature, Sensor
+from sensors import BME280Temperature, MMA8452Accelerometer, Sensor
 
 SAMPLE_FLASH_S = 0.2
 SAVING_FILE_S = 0.5
@@ -150,7 +150,7 @@ if __name__ == "__main__":
     signal.signal(signal.SIGTERM, lambda sig, frame: (cleanup(), exit(0)))
 
     logger = DataLogger(
-        sensors=[BME280Temperature()],
+        sensors=[BME280Temperature(), MMA8452Accelerometer()],
         csv_file=args.csv_file,
         sample_period=args.sample_period,
         flush_interval=args.flush_interval,
