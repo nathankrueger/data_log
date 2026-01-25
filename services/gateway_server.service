@@ -1,0 +1,15 @@
+[Unit]
+Description=Gateway Server - LoRa receiver and dashboard poster
+After=network.target
+
+[Service]
+Type=simple
+ExecStartPre=/bin/sleep 15
+ExecStart=/bin/bash /home/nkrueger/dev/data_log/scripts/launch_gateway_server.sh
+User=nkrueger
+WorkingDirectory=/home/nkrueger/dev/data_log
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=multi-user.target

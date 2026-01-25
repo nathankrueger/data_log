@@ -1,0 +1,204 @@
+#!/bin/bash
+# service_mod.sh - Manage systemd services from the services/ folder
+
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SERVICES_DIR="$SCRIPT_DIR/services"
+
+usage() {
+    cat << EOF
+Usage: $(basename "$0") [OPTIONS]
+
+Manage systemd services from the services/ folder.
+
+OPTIONS:
+    -i, --install SERVICE_NAME      Install a service from services/ folder
+    -u, --uninstall SERVICE_NAME    Uninstall and fully remove a service
+    -l, --list                      List all services in services/ folder and their status
+    -h, --help                      Show this help message
+
+EXAMPLES:
+    $(basename "$0") --install gateway_server.service
+    $(basename "$0") --uninstall data_log.service
+    $(basename "$0") --list
+
+EOF
+}
+
+list_services() {
+    echo "Services in $SERVICES_DIR:"
+    echo "=========================================="
+    
+    if [ ! -d "$SERVICES_DIR" ]; then
+        echo "Error: Services directory not found: $SERVICES_DIR"
+        exit 1
+    fi
+    
+    for service_file in "$SERVICES_DIR"/*.service; do
+        if [ -f "$service_file" ]; then
+            service_name=$(basename "$service_file")
+            echo ""
+            echo "Service: $service_name"
+            
+            # Check if installed
+            if [ -f "/etc/systemd/system/$service_name" ]; then
+                echo "  Installed: Yes"
+                
+                # Get service status
+                if systemctl is-enabled "$service_name" &>/dev/null; then
+                    enabled_status=$(systemctl is-enabled "$service_name" 2>/dev/null)
+                    echo "  Enabled: $enabled_status"
+                else
+                    echo "  Enabled: disabled"
+                fi
+                
+                if systemctl is-active "$service_name" &>/dev/null; then
+                    active_status=$(systemctl is-active "$service_name" 2>/dev/null)
+                    echo "  Active: $active_status"
+                else
+                    echo "  Active: inactive"
+                fi
+            else
+                echo "  Installed: No"
+            fi
+        fi
+    done
+    
+    if [ -z "$(ls -A "$SERVICES_DIR"/*.service 2>/dev/null)" ]; then
+        echo "No .service files found in $SERVICES_DIR"
+    fi
+}
+
+install_service() {
+    local service_name="$1"
+    
+    # Add .service extension if not provided
+    if [[ ! "$service_name" =~ \.service$ ]]; then
+        service_name="${service_name}.service"
+    fi
+    
+    local service_file="$SERVICES_DIR/$service_name"
+    
+    if [ ! -f "$service_file" ]; then
+        echo "Error: Service file not found: $service_file"
+        exit 1
+    fi
+    
+    echo "Installing service: $service_name"
+    
+    # Copy service file
+    sudo cp "$service_file" /etc/systemd/system/
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to copy service file"
+        exit 1
+    fi
+    
+    # Reload systemd
+    sudo systemctl daemon-reload
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to reload systemd"
+        exit 1
+    fi
+    
+    # Enable service
+    sudo systemctl enable "$service_name"
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to enable service"
+        exit 1
+    fi
+    
+    # Start service
+    sudo systemctl start "$service_name"
+    if [ $? -ne 0 ]; then
+        echo "Warning: Failed to start service (may need manual intervention)"
+    fi
+    
+    echo ""
+    echo "Service installed successfully!"
+    echo "Status:"
+    sudo systemctl status "$service_name" --no-pager -l
+}
+
+uninstall_service() {
+    local service_name="$1"
+    
+    # Add .service extension if not provided
+    if [[ ! "$service_name" =~ \.service$ ]]; then
+        service_name="${service_name}.service"
+    fi
+    
+    if [ ! -f "/etc/systemd/system/$service_name" ]; then
+        echo "Error: Service not installed: $service_name"
+        exit 1
+    fi
+    
+    echo "Uninstalling service: $service_name"
+    
+    # Stop service
+    echo "Stopping service..."
+    sudo systemctl stop "$service_name"
+    
+    # Disable service
+    echo "Disabling service..."
+    sudo systemctl disable "$service_name"
+    
+    # Remove service file
+    echo "Removing service file..."
+    sudo rm /etc/systemd/system/"$service_name"
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to remove service file"
+        exit 1
+    fi
+    
+    # Reload systemd
+    sudo systemctl daemon-reload
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to reload systemd"
+        exit 1
+    fi
+    
+    # Reset failed state if any
+    sudo systemctl reset-failed "$service_name" 2>/dev/null
+    
+    echo ""
+    echo "Service uninstalled successfully!"
+}
+
+# Main script logic
+if [ $# -eq 0 ]; then
+    usage
+    exit 1
+fi
+
+case "$1" in
+    -h|--help)
+        usage
+        exit 0
+        ;;
+    -l|--list)
+        list_services
+        exit 0
+        ;;
+    -i|--install)
+        if [ -z "$2" ]; then
+            echo "Error: Service name required for install"
+            usage
+            exit 1
+        fi
+        install_service "$2"
+        exit 0
+        ;;
+    -u|--uninstall)
+        if [ -z "$2" ]; then
+            echo "Error: Service name required for uninstall"
+            usage
+            exit 1
+        fi
+        uninstall_service "$2"
+        exit 0
+        ;;
+    *)
+        echo "Error: Unknown option: $1"
+        usage
+        exit 1
+        ;;
+esac

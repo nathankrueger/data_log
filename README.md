@@ -45,16 +45,41 @@ Key settings:
 ./scripts/launch_gateway_server.sh
 ```
 
-## Systemd Service (CSV Logger)
+## Systemd Services
 
-The `data_log.service` runs the CSV logger on boot if so configured:
+The `services/` folder contains systemd service files for running components on boot:
 
+- `gateway_server.service` - Gateway that receives LoRa data and posts to dashboard
+- `node_broadcast.service` - Node broadcaster that sends sensor readings via LoRa
+- `data_log.service` - CSV logger service
+- `radio_transmit.service` - Radio temperature sender
+
+### Managing Services with service_mod.sh
+
+Use the `service_mod.sh` script to easily manage services:
+
+**List all services and their status:**
 ```bash
-sudo cp data_log.service /etc/systemd/system/
-sudo systemctl daemon-reload
-sudo systemctl enable data_log.service
-sudo systemctl start data_log.service
+./service_mod.sh --list
 ```
+
+**Install a service:**
+```bash
+./service_mod.sh --install gateway_server
+./service_mod.sh --install node_broadcast
+```
+
+**Uninstall a service:**
+```bash
+./service_mod.sh --uninstall gateway_server
+```
+
+**Get help:**
+```bash
+./service_mod.sh --help
+```
+
+The script automatically handles copying, enabling, starting, stopping, and removing services.
 
 ### Useful Service Commands
 
