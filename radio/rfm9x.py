@@ -70,7 +70,9 @@ class RFM9xRadio(Radio):
         try:
             self._rfm9x.send(data)
             return True
-        except Exception:
+        except Exception as e:
+            import logging
+            logging.getLogger(__name__).warning(f"Radio send failed: {e} (payload size: {len(data)} bytes)")
             return False
 
     def receive(self, timeout: float = 5.0) -> bytes | None:
