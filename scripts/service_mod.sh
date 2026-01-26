@@ -13,6 +13,7 @@ Manage systemd services from the services/ folder.
 OPTIONS:
     -i, --install SERVICE_NAME      Install a service from services/ folder
     -u, --uninstall SERVICE_NAME    Uninstall and fully remove a service
+    -r, --restart SERVICE_NAME      Restart a service
     -l, --list                      List all services in services/ folder and their status
     -f, --follow SERVICE_NAME       Follow service logs in real-time (Ctrl+C to stop)
     -b, --logs SERVICE_NAME         Show service logs since last boot
@@ -21,6 +22,7 @@ OPTIONS:
 EXAMPLES:
     $(basename "$0") --install gateway_server.service
     $(basename "$0") --uninstall data_log.service
+    $(basename "$0") --restart gateway_server
     $(basename "$0") --list
     $(basename "$0") --follow gateway_server
     $(basename "$0") --logs gateway_server
@@ -167,6 +169,31 @@ uninstall_service() {
     echo "Service uninstalled successfully!"
 }
 
+restart_service() {
+    local service_name="$1"
+
+    # Add .service extension if not provided
+    if [[ ! "$service_name" =~ \.service$ ]]; then
+        service_name="${service_name}.service"
+    fi
+
+    if [ ! -f "/etc/systemd/system/$service_name" ]; then
+        echo "Error: Service not installed: $service_name"
+        exit 1
+    fi
+
+    echo "Restarting service: $service_name"
+    sudo systemctl restart "$service_name"
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to restart service"
+        exit 1
+    fi
+
+    echo ""
+    echo "Service restarted successfully!"
+    sudo systemctl status "$service_name" --no-pager -l
+}
+
 follow_logs() {
     local service_name="$1"
 
@@ -224,6 +251,15 @@ case "$1" in
             exit 1
         fi
         uninstall_service "$2"
+        exit 0
+        ;;
+    -r|--restart)
+        if [ -z "$2" ]; then
+            echo "Error: Service name required for restart"
+            usage
+            exit 1
+        fi
+        restart_service "$2"
         exit 0
         ;;
     -f|--follow)
