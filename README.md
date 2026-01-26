@@ -5,12 +5,12 @@ Sensor data collection and LoRa radio communication for Raspberry Pi.
 ## Architecture
 
 ```
-[Sensor Node]  --LoRa-->  [Gateway]  <--TCP-->  [Pi5 Dashboard]
-   (Pi Zero)              (Pi Zero)              (rpi_server_cockpit)
+[Sensor Node]  --LoRa-->  [Gateway]  --HTTP-->  [Server Dashboard]
+   (Pi Zero)              (Pi Zero)              (Pi 5)
 ```
 
 - **Sensor Node** (`node_broadcast.py`): Reads sensors, broadcasts via LoRa
-- **Gateway** (`gateway_server.py`): Receives LoRa, serves TCP clients (default: port 5001)
+- **Gateway** (`gateway_server.py`): Receives LoRa, posts to dashboard via REST API
 
 ## Setup
 
@@ -30,7 +30,7 @@ cp config/gateway_config.json.example config/gateway_config.json
 Key settings:
 - `node_id`: Unique identifier for this device
 - `sensors`: List of sensor classes to read
-- `tcp_port`: Gateway TCP port (default 5001)
+- `dashboard_url`: Gateway's target dashboard URL (e.g., `http://192.168.1.100:5000`)
 - `lora`: Radio frequency, pins, etc.
 
 ## Running
