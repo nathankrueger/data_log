@@ -439,12 +439,18 @@ def run_gateway(config: dict) -> None:
 
     # Set up signal handlers for runtime LED toggle
     def enable_flash(signum, frame):
+        logger.info("Received SIGUSR1 signal")
         if lora_receiver:
             lora_receiver.set_flash_enabled(True)
+        else:
+            logger.warning("No LoRa receiver to enable flash on")
 
     def disable_flash(signum, frame):
+        logger.info("Received SIGUSR2 signal")
         if lora_receiver:
             lora_receiver.set_flash_enabled(False)
+        else:
+            logger.warning("No LoRa receiver to disable flash on")
 
     signal.signal(signal.SIGUSR1, enable_flash)
     signal.signal(signal.SIGUSR2, disable_flash)

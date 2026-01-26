@@ -5,7 +5,7 @@ from time import sleep
 class RgbLed:
     def __init__(self, red_bcm: int, green_bcm: int, blue_bcm: int, common_anode: bool = True):
         from gpiozero import RGBLED
-        self._led = RGBLED(red=red_bcm, green=green_bcm, blue=blue_bcm, active_high=not common_anode)
+        self._led = RGBLED(red=red_bcm, green=green_bcm, blue=blue_bcm, active_high=not common_anode, initial_value=(0, 0, 0))
         self._base_color: tuple[int, int, int] = (0, 0, 0)
         self._flash_gen = 0
         self._flash_lock = threading.Lock()
