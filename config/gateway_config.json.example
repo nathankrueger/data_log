@@ -10,5 +10,14 @@
         "frequency_mhz": 915.0,
         "cs_pin": 24,
         "reset_pin": 25
+    },
+    "led": {
+        "red_bcm": 17,
+        "green_bcm": 27,
+        "blue_bcm": 22,
+        "common_anode": true,
+        "flash_on_recv": true,
+        "flash_color": [255, 0, 0],
+        "flash_duration_sec": 0.1
     }
 }

@@ -29,12 +29,15 @@ import argparse
 import json
 import logging
 import inspect
+import signal
 import sys
 import threading
 import time
 from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
+
+from utils.led import RgbLed
 
 import sensors as sensors_module
 from radio import RFM9xRadio
@@ -187,11 +190,27 @@ class SensorDataCollector:
 class LoRaReceiver(threading.Thread):
     """Background thread that receives LoRa packets and forwards to collector."""
 
-    def __init__(self, radio: RFM9xRadio, collector: SensorDataCollector):
+    def __init__(
+        self,
+        radio: RFM9xRadio,
+        collector: SensorDataCollector,
+        led: RgbLed | None = None,
+        flash_color: tuple[int, int, int] = (255, 0, 0),
+        flash_duration: float = 0.1,
+    ):
         super().__init__(daemon=True)
         self._radio = radio
         self._collector = collector
+        self._led = led
+        self._flash_color = flash_color
+        self._flash_duration = flash_duration
+        self._flash_enabled = True  # Can be toggled via signals
         self._running = False
+
+    def set_flash_enabled(self, enabled: bool) -> None:
+        """Enable or disable LED flash on receive."""
+        self._flash_enabled = enabled
+        logger.info(f"LED flash on receive: {'enabled' if enabled else 'disabled'}")
 
     def run(self) -> None:
         self._running = True
@@ -222,6 +241,10 @@ class LoRaReceiver(threading.Thread):
         logger.info(
             f"LoRa received from '{node_id}': {len(readings)} readings (RSSI: {rssi} dB)"
         )
+
+        # Flash LED on successful receive
+        if self._led and self._flash_enabled:
+            self._led.flash(*self._flash_color, self._flash_duration)
 
         self._collector.add_readings(node_id, readings, is_local=False)
 
@@ -366,6 +389,26 @@ def run_gateway(config: dict) -> None:
 
     logger.info(f"Gateway '{node_id}' posting to {dashboard_url}")
 
+    # Initialize LED if configured
+    led = None
+    led_config = config.get("led", {})
+    if led_config:
+        try:
+            led = RgbLed(
+                red_bcm=led_config.get("red_bcm", 17),
+                green_bcm=led_config.get("green_bcm", 27),
+                blue_bcm=led_config.get("blue_bcm", 22),
+                common_anode=led_config.get("common_anode", True),
+            )
+            logger.info("LED initialized for flash-on-receive")
+        except Exception as e:
+            logger.warning(f"Failed to initialize LED: {e}")
+            led = None
+
+    flash_color = tuple(led_config.get("flash_color", [255, 0, 0]))
+    flash_duration = led_config.get("flash_duration_sec", 0.1)
+    flash_on_recv_default = led_config.get("flash_on_recv", True)
+
     # Start LoRa receiver if enabled
     lora_receiver = None
     radio = None
@@ -380,12 +423,32 @@ def run_gateway(config: dict) -> None:
                 reset_pin=lora_config.get("reset_pin", 25),
             )
             radio.init()
-            lora_receiver = LoRaReceiver(radio, collector)
+            lora_receiver = LoRaReceiver(
+                radio,
+                collector,
+                led=led,
+                flash_color=flash_color,
+                flash_duration=flash_duration,
+            )
+            lora_receiver.set_flash_enabled(flash_on_recv_default)
             lora_receiver.start()
             logger.info(f"LoRa receiver enabled at {radio.frequency_mhz} MHz")
         except Exception as e:
             logger.error(f"Failed to initialize LoRa: {e}")
             logger.info("Continuing without LoRa receiver")
+
+    # Set up signal handlers for runtime LED toggle
+    def enable_flash(signum, frame):
+        if lora_receiver:
+            lora_receiver.set_flash_enabled(True)
+
+    def disable_flash(signum, frame):
+        if lora_receiver:
+            lora_receiver.set_flash_enabled(False)
+
+    signal.signal(signal.SIGUSR1, enable_flash)
+    signal.signal(signal.SIGUSR2, disable_flash)
+    logger.info("Signal handlers registered (SIGUSR1=enable LED, SIGUSR2=disable LED)")
 
     # Start local sensor reader if configured
     local_reader = None
@@ -413,6 +476,8 @@ def run_gateway(config: dict) -> None:
             local_reader.stop()
         if radio:
             radio.close()
+        if led:
+            led.close()
 
 
 def main():
