@@ -90,3 +90,14 @@ The script automatically handles copying, enabling, starting, stopping, and remo
 - Restart service: `sudo systemctl restart data_log.service`
 - Disable on boot: `sudo systemctl disable data_log.service`
 - Refresh service: `systemctl daemon-reload`
+
+### RGB LED at Boot
+
+If using an RGB LED (see `utils/led.py`), the LED may glow dimly at boot before the service initializes the GPIO pins. To ensure the LED is off at boot, add the following to `/boot/firmware/config.txt`:
+
+```
+# Set RGB LED pins to output, default high (for common anode LED = off)
+gpio=17,22,27=op,dh
+```
+
+Adjust the pin numbers (BCM) to match your wiring. For a common cathode LED, use `dl` instead of `dh`.
