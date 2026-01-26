@@ -4,8 +4,23 @@ from time import sleep
 
 class RgbLed:
     def __init__(self, red_bcm: int, green_bcm: int, blue_bcm: int, common_anode: bool = True):
+        # Pre-set pins to "off" state before gpiozero takes over
+        # This prevents a brief flash during RGBLED initialization
+        import lgpio
+        h = lgpio.gpiochip_open(0)
+        off_level = 1 if common_anode else 0
+        for pin in (red_bcm, green_bcm, blue_bcm):
+            lgpio.gpio_claim_output(h, pin, off_level)
+        lgpio.gpiochip_close(h)
+
         from gpiozero import RGBLED
-        self._led = RGBLED(red=red_bcm, green=green_bcm, blue=blue_bcm, active_high=not common_anode, initial_value=(0, 0, 0))
+        self._led = RGBLED(
+            red=red_bcm,
+            green=green_bcm,
+            blue=blue_bcm,
+            active_high=not common_anode,
+            initial_value=(0, 0, 0),
+        )
         self._base_color: tuple[int, int, int] = (0, 0, 0)
         self._flash_gen = 0
         self._flash_lock = threading.Lock()
