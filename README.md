@@ -45,6 +45,16 @@ Key settings:
 ./scripts/launch_gateway_server.sh
 ```
 
+### Runtime LED Control
+
+The gateway can flash an RGB LED when LoRa messages are received. Configure in `gateway_config.json` under the `led` section, including the default state via `flash_on_recv`.
+
+Toggle at runtime without restarting:
+```bash
+systemctl kill --signal=SIGUSR1 gateway_server.service  # Enable
+systemctl kill --signal=SIGUSR2 gateway_server.service  # Disable
+```
+
 ## Systemd Services
 
 The `services/` folder contains systemd service files for running components on boot:
