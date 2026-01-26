@@ -51,8 +51,8 @@ The gateway can flash an RGB LED when LoRa messages are received. Configure in `
 
 Toggle at runtime without restarting:
 ```bash
-systemctl kill --signal=SIGUSR1 gateway_server.service  # Enable
-systemctl kill --signal=SIGUSR2 gateway_server.service  # Disable
+sudo systemctl kill --signal=SIGUSR1 gateway_server.service  # Enable
+sudo systemctl kill --signal=SIGUSR2 gateway_server.service  # Disable
 ```
 
 ## Systemd Services
