@@ -69,6 +69,4 @@ else
     pip install --upgrade pip
     echo "Installing requirements..."
     pip install -r requirements.txt
-    echo "Installing package in editable mode..."
-    pip install -e .
 fi
