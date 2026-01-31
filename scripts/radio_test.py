@@ -7,16 +7,16 @@ the radio module via command line.
 
 Usage:
     # Test with RFM9x (default)
-    python3 radio_test.py -s                    # Send with RFM9x
-    python3 radio_test.py -r                    # Receive with RFM9x
+    python3 scripts/radio_test.py -s            # Send with RFM9x
+    python3 scripts/radio_test.py -r            # Receive with RFM9x
 
     # Test with SX1262
-    python3 radio_test.py -s -t sx1262          # Send with SX1262
-    python3 radio_test.py -r -t sx1262          # Receive with SX1262
+    python3 scripts/radio_test.py -s -t sx1262  # Send with SX1262
+    python3 scripts/radio_test.py -r -t sx1262  # Receive with SX1262
 
     # Cross-radio interoperability test (run on two different Pis)
-    python3 radio_test.py -s -t rfm9x           # Pi 1: Send with RFM9x
-    python3 radio_test.py -r -t sx1262          # Pi 2: Receive with SX1262
+    python3 scripts/radio_test.py -s -t rfm9x   # Pi 1: Send with RFM9x
+    python3 scripts/radio_test.py -r -t sx1262  # Pi 2: Receive with SX1262
 
 Requires:
     RFM9x:  pip install adafruit-circuitpython-rfm9x
@@ -24,7 +24,12 @@ Requires:
 """
 
 import argparse
+import sys
 import time
+from pathlib import Path
+
+# Add project root to path for imports
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from radio import Radio, RFM9xRadio, SX1262Radio, rssi_to_brightness
 from sensors import BME280TempPressureHumidity
