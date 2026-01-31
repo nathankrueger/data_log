@@ -82,19 +82,51 @@ This enables config-driven instantiation without hardcoding sensor types.
 - Supports common anode/cathode
 - Boot state configured in `/boot/firmware/config.txt`
 
+### OLED Display (SSD1306)
+- 128x64 pixel I2C display, default address 0x3C
+- Uses `luma.oled` library
+- Microswitch on GPIO16 cycles through display pages
+
 ## Configuration
 
 JSON config files in `config/`:
 - `node_config.json` - Sensors, broadcast interval, LoRa params
-- `gateway_config.json` - Dashboard URL, local sensors, LED settings
+- `gateway_config.json` - Dashboard URL, local sensors, LED, display settings
 
 See `.example` files for templates. Actual config files are gitignored.
+
+Display config in `gateway_config.json`:
+```json
+"display": {
+    "enabled": true,
+    "switch_pin": 16,
+    "i2c_port": 1,
+    "i2c_address": 60,
+    "refresh_interval": 0.5
+}
+```
 
 ## Adding New Components
 
 **New Sensor:** Create class in `sensors/` extending `Sensor`, add to `SENSOR_CLASS_IDS` in `sensors/__init__.py`
 
 **New Radio:** Create class in `radio/` extending `Radio`, export in `radio/__init__.py`
+
+**New Display Page:** Create class in `utils/display.py` extending `ScreenPage`, implement `get_lines() -> list[str | None]`, add instance to `pages` list in `gateway_server.py`
+
+### Display System Architecture
+
+```
+utils/gateway_state.py    - GatewayState, LastPacketInfo (shared runtime state)
+utils/display.py          - ScreenPage ABC, concrete pages, ScreenManager
+gateway_server.py         - Creates state, pages, and ScreenManager
+```
+
+- `GatewayState` holds thread-safe runtime state (start time, last packet info)
+- `ScreenPage` ABC defines `get_lines() -> list[str | None]` for up to 4 lines
+- If all lines are `None`, screen turns off
+- `ScreenManager` handles display refresh (500ms) and switch input for page cycling
+- Built-in pages: `OffPage`, `SystemInfoPage`, `LastPacketPage`
 
 ## Development Workflow
 

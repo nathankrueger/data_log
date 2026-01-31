@@ -60,6 +60,7 @@ class SystemInfoPage(ScreenPage):
     System information page.
 
     Shows:
+    - Header
     - IP address
     - Uptime
     - Time since last packet
@@ -80,6 +81,7 @@ class SystemInfoPage(ScreenPage):
             last_pkt_str = "Never"
 
         return [
+            "System Information",
             f"IP: {ip}",
             f"Uptime: {uptime}",
             f"Last pkt: {last_pkt_str}",
