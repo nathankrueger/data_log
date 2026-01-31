@@ -5,6 +5,7 @@ Run this on the Pi with the SX1262 to debug communication issues.
 """
 
 import atexit
+import os
 import signal
 import sys
 import time
@@ -14,6 +15,7 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 # Global reference for cleanup
 _lora = None
+_cleanup_in_progress = False
 
 # Pin configuration - adjust these to match your wiring
 RESET_PIN = 22
@@ -118,15 +120,24 @@ def cleanup_lora(lora_obj):
 
 def _cleanup():
     """Global cleanup handler."""
-    global _lora
+    global _lora, _cleanup_in_progress
+    if _cleanup_in_progress:
+        return  # Prevent recursion
+    _cleanup_in_progress = True
+
     if _lora is not None:
         cleanup_lora(_lora)
         _lora = None
     release_gpio_resources()
+    _cleanup_in_progress = False
 
 
 def _signal_handler(signum, frame):
     """Handle termination signals."""
+    global _cleanup_in_progress
+    if _cleanup_in_progress:
+        print("\nForce exit...")
+        os._exit(1)  # Force exit if cleanup is stuck
     print("\nSignal received, cleaning up...")
     _cleanup()
     sys.exit(0)
@@ -144,7 +155,6 @@ def main():
     print("=== SX1262 Diagnostic Script ===\n")
 
     print("1. Checking SPI devices...")
-    import os
     spi_devices = [f for f in os.listdir('/dev') if f.startswith('spi')]
     if spi_devices:
         print(f"   Found: {spi_devices}")
@@ -195,12 +205,35 @@ def main():
     print(f"   RESET={RESET_PIN}, BUSY={BUSY_PIN}, DIO1={DIO1_PIN}, TXEN={TXEN_PIN}, RXEN={RXEN_PIN}")
     _lora.setPins(RESET_PIN, BUSY_PIN, DIO1_PIN, TXEN_PIN, RXEN_PIN)
 
+    # Check BUSY pin state before begin()
+    print("\n7b. Checking BUSY pin state...")
+    try:
+        import lgpio
+        h = lgpio.gpiochip_open(0)
+        lgpio.gpio_claim_input(h, BUSY_PIN)
+        busy_state = lgpio.gpio_read(h, BUSY_PIN)
+        lgpio.gpio_free(h, BUSY_PIN)
+        lgpio.gpiochip_close(h)
+        print(f"   BUSY pin (GPIO {BUSY_PIN}) = {busy_state} ({'HIGH - radio busy!' if busy_state else 'LOW - ready'})")
+        if busy_state:
+            print("   WARNING: BUSY pin is HIGH. Radio may be stuck or wiring issue.")
+    except Exception as e:
+        print(f"   Could not check BUSY pin: {e}")
+
     print("\n8. Calling begin() (with retry)...")
+    result = False
     for attempt in range(3):
-        result = _lora.begin()
-        print(f"   Attempt {attempt + 1}: {result}")
-        if result:
-            break
+        try:
+            result = _lora.begin()
+            print(f"   Attempt {attempt + 1}: {result}")
+            if result:
+                break
+        except IndexError as e:
+            print(f"   Attempt {attempt + 1}: Library bug - {e}")
+            print("   The LoRaRF library has a bug with empty SPI responses.")
+            print("   This may indicate the library version is incompatible.")
+        except Exception as e:
+            print(f"   Attempt {attempt + 1}: Error - {type(e).__name__}: {e}")
         print("   Retrying in 1 second...")
         time.sleep(1)
 
