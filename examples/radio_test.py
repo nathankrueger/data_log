@@ -24,7 +24,12 @@ Requires:
 """
 
 import argparse
+import sys
 import time
+from pathlib import Path
+
+# Add project root to path for imports
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from utils.led import RgbLed
 from radio import RFM9xRadio, rssi_to_brightness

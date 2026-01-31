@@ -136,6 +136,26 @@ Development happens on a separate machine (not the Pi Zero 2W targets). The SSH/
 - Files must be transferred to the Pi Zero 2W for testing
 - The user will run tests manually on the target device
 
+### Publishing to Target Hardware
+
+To test code on the actual Pi Zero 2W devices:
+
+1. **Commit changes to git** (changes must be committed for publish to work)
+2. **Run `./publish.sh`** - This SSHs to all 4 Pi Zero 2Ws (pz2w1-4) and runs `git pull`
+3. **User tests on target device**
+
+```bash
+./publish.sh              # Pull on all Pi devices
+./publish.sh --reinstall  # Pull and reinstall venv (if dependencies changed)
+```
+
+**IMPORTANT FOR CLAUDE:** When you think there's something ready to test on hardware, or the user says "publish this" or similar:
+1. **Ask the user** using AskUserQuestion with Yes/No options: "Ready to commit and publish to Pi devices?"
+2. Only after "Yes": create a git commit with appropriate message
+3. Then run `./publish.sh` to deploy to the Pi devices
+
+Do NOT commit and publish without asking first, unless explicitly instructed.
+
 ## Important
 
 When adding dependencies or imports to python files, be sure to always add it to requirements.txt. Note that transitive dependencies (packages already required by other packages) don't need to be added explicitly.
