@@ -21,6 +21,49 @@ SPI_CS = 0
 
 FREQUENCY = 915  # MHz
 
+ALL_PINS = [RESET_PIN, BUSY_PIN, DIO1_PIN, TXEN_PIN, RXEN_PIN]
+
+
+def release_gpio_resources():
+    """Release any GPIO resources held from a previous run."""
+    try:
+        import lgpio
+        h = lgpio.gpiochip_open(0)
+
+        for pin in ALL_PINS:
+            try:
+                lgpio.gpio_free(h, pin)
+            except:
+                pass  # Pin wasn't claimed, that's fine
+
+        lgpio.gpiochip_close(h)
+        return True
+    except Exception as e:
+        print(f"   Note: Could not release GPIOs via lgpio: {e}")
+        return False
+
+
+def hardware_reset():
+    """Perform hardware reset of the radio."""
+    try:
+        import lgpio
+        h = lgpio.gpiochip_open(0)
+        lgpio.gpio_claim_output(h, RESET_PIN)
+
+        # Pulse reset low for 1ms, then high
+        lgpio.gpio_write(h, RESET_PIN, 0)
+        time.sleep(0.001)
+        lgpio.gpio_write(h, RESET_PIN, 1)
+        time.sleep(0.01)
+
+        lgpio.gpio_free(h, RESET_PIN)
+        lgpio.gpiochip_close(h)
+        return True
+    except Exception as e:
+        print(f"   Note: Hardware reset failed: {e}")
+        return False
+
+
 def main():
     print("=== SX1262 Diagnostic Script ===\n")
 
@@ -32,7 +75,17 @@ def main():
     else:
         print("   ERROR: No SPI devices found! Enable SPI with raspi-config")
 
-    print("\n2. Importing LoRaRF library...")
+    print("\n2. Releasing any held GPIO resources...")
+    release_gpio_resources()
+    print("   Done")
+
+    print("\n3. Performing hardware reset...")
+    if hardware_reset():
+        print("   Reset complete")
+    else:
+        print("   Skipped (will rely on library reset)")
+
+    print("\n4. Importing LoRaRF library...")
     try:
         from LoRaRF import SX126x
         print("   Import successful")
@@ -41,17 +94,17 @@ def main():
         print("   Install with: pip install LoRaRF")
         return
 
-    print("\n3. Creating SX126x instance...")
+    print("\n5. Creating SX126x instance...")
     lora = SX126x()
 
-    print(f"\n4. Configuring SPI (bus={SPI_BUS}, cs={SPI_CS})...")
+    print(f"\n6. Configuring SPI (bus={SPI_BUS}, cs={SPI_CS})...")
     lora.setSpi(SPI_BUS, SPI_CS)
 
-    print(f"\n5. Configuring GPIO pins...")
+    print(f"\n7. Configuring GPIO pins...")
     print(f"   RESET={RESET_PIN}, BUSY={BUSY_PIN}, DIO1={DIO1_PIN}, TXEN={TXEN_PIN}, RXEN={RXEN_PIN}")
     lora.setPins(RESET_PIN, BUSY_PIN, DIO1_PIN, TXEN_PIN, RXEN_PIN)
 
-    print("\n6. Calling begin() (with retry)...")
+    print("\n8. Calling begin() (with retry)...")
     for attempt in range(3):
         result = lora.begin()
         print(f"   Attempt {attempt + 1}: {result}")

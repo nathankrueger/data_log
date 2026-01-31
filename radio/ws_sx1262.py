@@ -96,6 +96,32 @@ class SX1262Radio(Radio):
         self._lora = None
         self._last_rssi: int | None = None
 
+    def _release_gpio_resources(self) -> None:
+        """Release any GPIO resources held from a previous run.
+
+        This allows the radio to be initialized multiple times without rebooting.
+        """
+        all_pins = [
+            self._reset_pin,
+            self._busy_pin,
+            self._dio1_pin,
+            self._txen_pin,
+            self._rxen_pin,
+        ]
+        try:
+            import lgpio
+
+            h = lgpio.gpiochip_open(0)
+            for pin in all_pins:
+                try:
+                    lgpio.gpio_free(h, pin)
+                except Exception:
+                    pass  # Pin wasn't claimed, that's fine
+            lgpio.gpiochip_close(h)
+            logger.debug("Released GPIO resources")
+        except Exception as e:
+            logger.debug(f"Could not release GPIOs via lgpio: {e}")
+
     def _hardware_reset(self) -> None:
         """Perform a hardware reset of the radio via the RESET pin.
 
@@ -123,6 +149,12 @@ class SX1262Radio(Radio):
 
     def init(self) -> None:
         """Initialize the SX1262 radio hardware."""
+        # Release any GPIO resources from previous runs to allow re-initialization
+        self._release_gpio_resources()
+
+        # Perform hardware reset to clear any stuck state
+        self._hardware_reset()
+
         try:
             from LoRaRF import SX126x
         except ImportError:
@@ -151,11 +183,17 @@ class SX1262Radio(Radio):
             self._rxen_pin,
         )
 
-        # Initialize the radio
+        # Initialize the radio with retry logic
         logger.debug("Calling begin()...")
-        if not self._lora.begin():
+        max_attempts = 3
+        for attempt in range(max_attempts):
+            if self._lora.begin():
+                break
+            logger.debug(f"begin() attempt {attempt + 1} failed, retrying...")
+            time.sleep(0.5)
+        else:
             raise RuntimeError(
-                f"Failed to initialize SX1262 radio. Check:\n"
+                f"Failed to initialize SX1262 radio after {max_attempts} attempts. Check:\n"
                 f"  1. SPI enabled: ls /dev/spi*\n"
                 f"  2. Wiring: RESET={self._reset_pin}, BUSY={self._busy_pin}, "
                 f"DIO1={self._dio1_pin}, TXEN={self._txen_pin}, RXEN={self._rxen_pin}\n"
