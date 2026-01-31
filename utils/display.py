@@ -119,12 +119,13 @@ class LastPacketPage(ScreenPage):
 
         # Truncate long names to fit display
         name = last_pkt.sensor_name[:16]
+        node = last_pkt.node_id[:16]
         value_str = f"{last_pkt.sensor_value:.1f} {last_pkt.sensor_units}"
 
         return [
             "Last Packet",
             f"time: {time_str}",
-            f"name: {name}",
+            f"name: {node}:{name}",
             f"val: {value_str}",
         ]
 
