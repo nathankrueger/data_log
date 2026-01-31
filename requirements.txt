@@ -2,8 +2,9 @@ pimoroni-bme280
 adafruit-circuitpython-rfm9x
 adafruit-blinka
 rpi-lgpio
-LoRaRF
-gpiod  # Optional: for GPIO cleanup compatibility
+gpiozero
+spidev
+# LoRaRF  # Disabled: has bugs with Python 3.13, using custom driver instead
 
 # Camera/OCR dependencies (on Pi, prefer apt packages for faster install):
 # sudo apt install python3-picamera2 python3-opencv python3-numpy python3-pil -y

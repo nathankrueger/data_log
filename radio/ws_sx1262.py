@@ -1,9 +1,9 @@
-"""Waveshare Core1262-868M LoRa radio implementation using LoRaRF library."""
+"""Waveshare Core1262-868M LoRa radio implementation using custom spidev driver."""
 
 import logging
-import time
 
 from .base import Radio
+from .sx1262_driver import SX1262Driver
 
 logger = logging.getLogger(__name__)
 
@@ -12,15 +12,13 @@ class SX1262Radio(Radio):
     """
     Waveshare Core1262-868M LoRa radio module implementation.
 
-    Uses the LoRaRF library: pip install LoRaRF
-    See: https://github.com/chandrawi/LoRaRF-Python
-
+    Uses a custom spidev + gpiozero driver that bypasses the buggy LoRaRF library.
     Configured to be interoperable with RFM9x radios using matching
     LoRa modulation parameters (spreading factor, bandwidth, coding rate).
 
     This module has an RF switch requiring RXEN/TXEN control:
-        - RXEN=LOW,  TXEN=HIGH -> Receive mode
-        - RXEN=HIGH, TXEN=LOW  -> Transmit mode
+        - RXEN=LOW,  TXEN=HIGH -> Transmit mode
+        - RXEN=HIGH, TXEN=LOW  -> Receive mode
 
     Wiring (Core1262 to Raspberry Pi):
         See pinout: _assets/ws_sx1262_pinout.png
@@ -93,167 +91,80 @@ class SX1262Radio(Radio):
         self._spi_bus = spi_bus
         self._spi_cs = spi_cs
 
-        self._lora = None
+        self._driver: SX1262Driver | None = None
         self._last_rssi: int | None = None
-
-    def _release_gpio_resources(self) -> None:
-        """Release any GPIO resources held from a previous run.
-
-        This allows the radio to be initialized multiple times without rebooting.
-        Tries both gpiod and lgpio since the LoRaRF library may use either.
-        """
-        all_pins = [
-            self._reset_pin,
-            self._busy_pin,
-            self._dio1_pin,
-            self._txen_pin,
-            self._rxen_pin,
-        ]
-
-        # Try gpiod first (what LoRaRF library may use internally)
-        try:
-            import gpiod
-
-            chip = gpiod.Chip("/dev/gpiochip0")
-            chip.close()
-            logger.debug("Released GPIO resources via gpiod")
-        except Exception as e:
-            logger.debug(f"Could not release GPIOs via gpiod: {e}")
-
-        # Also try lgpio
-        try:
-            import lgpio
-
-            h = lgpio.gpiochip_open(0)
-            for pin in all_pins:
-                try:
-                    lgpio.gpio_free(h, pin)
-                except Exception:
-                    pass  # Pin wasn't claimed, that's fine
-            lgpio.gpiochip_close(h)
-            logger.debug("Released GPIO resources via lgpio")
-        except Exception as e:
-            logger.debug(f"Could not release GPIOs via lgpio: {e}")
-
-    def _hardware_reset(self) -> None:
-        """Perform a hardware reset of the radio via the RESET pin.
-
-        This clears any stuck state from a previous run that didn't clean up.
-        """
-        try:
-            import lgpio
-
-            h = lgpio.gpiochip_open(0)
-            lgpio.gpio_claim_output(h, self._reset_pin)
-
-            # Pulse reset low for 1ms, then high
-            lgpio.gpio_write(h, self._reset_pin, 0)  # Low
-            time.sleep(0.001)
-            lgpio.gpio_write(h, self._reset_pin, 1)  # High
-            time.sleep(0.01)  # Wait for radio to stabilize
-
-            lgpio.gpio_free(h, self._reset_pin)
-            lgpio.gpiochip_close(h)
-            logger.debug("Hardware reset complete")
-        except Exception as e:
-            # If we can't do a hardware reset, continue anyway
-            # The begin() call will do its own reset
-            logger.debug(f"Hardware reset skipped: {e}")
+        self._last_snr: float | None = None
 
     def init(self) -> None:
         """Initialize the SX1262 radio hardware."""
-        # Release any GPIO resources from previous runs to allow re-initialization
-        self._release_gpio_resources()
-
-        # Perform hardware reset to clear any stuck state
-        self._hardware_reset()
-
-        try:
-            from LoRaRF import SX126x
-        except ImportError:
-            raise ImportError(
-                "LoRaRF library not found. Install with: pip install LoRaRF"
-            )
-
-        self._lora = SX126x()
-
         logger.debug(
             f"Configuring SX1262: SPI bus={self._spi_bus}, cs={self._spi_cs}, "
             f"reset={self._reset_pin}, busy={self._busy_pin}, dio1={self._dio1_pin}, "
             f"txen={self._txen_pin}, rxen={self._rxen_pin}"
         )
 
-        # Configure SPI - must be called before begin()
-        self._lora.setSpi(self._spi_bus, self._spi_cs)
-
-        # Configure GPIO pins: reset, busy, dio1, txen, rxen
-        # These must be set before begin()
-        self._lora.setPins(
-            self._reset_pin,
-            self._busy_pin,
-            self._dio1_pin,
-            self._txen_pin,
-            self._rxen_pin,
+        # Create driver instance
+        self._driver = SX1262Driver(
+            spi_bus=self._spi_bus,
+            spi_cs=self._spi_cs,
+            reset_pin=self._reset_pin,
+            busy_pin=self._busy_pin,
+            dio1_pin=self._dio1_pin,
+            txen_pin=self._txen_pin,
+            rxen_pin=self._rxen_pin,
         )
 
-        # Initialize the radio with retry logic
-        logger.debug("Calling begin()...")
-        max_attempts = 3
-        for attempt in range(max_attempts):
-            if self._lora.begin():
-                break
-            logger.debug(f"begin() attempt {attempt + 1} failed, retrying...")
-            time.sleep(0.5)
-        else:
+        # Initialize the radio
+        if not self._driver.begin():
             raise RuntimeError(
-                f"Failed to initialize SX1262 radio after {max_attempts} attempts. Check:\n"
+                f"Failed to initialize SX1262 radio. Check:\n"
                 f"  1. SPI enabled: ls /dev/spi*\n"
                 f"  2. Wiring: RESET={self._reset_pin}, BUSY={self._busy_pin}, "
                 f"DIO1={self._dio1_pin}, TXEN={self._txen_pin}, RXEN={self._rxen_pin}\n"
-                f"  3. SPI: bus={self._spi_bus}, cs={self._spi_cs} (CS pin GPIO 8 for CE0, GPIO 7 for CE1)"
+                f"  3. SPI: bus={self._spi_bus}, cs={self._spi_cs}"
             )
 
-        # Set frequency in Hz
-        freq_hz = int(self._frequency_mhz * 1_000_000)
-        self._lora.setFrequency(freq_hz)
-
-        # Bandwidth mapping for LoRaRF library (uses bandwidth index)
-        # BW_7800 = 0, BW_10400 = 1, BW_15600 = 2, BW_20800 = 3,
-        # BW_31250 = 4, BW_41700 = 5, BW_62500 = 6, BW_125000 = 7,
-        # BW_250000 = 8, BW_500000 = 9
+        # Map bandwidth Hz to driver constant
         bw_map = {
-            125000: 7,
-            250000: 8,
-            500000: 9,
+            125000: SX1262Driver.BW_125000,
+            250000: SX1262Driver.BW_250000,
+            500000: SX1262Driver.BW_500000,
         }
-        bw_index = bw_map.get(self._bandwidth, 7)
+        bw = bw_map.get(self._bandwidth, SX1262Driver.BW_125000)
 
-        # Coding rate: CR_4_5 = 1, CR_4_6 = 2, CR_4_7 = 3, CR_4_8 = 4
-        cr_index = self._coding_rate - 4
+        # Map coding rate to driver constant
+        cr_map = {
+            5: SX1262Driver.CR_4_5,
+            6: SX1262Driver.CR_4_6,
+            7: SX1262Driver.CR_4_7,
+            8: SX1262Driver.CR_4_8,
+        }
+        cr = cr_map.get(self._coding_rate, SX1262Driver.CR_4_5)
 
-        # Set LoRa modulation parameters for RFM9x interoperability
-        self._lora.setLoRaModulation(self._spreading_factor, bw_index, cr_index)
+        # Map spreading factor to driver constant
+        sf_map = {
+            5: SX1262Driver.SF5,
+            6: SX1262Driver.SF6,
+            7: SX1262Driver.SF7,
+            8: SX1262Driver.SF8,
+            9: SX1262Driver.SF9,
+            10: SX1262Driver.SF10,
+            11: SX1262Driver.SF11,
+            12: SX1262Driver.SF12,
+        }
+        sf = sf_map.get(self._spreading_factor, SX1262Driver.SF7)
 
-        # Set packet parameters
-        # headerType: HEADER_EXPLICIT = 0, HEADER_IMPLICIT = 1
-        # crcType: CRC_DISABLE = 0, CRC_ENABLE = 1
-        self._lora.setLoRaPacket(
-            self._preamble_length,
-            0,    # Explicit header (variable length) for RFM9x compatibility
-            255,  # Max payload length
-            1,    # CRC enabled
-            0,    # Standard IQ (not inverted)
+        # Configure radio
+        # Sync word 0x1424 is compatible with RFM9x sync word 0x12
+        self._driver.configure(
+            frequency_hz=int(self._frequency_mhz * 1_000_000),
+            tx_power=self._tx_power,
+            spreading_factor=sf,
+            bandwidth=bw,
+            coding_rate=cr,
+            sync_word=0x1424,
+            preamble_len=self._preamble_length,
         )
-
-        # Set sync word for LoRa compatibility with RFM9x (SX127x)
-        # SX127x uses single-byte sync word, SX126x uses two-byte format
-        # Conversion: SX127x 0x12 -> SX126x 0x1424, SX127x 0x34 -> SX126x 0x3444
-        # The formula is: ((sw & 0xF0) << 8) | 0x04 | ((sw & 0x0F) << 4) | 0x04
-        # For 0x12: 0x1424
-        self._lora.setSyncWord(0x1424)
-
-        # Set TX power
-        self._lora.setTxPower(self._tx_power)
 
         logger.info(
             f"SX1262 initialized: {self._frequency_mhz} MHz, "
@@ -264,48 +175,28 @@ class SX1262Radio(Radio):
 
     def send(self, data: bytes) -> bool:
         """Send data over LoRa."""
-        if self._lora is None:
+        if self._driver is None:
             raise RuntimeError("Radio not initialized. Call init() first.")
 
         try:
-            # Transmit the message and wait for completion
-            self._lora.beginPacket()
-            self._lora.write(list(data), len(data))
-            self._lora.endPacket()
-            self._lora.wait()
-            return True
+            return self._driver.send(data)
         except Exception as e:
             logger.warning(f"Radio send failed: {e} (payload size: {len(data)} bytes)")
             return False
 
     def receive(self, timeout: float = 5.0) -> bytes | None:
         """Receive data from LoRa with timeout."""
-        if self._lora is None:
+        if self._driver is None:
             raise RuntimeError("Radio not initialized. Call init() first.")
 
         try:
-            # Put radio in receive mode (continuous)
-            self._lora.request(0xFFFFFF)
-
-            # Poll for received data with timeout
-            start_time = time.monotonic()
-            while (time.monotonic() - start_time) < timeout:
-                # Check status: 0=waiting, 1=received, 2=transmitted, -1=error
-                status = self._lora.status()
-
-                if status == 1:  # Packet received
-                    data = []
-                    while self._lora.available():
-                        data.append(self._lora.read())
-
-                    # Store signal quality metrics
-                    self._last_rssi = int(self._lora.packetRssi())
-                    return bytes(data)
-
-                time.sleep(0.01)  # 10ms poll interval
-
+            result = self._driver.receive(timeout_ms=int(timeout * 1000))
+            if result is not None:
+                data, rssi, snr = result
+                self._last_rssi = rssi
+                self._last_snr = snr
+                return data
             return None
-
         except Exception as e:
             logger.warning(f"Radio receive failed: {e}")
             return None
@@ -316,13 +207,11 @@ class SX1262Radio(Radio):
 
     def close(self) -> None:
         """Clean up radio resources."""
-        if self._lora is not None:
-            try:
-                self._lora.sleep()
-            except Exception:
-                pass
-            self._lora = None
+        if self._driver is not None:
+            self._driver.close()
+            self._driver = None
         self._last_rssi = None
+        self._last_snr = None
 
     @property
     def frequency_mhz(self) -> float:
@@ -351,9 +240,4 @@ class SX1262Radio(Radio):
         Returns:
             SNR in dB, or None if not available
         """
-        if self._lora is None:
-            return None
-        try:
-            return self._lora.snr()
-        except Exception:
-            return None
+        return self._last_snr
