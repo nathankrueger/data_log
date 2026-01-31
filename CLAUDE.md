@@ -76,9 +76,6 @@ This enables config-driven instantiation without hardcoding sensor types.
 | Module | Notes |
 |--------|-------|
 | RFM9x | Adafruit, CS=GPIO24, RST=GPIO25 |
-| SX1262 | Waveshare Core1262-868M, requires TXEN/RXEN for RF switch |
-
-Both radios interoperate with matching LoRa params: SF7, BW 125kHz, CR 4/5.
 
 ### RGB LED
 - gpiozero library, configurable pins (default: R=17, G=27, B=22)
