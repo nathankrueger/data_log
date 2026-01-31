@@ -100,6 +100,7 @@ class SX1262Radio(Radio):
         """Release any GPIO resources held from a previous run.
 
         This allows the radio to be initialized multiple times without rebooting.
+        Tries both gpiod and lgpio since the LoRaRF library may use either.
         """
         all_pins = [
             self._reset_pin,
@@ -108,6 +109,18 @@ class SX1262Radio(Radio):
             self._txen_pin,
             self._rxen_pin,
         ]
+
+        # Try gpiod first (what LoRaRF library may use internally)
+        try:
+            import gpiod
+
+            chip = gpiod.Chip("/dev/gpiochip0")
+            chip.close()
+            logger.debug("Released GPIO resources via gpiod")
+        except Exception as e:
+            logger.debug(f"Could not release GPIOs via gpiod: {e}")
+
+        # Also try lgpio
         try:
             import lgpio
 
@@ -118,7 +131,7 @@ class SX1262Radio(Radio):
                 except Exception:
                     pass  # Pin wasn't claimed, that's fine
             lgpio.gpiochip_close(h)
-            logger.debug("Released GPIO resources")
+            logger.debug("Released GPIO resources via lgpio")
         except Exception as e:
             logger.debug(f"Could not release GPIOs via lgpio: {e}")
 
