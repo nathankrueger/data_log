@@ -31,18 +31,24 @@ from radio import RFM9xRadio, rssi_to_brightness
 from sensors import BME280TempPressureHumidity
 
 
-def send_messages(radio: RFM9xRadio) -> None:
+def send_messages(radio: RFM9xRadio, show_temp: bool) -> None:
     """Continuously send messages with BME280 temperature, pressure, and humidity."""
     counter = 0
-    bme = BME280TempPressureHumidity()
-    bme.init()
+
+    bme = None
+    if show_temp:
+        bme = BME280TempPressureHumidity()
+        bme.init()
 
     print(f"Radio initialized at {radio.frequency_mhz} MHz, TX power: {radio.tx_power} dBm")
     print("Sending messages... (Ctrl+C to stop)")
 
     while True:
-        temp, pressure, humidity = bme.read()
-        message = f"T:{temp:.1f}F P:{pressure:.1f}hPa H:{humidity:.1f}% #{counter}"
+        if show_temp:
+            temp, pressure, humidity = bme.read()
+            message = f"T:{temp:.1f}F P:{pressure:.1f}hPa H:{humidity:.1f}% #{counter}"
+        else:
+            message = f"Hello World #{counter}"
         print(f"Sending: {message}")
         radio.send(message.encode("utf-8"))
         counter += 1
@@ -58,9 +64,10 @@ def receive_messages(radio: RFM9xRadio, led: RgbLed) -> None:
         packet = radio.receive(timeout=5.0)
         if packet is not None:
             rssi = radio.get_last_rssi()
-            brightness = rssi_to_brightness(rssi) if rssi else 0
-            led.flash(brightness, 0, 0, 0.5)  # Flash red, brightness based on RSSI
 
+            if led:
+                brightness = rssi_to_brightness(rssi) if rssi else 0
+                led.flash(brightness, 0, 0, 0.5)  # Flash red, brightness based on RSSI
             try:
                 message = packet.decode("utf-8")
                 print(f"Received: {message} (RSSI: {rssi} dB, brightness: {brightness})")
@@ -77,6 +84,8 @@ def main():
     group = parser.add_mutually_exclusive_group(required=True)
     group.add_argument("-s", "--send", action="store_true", help="Send messages")
     group.add_argument("-r", "--receive", action="store_true", help="Receive messages")
+    group.add_argument("-t", "--temp", action="store_true", help="Send Temperature Values")
+    group.add_argument("--no_led", action="store_true", help="Skip using LED to show RSSI")
     args = parser.parse_args()
 
     led = None
@@ -93,9 +102,11 @@ def main():
         radio.init()
 
         if args.send:
-            send_messages(radio)
+            send_messages(radio, args.temp)
         else:
-            led = RgbLed(red_bcm=17, green_bcm=27, blue_bcm=22, common_anode=True)
+            led = None
+            if not args.no_led:
+                led = RgbLed(red_bcm=17, green_bcm=27, blue_bcm=22, common_anode=True)
             receive_messages(radio, led)
     finally:
         radio.close()
