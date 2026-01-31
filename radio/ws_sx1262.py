@@ -130,10 +130,6 @@ class SX1262Radio(Radio):
                 "LoRaRF library not found. Install with: pip install LoRaRF"
             )
 
-        # Manual hardware reset before init to clear any stuck state
-        # This helps when the previous run didn't clean up properly
-        self._hardware_reset()
-
         self._lora = SX126x()
 
         logger.debug(
