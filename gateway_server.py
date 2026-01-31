@@ -206,6 +206,7 @@ class LoRaReceiver(threading.Thread):
         flash_color: tuple[int, int, int] = (255, 0, 0),
         flash_duration: float = 0.1,
         gateway_state: GatewayState | None = None,
+        verbose_logging: bool = False,
     ):
         super().__init__(daemon=True)
         self._radio = radio
@@ -216,6 +217,7 @@ class LoRaReceiver(threading.Thread):
         self._flash_enabled = True  # Can be toggled via signals
         self._running = False
         self._gateway_state = gateway_state
+        self._verbose_logging = verbose_logging
 
     def set_flash_enabled(self, enabled: bool) -> None:
         """Enable or disable LED flash on receive."""
@@ -244,7 +246,10 @@ class LoRaReceiver(threading.Thread):
 
         result = parse_lora_packet(packet)
         if result is None:
-            logger.warning(f"Invalid LoRa packet (RSSI: {rssi} dB): {packet[:50]}...")
+            if self._verbose_logging:
+                logger.warning(f"Invalid LoRa packet (RSSI: {rssi} dB): {packet!r}")
+            else:
+                logger.warning(f"Invalid LoRa packet (RSSI: {rssi} dB): {packet[:50]}...")
             return
 
         node_id, readings = result
@@ -401,8 +406,11 @@ def load_config(config_path: str) -> dict:
         return json.load(f)
 
 
-def run_gateway(config: dict) -> None:
+def run_gateway(config: dict, verbose_logging: bool = False) -> None:
     """Run the gateway."""
+    if verbose_logging:
+        logger.info("Verbose logging enabled")
+
     node_id = config.get("node_id", "gateway")
     dashboard_url = config.get("dashboard_url")
 
@@ -460,6 +468,7 @@ def run_gateway(config: dict) -> None:
                 flash_color=flash_color,
                 flash_duration=flash_duration,
                 gateway_state=gateway_state,
+                verbose_logging=verbose_logging,
             )
             lora_receiver.set_flash_enabled(flash_on_recv_default)
             lora_receiver.start()
@@ -556,6 +565,11 @@ def main():
         default="config/gateway_config.json",
         help="Path to config file (default: config/gateway_config.json)",
     )
+    parser.add_argument(
+        "--verbose_logging",
+        action="store_true",
+        help="Enable verbose logging (full error messages, no truncation)",
+    )
     args = parser.parse_args()
 
     # Load configuration
@@ -566,7 +580,7 @@ def main():
         sys.exit(1)
 
     # Run gateway
-    run_gateway(config)
+    run_gateway(config, verbose_logging=args.verbose_logging)
 
 
 if __name__ == "__main__":
