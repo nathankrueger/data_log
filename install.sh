@@ -16,7 +16,7 @@ EXAMPLES:
     $0 --reinstall     # Force fresh installation
     $0 --update        # Install any new requirements
 EOF
-    exit 0
+    return 0
 }
 
 # Parse command line arguments
@@ -69,9 +69,9 @@ if [ "$UPDATE" = true ]; then
         pip install -r requirements.txt
     else
         echo "Error: No .venv directory found. Run without --update first to create it."
-        exit 1
+        return 1
     fi
-    exit 0
+    return 0
 fi
 
 # Install or activate
