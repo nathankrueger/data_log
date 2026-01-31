@@ -37,9 +37,9 @@ def release_gpio_resources():
     try:
         import gpiod
         chip = gpiod.Chip("/dev/gpiochip0")
-        print(f"   gpiod: Chip {chip.name} opened")
         # Just opening and closing the chip can help reset state
         chip.close()
+        print("   gpiod: Chip closed successfully")
         released = True
     except Exception as e:
         print(f"   gpiod: {e}")
@@ -150,6 +150,21 @@ def main():
         print(f"   Found: {spi_devices}")
     else:
         print("   ERROR: No SPI devices found! Enable SPI with raspi-config")
+
+    # Test SPI directly
+    print("\n1b. Testing SPI communication...")
+    try:
+        import spidev
+        spi = spidev.SpiDev()
+        spi.open(SPI_BUS, SPI_CS)
+        spi.max_speed_hz = 2000000
+        spi.mode = 0
+        # Try a simple transfer
+        response = spi.xfer2([0xC0, 0x00])  # GetStatus command
+        print(f"   SPI test response: {response}")
+        spi.close()
+    except Exception as e:
+        print(f"   SPI test failed: {e}")
 
     print("\n2. Releasing any held GPIO resources...")
     release_gpio_resources()
