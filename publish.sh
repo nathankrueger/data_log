@@ -33,6 +33,8 @@ EOF
 DEFAULT_DESTINATIONS=(
     "nkrueger:pz2w1:/home/nkrueger/dev/data_log"
     "nkrueger:pz2w2:/home/nkrueger/dev/data_log"
+    "nkrueger:pz2w3:/home/nkrueger/dev/data_log"
+    "nkrueger:pz2w4:/home/nkrueger/dev/data_log"
 )
 
 # Parse command line arguments
