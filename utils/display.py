@@ -130,6 +130,37 @@ class LastPacketPage(ScreenPage):
         ]
 
 
+class GatewayLocalSensors(ScreenPage):
+    """
+    Gateway local sensors page.
+
+    Shows:
+    - Header
+    - Up to 3 local sensor readings (name: value units)
+    - Shows "---" for missing sensor slots
+    """
+
+    def __init__(self, state: GatewayState):
+        self._state = state
+
+    def get_lines(self) -> list[str | None]:
+        sensors = self._state.get_local_sensors()
+
+        lines: list[str | None] = ["Local Sensors"]
+
+        # Show up to 3 sensors (we have 4 lines, 1 for header)
+        for i in range(3):
+            if i < len(sensors):
+                s = sensors[i]
+                # Truncate name to fit, leave room for value
+                name = s.name[:8]
+                lines.append(f"{name}: {s.value:.1f} {s.units}")
+            else:
+                lines.append("---")
+
+        return lines
+
+
 # =============================================================================
 # Screen Manager
 # =============================================================================
@@ -182,6 +213,13 @@ class ScreenManager:
         """Handle switch press - cycle to next page."""
         with self._lock:
             self._current_page_idx = (self._current_page_idx + 1) % len(self._pages)
+        self._refresh()
+
+    def set_page(self, index: int) -> None:
+        """Set the current page by index (thread-safe)."""
+        with self._lock:
+            if 0 <= index < len(self._pages):
+                self._current_page_idx = index
         self._refresh()
 
     def _refresh(self) -> None:

@@ -61,7 +61,7 @@ This enables config-driven instantiation without hardcoding sensor types.
 
 ### Signal Handling (gateway_server.py)
 - `SIGUSR1` - Enable LED flash-on-receive
-- `SIGUSR2` - Disable LED flash-on-receive
+- `SIGUSR2` - Disable LED flash-on-receive and turn off display
 
 ## Hardware
 

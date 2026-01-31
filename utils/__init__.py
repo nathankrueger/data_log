@@ -5,13 +5,14 @@ This package provides shared utilities for the sensor network.
 """
 
 from .display import (
+    GatewayLocalSensors,
     LastPacketPage,
     OffPage,
     ScreenManager,
     ScreenPage,
     SystemInfoPage,
 )
-from .gateway_state import GatewayState, LastPacketInfo
+from .gateway_state import GatewayState, LastPacketInfo, LocalSensorReading
 from .led import RgbLed
 from .protocol import (
     # Sensor ID utilities
@@ -48,7 +49,9 @@ __all__ = [
     # Gateway state
     "GatewayState",
     "LastPacketInfo",
+    "LocalSensorReading",
     # Display
+    "GatewayLocalSensors",
     "LastPacketPage",
     "OffPage",
     "ScreenManager",

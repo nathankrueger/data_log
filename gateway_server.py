@@ -40,6 +40,7 @@ from urllib.error import URLError, HTTPError
 from utils.led import RgbLed
 from utils.gateway_state import GatewayState
 from utils.display import (
+    GatewayLocalSensors,
     LastPacketPage,
     OffPage,
     ScreenManager,
@@ -282,6 +283,7 @@ class LocalSensorReader(threading.Thread):
         sensors: list[tuple[Sensor, str]],
         collector: SensorDataCollector,
         interval_sec: float = 5.0,
+        gateway_state: GatewayState | None = None,
     ):
         super().__init__(daemon=True)
         self._node_id = node_id
@@ -289,6 +291,7 @@ class LocalSensorReader(threading.Thread):
         self._collector = collector
         self._interval_sec = interval_sec
         self._running = False
+        self._gateway_state = gateway_state
 
     def run(self) -> None:
         self._running = True
@@ -304,6 +307,11 @@ class LocalSensorReader(threading.Thread):
                     self._collector.add_readings(
                         self._node_id, readings, is_local=True
                     )
+                    # Update gateway state for display
+                    if self._gateway_state:
+                        self._gateway_state.update_local_sensors([
+                            (r.name, r.value, r.units) for r in readings
+                        ])
             except Exception as e:
                 logger.error(f"Local sensor read error: {e}")
 
@@ -460,25 +468,6 @@ def run_gateway(config: dict) -> None:
             logger.error(f"Failed to initialize LoRa: {e}")
             logger.info("Continuing without LoRa receiver")
 
-    # Set up signal handlers for runtime LED toggle
-    def enable_flash(signum, frame):
-        logger.info("Received SIGUSR1 signal")
-        if lora_receiver:
-            lora_receiver.set_flash_enabled(True)
-        else:
-            logger.warning("No LoRa receiver to enable flash on")
-
-    def disable_flash(signum, frame):
-        logger.info("Received SIGUSR2 signal")
-        if lora_receiver:
-            lora_receiver.set_flash_enabled(False)
-        else:
-            logger.warning("No LoRa receiver to disable flash on")
-
-    signal.signal(signal.SIGUSR1, enable_flash)
-    signal.signal(signal.SIGUSR2, disable_flash)
-    logger.info("Signal handlers registered (SIGUSR1=enable LED, SIGUSR2=disable LED)")
-
     # Start local sensor reader if configured
     local_reader = None
     local_sensor_configs = config.get("local_sensors", [])
@@ -487,7 +476,9 @@ def run_gateway(config: dict) -> None:
         local_sensors = instantiate_sensors(local_sensor_configs)
         if local_sensors:
             interval = config.get("local_sensor_interval_sec", 5.0)
-            local_reader = LocalSensorReader(node_id, local_sensors, collector, interval)
+            local_reader = LocalSensorReader(
+                node_id, local_sensors, collector, interval, gateway_state
+            )
             local_reader.start()
 
     # Initialize OLED display if configured
@@ -500,6 +491,7 @@ def run_gateway(config: dict) -> None:
                 OffPage(),
                 SystemInfoPage(gateway_state),
                 LastPacketPage(gateway_state),
+                GatewayLocalSensors(gateway_state),
             ]
             screen_manager = ScreenManager(
                 pages=pages,
@@ -513,6 +505,23 @@ def run_gateway(config: dict) -> None:
         except Exception as e:
             logger.warning(f"Failed to initialize display: {e}")
             screen_manager = None
+
+    # Set up signal handlers for runtime LED/display toggle
+    def enable_flash(signum, frame):
+        logger.info("Received SIGUSR1 signal - enabling LED flash")
+        if lora_receiver:
+            lora_receiver.set_flash_enabled(True)
+
+    def disable_flash(signum, frame):
+        logger.info("Received SIGUSR2 signal - disabling LED flash and display")
+        if lora_receiver:
+            lora_receiver.set_flash_enabled(False)
+        if screen_manager:
+            screen_manager.set_page(0)  # Switch to OffPage
+
+    signal.signal(signal.SIGUSR1, enable_flash)
+    signal.signal(signal.SIGUSR2, disable_flash)
+    logger.info("Signal handlers registered (SIGUSR1=enable, SIGUSR2=disable LED/display)")
 
     # Run forever (threads are daemon threads, so Ctrl+C will stop everything)
     try:

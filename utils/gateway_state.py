@@ -22,6 +22,15 @@ class LastPacketInfo:
 
 
 @dataclass
+class LocalSensorReading:
+    """A single local sensor reading."""
+
+    name: str = ""
+    value: float = 0.0
+    units: str = ""
+
+
+@dataclass
 class GatewayState:
     """
     Shared runtime state for the gateway.
@@ -32,6 +41,7 @@ class GatewayState:
 
     start_time: float = field(default_factory=time.time)
     last_packet: LastPacketInfo = field(default_factory=LastPacketInfo)
+    local_sensors: list[LocalSensorReading] = field(default_factory=list)
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def update_last_packet(
@@ -59,3 +69,24 @@ class GatewayState:
                 sensor_value=self.last_packet.sensor_value,
                 sensor_units=self.last_packet.sensor_units,
             )
+
+    def update_local_sensors(self, readings: list[tuple[str, float, str]]) -> None:
+        """
+        Update local sensor readings (thread-safe).
+
+        Args:
+            readings: List of (name, value, units) tuples
+        """
+        with self._lock:
+            self.local_sensors = [
+                LocalSensorReading(name=name, value=value, units=units)
+                for name, value, units in readings
+            ]
+
+    def get_local_sensors(self) -> list[LocalSensorReading]:
+        """Get a copy of local sensor readings (thread-safe)."""
+        with self._lock:
+            return [
+                LocalSensorReading(name=r.name, value=r.value, units=r.units)
+                for r in self.local_sensors
+            ]
