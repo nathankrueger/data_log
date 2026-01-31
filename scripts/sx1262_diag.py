@@ -89,21 +89,20 @@ def main():
     print("Sync word: 0x1424 (matches RFM9x 0x12)")
     print("\n=== Waiting for packets (Ctrl+C to stop) ===\n")
 
+    # Put radio in continuous receive mode
+    print("Starting continuous receive mode...")
+    lora.request(0xFFFFFF)  # Continuous receive (no timeout)
+
     packet_count = 0
+    poll_count = 0
     try:
         while True:
-            # Request continuous receive
-            print("Requesting receive (5s timeout)...")
-            lora.request(5000)  # 5 second timeout
+            poll_count += 1
+            # Poll for received data using status()
+            status = lora.status()
 
-            # Wait for packet or timeout
-            lora.wait()
-
-            # Check if we got anything
-            length = lora.available()
-            print(f"  available() returned: {length}")
-
-            if length > 0:
+            # Status: 0 = waiting, 1 = received, 2 = transmitted, -1 = error
+            if status == 1:  # Packet received
                 packet_count += 1
                 data = []
                 while lora.available():
@@ -121,8 +120,15 @@ def main():
                 print(f"    Message: {message}")
                 print(f"    RSSI: {rssi} dBm, SNR: {snr} dB")
                 print(f"    Length: {len(data)} bytes\n")
-            else:
-                print("  No packet received (timeout)")
+
+                # Re-enter receive mode after getting a packet
+                lora.request(0xFFFFFF)
+
+            elif poll_count % 100 == 0:
+                # Print status every 100 polls (~1 second) to show we're alive
+                print(f"  Polling... (status={status}, polls={poll_count})")
+
+            time.sleep(0.01)  # 10ms poll interval
 
     except KeyboardInterrupt:
         print(f"\n\nStopping. Received {packet_count} packets total.")

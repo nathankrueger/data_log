@@ -232,26 +232,26 @@ class SX1262Radio(Radio):
         if self._lora is None:
             raise RuntimeError("Radio not initialized. Call init() first.")
 
-        timeout_ms = int(timeout * 1000)
-
         try:
-            # Set to receive mode with timeout
-            self._lora.request(timeout_ms)
+            # Put radio in receive mode (continuous)
+            self._lora.request(0xFFFFFF)
 
-            # Wait for packet or timeout
-            self._lora.wait()
+            # Poll for received data with timeout
+            start_time = time.monotonic()
+            while (time.monotonic() - start_time) < timeout:
+                # Check status: 0=waiting, 1=received, 2=transmitted, -1=error
+                status = self._lora.status()
 
-            # Check if we received data
-            length = self._lora.available()
-            if length > 0:
-                # Read the packet
-                data = []
-                while self._lora.available():
-                    data.append(self._lora.read())
+                if status == 1:  # Packet received
+                    data = []
+                    while self._lora.available():
+                        data.append(self._lora.read())
 
-                # Store signal quality metrics
-                self._last_rssi = int(self._lora.packetRssi())
-                return bytes(data)
+                    # Store signal quality metrics
+                    self._last_rssi = int(self._lora.packetRssi())
+                    return bytes(data)
+
+                time.sleep(0.01)  # 10ms poll interval
 
             return None
 
