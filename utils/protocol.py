@@ -181,7 +181,8 @@ def build_lora_packets(node_id: str, readings: list[SensorReading]) -> list[byte
     if not readings:
         return []
 
-    timestamp = readings[0].timestamp
+    # Round timestamp to 3 decimal places (millisecond precision)
+    timestamp = round(readings[0].timestamp, 3)
 
     def build_packet(ts: float, compact_readings: list[dict]) -> bytes:
         message = {"n": node_id, "t": ts, "r": compact_readings}
