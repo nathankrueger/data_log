@@ -24,6 +24,8 @@ Requires:
 """
 
 import argparse
+import atexit
+import signal
 import sys
 import time
 from pathlib import Path
@@ -34,6 +36,40 @@ sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 from radio import Radio, RFM9xRadio, SX1262Radio, rssi_to_brightness
 from sensors import BME280TempPressureHumidity
 from utils.led import RgbLed
+
+# Global references for cleanup
+_radio: Radio | None = None
+_led: RgbLed | None = None
+
+
+def _cleanup():
+    """Clean up radio and LED resources."""
+    global _radio, _led
+    if _radio is not None:
+        try:
+            _radio.close()
+        except Exception:
+            pass
+        _radio = None
+    if _led is not None:
+        try:
+            _led.close()
+        except Exception:
+            pass
+        _led = None
+
+
+def _signal_handler(signum, frame):
+    """Handle termination signals."""
+    print("\nShutting down...")
+    _cleanup()
+    sys.exit(0)
+
+
+# Register cleanup handlers
+atexit.register(_cleanup)
+signal.signal(signal.SIGTERM, _signal_handler)
+signal.signal(signal.SIGINT, _signal_handler)
 
 
 def create_radio(args) -> Radio:
@@ -184,29 +220,26 @@ def main():
     if args.reset_pin is None:
         args.reset_pin = 25 if args.type == "rfm9x" else 22
 
-    led = None
-    radio = create_radio(args)
+    global _radio, _led
+
+    _radio = create_radio(args)
 
     try:
-        radio.init()
+        _radio.init()
         print(f"Radio initialized successfully\n")
 
         if args.send:
-            send_messages(radio, use_sensor=not args.no_sensor)
+            send_messages(_radio, use_sensor=not args.no_sensor)
         else:
             if not args.no_led:
                 try:
-                    led = RgbLed(red_bcm=17, green_bcm=27, blue_bcm=22, common_anode=True)
+                    _led = RgbLed(red_bcm=17, green_bcm=27, blue_bcm=22, common_anode=True)
                 except Exception as e:
                     print(f"LED not available ({e}), continuing without LED feedback")
-            receive_messages(radio, led)
+            receive_messages(_radio, _led)
 
-    except KeyboardInterrupt:
-        print("\nShutting down...")
     finally:
-        radio.close()
-        if led:
-            led.close()
+        _cleanup()
 
 
 if __name__ == "__main__":

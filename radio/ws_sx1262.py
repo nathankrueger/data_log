@@ -96,6 +96,31 @@ class SX1262Radio(Radio):
         self._lora = None
         self._last_rssi: int | None = None
 
+    def _hardware_reset(self) -> None:
+        """Perform a hardware reset of the radio via the RESET pin.
+
+        This clears any stuck state from a previous run that didn't clean up.
+        """
+        try:
+            import lgpio
+
+            h = lgpio.gpiochip_open(0)
+            lgpio.gpio_claim_output(h, self._reset_pin)
+
+            # Pulse reset low for 1ms, then high
+            lgpio.gpio_write(h, self._reset_pin, 0)  # Low
+            time.sleep(0.001)
+            lgpio.gpio_write(h, self._reset_pin, 1)  # High
+            time.sleep(0.01)  # Wait for radio to stabilize
+
+            lgpio.gpio_free(h, self._reset_pin)
+            lgpio.gpiochip_close(h)
+            logger.debug("Hardware reset complete")
+        except Exception as e:
+            # If we can't do a hardware reset, continue anyway
+            # The begin() call will do its own reset
+            logger.debug(f"Hardware reset skipped: {e}")
+
     def init(self) -> None:
         """Initialize the SX1262 radio hardware."""
         try:
@@ -104,6 +129,10 @@ class SX1262Radio(Radio):
             raise ImportError(
                 "LoRaRF library not found. Install with: pip install LoRaRF"
             )
+
+        # Manual hardware reset before init to clear any stuck state
+        # This helps when the previous run didn't clean up properly
+        self._hardware_reset()
 
         self._lora = SX126x()
 
