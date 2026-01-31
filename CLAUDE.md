@@ -96,6 +96,14 @@ See `.example` files for templates. Actual config files are gitignored.
 
 **New Radio:** Create class in `radio/` extending `Radio`, export in `radio/__init__.py`
 
-## Important:
+## Development Workflow
 
-When adding dependencies or imports to python files, be sure to always add it to requirements.txt.
+Development happens on a separate machine (not the Pi Zero 2W targets). The SSH/VSCode server setup on the Pi is too slow for practical development.
+
+- **Do not attempt to run code or tests locally** - the hardware dependencies (GPIO, I2C sensors, LoRa radio) won't be available
+- Files must be transferred to the Pi Zero 2W for testing
+- The user will run tests manually on the target device
+
+## Important
+
+When adding dependencies or imports to python files, be sure to always add it to requirements.txt. Note that transitive dependencies (packages already required by other packages) don't need to be added explicitly.
