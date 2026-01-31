@@ -1,4 +1,4 @@
-"""Waveshare Core1262-868M LoRa radio implementation."""
+"""Waveshare Core1262-868M LoRa radio implementation using LoRaRF library."""
 
 import logging
 import time
@@ -11,6 +11,9 @@ logger = logging.getLogger(__name__)
 class SX1262Radio(Radio):
     """
     Waveshare Core1262-868M LoRa radio module implementation.
+
+    Uses the LoRaRF library: pip install LoRaRF
+    See: https://github.com/chandrawi/LoRaRF-Python
 
     Configured to be interoperable with RFM9x radios using matching
     LoRa modulation parameters (spreading factor, bandwidth, coding rate).
@@ -90,78 +93,73 @@ class SX1262Radio(Radio):
         self._spi_bus = spi_bus
         self._spi_cs = spi_cs
 
-        self._sx1262 = None
-        self._gpio = None
+        self._lora = None
         self._last_rssi: int | None = None
 
     def init(self) -> None:
         """Initialize the SX1262 radio hardware."""
         try:
-            from SX1262 import SX1262
+            from LoRaRF import SX126x
         except ImportError:
             raise ImportError(
-                "SX1262 library not found. Install with: pip install sx1262"
+                "LoRaRF library not found. Install with: pip install LoRaRF"
             )
 
-        self._sx1262 = SX1262()
+        self._lora = SX126x()
 
-        # Begin with pin configuration
-        # The library expects: begin(busId, csId, reset, busy, dio1, txen, rxen)
-        ret = self._sx1262.begin(
-            self._spi_bus,
-            self._spi_cs,
+        # Configure SPI
+        self._lora.setSpi(self._spi_bus, self._spi_cs)
+
+        # Configure GPIO pins: reset, busy, dio1, txen, rxen
+        self._lora.setPins(
             self._reset_pin,
             self._busy_pin,
             self._dio1_pin,
             self._txen_pin,
             self._rxen_pin,
         )
-        if ret != 0:
-            raise RuntimeError(f"Failed to initialize SX1262 radio (error: {ret})")
 
-        # Set frequency
-        ret = self._sx1262.setFrequency(int(self._frequency_mhz))
-        if ret != 0:
-            raise RuntimeError(f"Failed to set frequency (error: {ret})")
+        # Initialize the radio
+        if not self._lora.begin():
+            raise RuntimeError("Failed to initialize SX1262 radio")
 
-        # Bandwidth mapping for SX1262 library
+        # Set frequency in Hz
+        freq_hz = int(self._frequency_mhz * 1_000_000)
+        self._lora.setFrequency(freq_hz)
+
+        # Bandwidth mapping for LoRaRF library (uses bandwidth index)
+        # BW_7800 = 0, BW_10400 = 1, BW_15600 = 2, BW_20800 = 3,
+        # BW_31250 = 4, BW_41700 = 5, BW_62500 = 6, BW_125000 = 7,
+        # BW_250000 = 8, BW_500000 = 9
         bw_map = {
-            125000: 125.0,
-            250000: 250.0,
-            500000: 500.0,
+            125000: 7,
+            250000: 8,
+            500000: 9,
         }
-        bw_khz = bw_map.get(self._bandwidth, 125.0)
+        bw_index = bw_map.get(self._bandwidth, 7)
+
+        # Coding rate: CR_4_5 = 1, CR_4_6 = 2, CR_4_7 = 3, CR_4_8 = 4
+        cr_index = self._coding_rate - 4
 
         # Set LoRa modulation parameters for RFM9x interoperability
-        ret = self._sx1262.setLoRaModulation(
-            self._spreading_factor,
-            bw_khz,
-            self._coding_rate,
-        )
-        if ret != 0:
-            raise RuntimeError(f"Failed to set modulation params (error: {ret})")
+        self._lora.setLoRaModulation(self._spreading_factor, bw_index, cr_index)
 
         # Set packet parameters
-        # Explicit header (variable length) for RFM9x compatibility
-        ret = self._sx1262.setLoRaPacket(
+        # headerType: HEADER_EXPLICIT = 0, HEADER_IMPLICIT = 1
+        # crcType: CRC_DISABLE = 0, CRC_ENABLE = 1
+        self._lora.setLoRaPacket(
             self._preamble_length,
-            False,  # Explicit header (not implicit)
-            255,    # Max payload length
-            True,   # CRC enabled
-            False,  # Standard IQ (not inverted)
+            0,    # Explicit header (variable length) for RFM9x compatibility
+            255,  # Max payload length
+            1,    # CRC enabled
+            0,    # Standard IQ (not inverted)
         )
-        if ret != 0:
-            raise RuntimeError(f"Failed to set packet params (error: {ret})")
 
         # Set sync word for LoRa (0x12 = private network, matches RFM9x default)
-        ret = self._sx1262.setSyncWord(0x12)
-        if ret != 0:
-            logger.warning(f"Failed to set sync word (error: {ret})")
+        self._lora.setSyncWord(0x12)
 
         # Set TX power
-        ret = self._sx1262.setTxPower(self._tx_power)
-        if ret != 0:
-            raise RuntimeError(f"Failed to set TX power (error: {ret})")
+        self._lora.setTxPower(self._tx_power)
 
         logger.info(
             f"SX1262 initialized: {self._frequency_mhz} MHz, "
@@ -171,50 +169,45 @@ class SX1262Radio(Radio):
 
     def send(self, data: bytes) -> bool:
         """Send data over LoRa."""
-        if self._sx1262 is None:
+        if self._lora is None:
             raise RuntimeError("Radio not initialized. Call init() first.")
 
         try:
-            # The library handles RF switch control automatically
-            ret = self._sx1262.send(list(data))
-            return ret == len(data)
+            # Transmit the message and wait for completion
+            self._lora.beginPacket()
+            self._lora.write(list(data), len(data))
+            self._lora.endPacket()
+            self._lora.wait()
+            return True
         except Exception as e:
             logger.warning(f"Radio send failed: {e} (payload size: {len(data)} bytes)")
             return False
 
     def receive(self, timeout: float = 5.0) -> bytes | None:
         """Receive data from LoRa with timeout."""
-        if self._sx1262 is None:
+        if self._lora is None:
             raise RuntimeError("Radio not initialized. Call init() first.")
 
-        # Set receive mode with timeout
         timeout_ms = int(timeout * 1000)
 
         try:
-            # Put radio in receive mode
-            self._sx1262.setBlockingCallback(False)
-            ret = self._sx1262.request(timeout_ms)
+            # Set to receive mode with timeout
+            self._lora.request(timeout_ms)
 
-            if ret < 0:
-                return None
+            # Wait for packet or timeout
+            self._lora.wait()
 
-            # Poll for received data
-            start_time = time.monotonic()
-            while (time.monotonic() - start_time) < timeout:
-                status = self._sx1262.status()
+            # Check if we received data
+            length = self._lora.available()
+            if length > 0:
+                # Read the packet
+                data = []
+                while self._lora.available():
+                    data.append(self._lora.read())
 
-                # Check if packet received
-                if status == 1:  # RX done
-                    # Read the received packet
-                    data, err = self._sx1262.read()
-
-                    if err == 0 and data:
-                        # Store signal quality metrics
-                        self._last_rssi = self._sx1262.packetRssi()
-                        return bytes(data)
-                    return None
-
-                time.sleep(0.01)
+                # Store signal quality metrics
+                self._last_rssi = int(self._lora.packetRssi())
+                return bytes(data)
 
             return None
 
@@ -228,12 +221,12 @@ class SX1262Radio(Radio):
 
     def close(self) -> None:
         """Clean up radio resources."""
-        if self._sx1262 is not None:
+        if self._lora is not None:
             try:
-                self._sx1262.standby()
+                self._lora.sleep()
             except Exception:
                 pass
-            self._sx1262 = None
+            self._lora = None
         self._last_rssi = None
 
     @property
@@ -263,9 +256,9 @@ class SX1262Radio(Radio):
         Returns:
             SNR in dB, or None if not available
         """
-        if self._sx1262 is None:
+        if self._lora is None:
             return None
         try:
-            return self._sx1262.snr()
+            return self._lora.snr()
         except Exception:
             return None

@@ -7,7 +7,7 @@ LoRa communication on Raspberry Pi.
 
 from .base import Radio
 from .rfm9x import RFM9xRadio, rssi_to_brightness, RSSI_MAX, RSSI_MIN
-from .sx1262 import SX1262Radio
+from .ws_sx1262 import SX1262Radio
 
 __all__ = [
     "Radio",

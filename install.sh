@@ -8,22 +8,29 @@ Install or activate the data_log Python environment.
 
 OPTIONS:
     -r, --reinstall    Remove existing .venv and reinstall from scratch
+    -u, --update       Update dependencies from requirements.txt
     -h, --help         Display this help message
 
 EXAMPLES:
     $0                 # Activate existing .venv or create if missing
     $0 --reinstall     # Force fresh installation
+    $0 --update        # Install any new requirements
 EOF
     exit 0
 }
 
 # Parse command line arguments
 REINSTALL=false
+UPDATE=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
         -r|--reinstall)
             REINSTALL=true
+            shift
+            ;;
+        -u|--update)
+            UPDATE=true
             shift
             ;;
         -h|--help)
@@ -51,6 +58,20 @@ if [ "$REINSTALL" = true ]; then
         echo "Removing existing .venv..."
         rm -rf .venv
     fi
+fi
+
+# Handle update option
+if [ "$UPDATE" = true ]; then
+    if [ -d ".venv" ]; then
+        echo "Activating virtual environment..."
+        source .venv/bin/activate
+        echo "Updating requirements..."
+        pip install -r requirements.txt
+    else
+        echo "Error: No .venv directory found. Run without --update first to create it."
+        exit 1
+    fi
+    exit 0
 fi
 
 # Install or activate

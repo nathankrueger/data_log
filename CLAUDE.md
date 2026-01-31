@@ -98,3 +98,7 @@ See `.example` files for templates. Actual config files are gitignored.
 **New Sensor:** Create class in `sensors/` extending `Sensor`, add to `SENSOR_CLASS_IDS` in `sensors/__init__.py`
 
 **New Radio:** Create class in `radio/` extending `Radio`, export in `radio/__init__.py`
+
+## Important:
+
+When adding dependencies or imports to python files, be sure to always add it to requirements.txt.
