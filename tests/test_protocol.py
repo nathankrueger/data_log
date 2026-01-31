@@ -228,6 +228,114 @@ class TestParseLoraPacket:
         assert readings[0].sensor_class == "unknown_999"
 
 
+class TestPrecision:
+    """Tests for float precision handling in LoRa packets."""
+
+    def test_default_precision_is_3(self):
+        """Default precision should round to 3 decimal places."""
+        reading = SensorReading(
+            name="Temperature",
+            units="F",
+            value=72.123456789,
+            sensor_class="BME280TempPressureHumidity",
+            timestamp=time.time(),
+        )
+        packets = build_lora_packets("test-node", [reading])
+
+        data = json.loads(packets[0].decode("utf-8"))
+        assert data["r"][0]["v"] == 72.123
+
+    def test_custom_precision(self):
+        """Custom precision should be respected."""
+        reading = SensorReading(
+            name="Temperature",
+            units="F",
+            value=72.123456789,
+            sensor_class="BME280TempPressureHumidity",
+            timestamp=time.time(),
+            precision=1,
+        )
+        packets = build_lora_packets("test-node", [reading])
+
+        data = json.loads(packets[0].decode("utf-8"))
+        assert data["r"][0]["v"] == 72.1
+
+    def test_precision_zero(self):
+        """Precision of 0 should round to integer."""
+        reading = SensorReading(
+            name="Temperature",
+            units="F",
+            value=72.6,
+            sensor_class="BME280TempPressureHumidity",
+            timestamp=time.time(),
+            precision=0,
+        )
+        packets = build_lora_packets("test-node", [reading])
+
+        data = json.loads(packets[0].decode("utf-8"))
+        assert data["r"][0]["v"] == 73
+
+    def test_precision_with_none_value(self):
+        """None values should pass through unchanged."""
+        reading = SensorReading(
+            name="Temperature",
+            units="F",
+            value=None,
+            sensor_class="BME280TempPressureHumidity",
+            timestamp=time.time(),
+            precision=3,
+        )
+        packets = build_lora_packets("test-node", [reading])
+
+        data = json.loads(packets[0].decode("utf-8"))
+        assert data["r"][0]["v"] is None
+
+    def test_mixed_precision_readings(self):
+        """Multiple readings with different precisions should each be handled correctly."""
+        readings = [
+            SensorReading(
+                name="Temperature",
+                units="F",
+                value=72.123456,
+                sensor_class="BME280TempPressureHumidity",
+                timestamp=time.time(),
+                precision=2,
+            ),
+            SensorReading(
+                name="Pressure",
+                units="hPa",
+                value=1013.256789,
+                sensor_class="BME280TempPressureHumidity",
+                timestamp=time.time(),
+                precision=1,
+            ),
+        ]
+        packets = build_lora_packets("test-node", readings)
+
+        data = json.loads(packets[0].decode("utf-8"))
+        assert data["r"][0]["v"] == 72.12
+        assert data["r"][1]["v"] == 1013.3
+
+    def test_precision_roundtrip(self):
+        """Precision should be applied during build, but roundtrip should work."""
+        original = SensorReading(
+            name="Temperature",
+            units="F",
+            value=72.123456789,
+            sensor_class="BME280TempPressureHumidity",
+            timestamp=time.time(),
+            precision=3,
+        )
+        packets = build_lora_packets("test-node", [original])
+
+        result = parse_lora_packet(packets[0])
+        assert result is not None
+
+        node_id, readings = result
+        # Value should be rounded to 3 decimal places
+        assert readings[0].value == 72.123
+
+
 class TestSensorRegistry:
     """Tests for sensor class ID registry."""
 

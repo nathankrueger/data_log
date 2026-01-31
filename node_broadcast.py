@@ -155,6 +155,7 @@ def read_sensors(entries: list[SensorEntry]) -> list[SensorReading]:
             values = entry.sensor.read()
             names = entry.sensor.get_names()
             units = entry.sensor.get_units()
+            precision = entry.sensor.get_precision()
 
             for value, name, unit in zip(values, names, units):
                 readings.append(
@@ -164,6 +165,7 @@ def read_sensors(entries: list[SensorEntry]) -> list[SensorReading]:
                         value=value,
                         sensor_class=entry.class_name,
                         timestamp=timestamp,
+                        precision=precision,
                     )
                 )
         except Exception as e:

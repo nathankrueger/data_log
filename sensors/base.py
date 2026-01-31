@@ -30,3 +30,7 @@ class Sensor(ABC):
     def get_units(self) -> tuple[str, ...]:
         """Return the units of measurement. Tuple length matches read() output count."""
         pass
+
+    def get_precision(self) -> int:
+        """Return the number of decimal places for float values. Default is 3."""
+        return 3

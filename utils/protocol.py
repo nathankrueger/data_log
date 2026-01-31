@@ -129,6 +129,7 @@ class SensorReading:
     value: float | None
     sensor_class: str
     timestamp: float
+    precision: int = 3  # Number of decimal places for float values
 
     def to_dict(self) -> dict:
         return {
@@ -196,11 +197,16 @@ def build_lora_packets(node_id: str, readings: list[SensorReading]) -> list[byte
             # Unknown sensor class, skip or use -1
             sensor_id = -1
 
+        # Round value to specified precision
+        value = reading.value
+        if value is not None:
+            value = round(value, reading.precision)
+
         compact = {
             "s": sensor_id,
             "k": reading.name,
             "u": reading.units,
-            "v": reading.value,
+            "v": value,
         }
 
         # Try adding to current batch

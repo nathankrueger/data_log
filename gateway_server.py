@@ -242,6 +242,7 @@ class LoRaReceiver(threading.Thread):
 
     def _process_packet(self, packet: bytes) -> None:
         """Validate CRC, parse JSON, forward to collector."""
+        receive_time = time.time()
         rssi = self._radio.get_last_rssi()
 
         result = parse_lora_packet(packet)
@@ -253,6 +254,11 @@ class LoRaReceiver(threading.Thread):
             return
 
         node_id, readings = result
+
+        # Replace timestamp=0 with gateway receive time
+        for reading in readings:
+            if reading.timestamp == 0:
+                reading.timestamp = receive_time
         logger.info(
             f"LoRa received from '{node_id}': {len(readings)} readings (RSSI: {rssi} dB)"
         )
