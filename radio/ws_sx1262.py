@@ -107,10 +107,17 @@ class SX1262Radio(Radio):
 
         self._lora = SX126x()
 
-        # Configure SPI
+        logger.debug(
+            f"Configuring SX1262: SPI bus={self._spi_bus}, cs={self._spi_cs}, "
+            f"reset={self._reset_pin}, busy={self._busy_pin}, dio1={self._dio1_pin}, "
+            f"txen={self._txen_pin}, rxen={self._rxen_pin}"
+        )
+
+        # Configure SPI - must be called before begin()
         self._lora.setSpi(self._spi_bus, self._spi_cs)
 
         # Configure GPIO pins: reset, busy, dio1, txen, rxen
+        # These must be set before begin()
         self._lora.setPins(
             self._reset_pin,
             self._busy_pin,
@@ -120,8 +127,15 @@ class SX1262Radio(Radio):
         )
 
         # Initialize the radio
+        logger.debug("Calling begin()...")
         if not self._lora.begin():
-            raise RuntimeError("Failed to initialize SX1262 radio")
+            raise RuntimeError(
+                f"Failed to initialize SX1262 radio. Check:\n"
+                f"  1. SPI enabled: ls /dev/spi*\n"
+                f"  2. Wiring: RESET={self._reset_pin}, BUSY={self._busy_pin}, "
+                f"DIO1={self._dio1_pin}, TXEN={self._txen_pin}, RXEN={self._rxen_pin}\n"
+                f"  3. SPI: bus={self._spi_bus}, cs={self._spi_cs} (CS pin GPIO 8 for CE0, GPIO 7 for CE1)"
+            )
 
         # Set frequency in Hz
         freq_hz = int(self._frequency_mhz * 1_000_000)
@@ -155,8 +169,12 @@ class SX1262Radio(Radio):
             0,    # Standard IQ (not inverted)
         )
 
-        # Set sync word for LoRa (0x12 = private network, matches RFM9x default)
-        self._lora.setSyncWord(0x12)
+        # Set sync word for LoRa compatibility with RFM9x (SX127x)
+        # SX127x uses single-byte sync word, SX126x uses two-byte format
+        # Conversion: SX127x 0x12 -> SX126x 0x1424, SX127x 0x34 -> SX126x 0x3444
+        # The formula is: ((sw & 0xF0) << 8) | 0x04 | ((sw & 0x0F) << 4) | 0x04
+        # For 0x12: 0x1424
+        self._lora.setSyncWord(0x1424)
 
         # Set TX power
         self._lora.setTxPower(self._tx_power)
@@ -164,7 +182,8 @@ class SX1262Radio(Radio):
         logger.info(
             f"SX1262 initialized: {self._frequency_mhz} MHz, "
             f"SF{self._spreading_factor}, BW {self._bandwidth}Hz, "
-            f"CR 4/{self._coding_rate}, TX {self._tx_power} dBm"
+            f"CR 4/{self._coding_rate}, TX {self._tx_power} dBm, "
+            f"sync=0x1424 (RFM9x-compatible)"
         )
 
     def send(self, data: bytes) -> bool:
