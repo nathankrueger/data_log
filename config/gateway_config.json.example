@@ -19,5 +19,12 @@
         "flash_on_recv": true,
         "flash_color": [255, 0, 0],
         "flash_duration_sec": 0.1
+    },
+    "display": {
+        "enabled": true,
+        "switch_pin": 16,
+        "i2c_port": 1,
+        "i2c_address": 60,
+        "refresh_interval": 0.5
     }
 }

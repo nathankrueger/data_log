@@ -38,6 +38,13 @@ from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
 from utils.led import RgbLed
+from utils.gateway_state import GatewayState
+from utils.display import (
+    LastPacketPage,
+    OffPage,
+    ScreenManager,
+    SystemInfoPage,
+)
 
 import sensors as sensors_module
 from radio import RFM9xRadio
@@ -197,6 +204,7 @@ class LoRaReceiver(threading.Thread):
         led: RgbLed | None = None,
         flash_color: tuple[int, int, int] = (255, 0, 0),
         flash_duration: float = 0.1,
+        gateway_state: GatewayState | None = None,
     ):
         super().__init__(daemon=True)
         self._radio = radio
@@ -206,6 +214,7 @@ class LoRaReceiver(threading.Thread):
         self._flash_duration = flash_duration
         self._flash_enabled = True  # Can be toggled via signals
         self._running = False
+        self._gateway_state = gateway_state
 
     def set_flash_enabled(self, enabled: bool) -> None:
         """Enable or disable LED flash on receive."""
@@ -245,6 +254,16 @@ class LoRaReceiver(threading.Thread):
         # Flash LED on successful receive
         if self._led and self._flash_enabled:
             self._led.flash(*self._flash_color, self._flash_duration)
+
+        # Update gateway state with first reading for display
+        if self._gateway_state and readings:
+            r = readings[0]
+            self._gateway_state.update_last_packet(
+                node_id=node_id,
+                sensor_name=r.name,
+                sensor_value=r.value,
+                sensor_units=r.units,
+            )
 
         self._collector.add_readings(node_id, readings, is_local=False)
 
@@ -383,6 +402,9 @@ def run_gateway(config: dict) -> None:
         logger.error("dashboard_url not configured")
         sys.exit(1)
 
+    # Create shared state for display
+    gateway_state = GatewayState()
+
     # Create dashboard client and collector
     dashboard_client = DashboardClient(dashboard_url, node_id)
     collector = SensorDataCollector(node_id, dashboard_client)
@@ -429,6 +451,7 @@ def run_gateway(config: dict) -> None:
                 led=led,
                 flash_color=flash_color,
                 flash_duration=flash_duration,
+                gateway_state=gateway_state,
             )
             lora_receiver.set_flash_enabled(flash_on_recv_default)
             lora_receiver.start()
@@ -467,6 +490,30 @@ def run_gateway(config: dict) -> None:
             local_reader = LocalSensorReader(node_id, local_sensors, collector, interval)
             local_reader.start()
 
+    # Initialize OLED display if configured
+    screen_manager = None
+    display_config = config.get("display", {})
+
+    if display_config.get("enabled", False):
+        try:
+            pages = [
+                OffPage(),
+                SystemInfoPage(gateway_state),
+                LastPacketPage(gateway_state),
+            ]
+            screen_manager = ScreenManager(
+                pages=pages,
+                switch_pin=display_config.get("switch_pin", 16),
+                i2c_port=display_config.get("i2c_port", 1),
+                i2c_address=display_config.get("i2c_address", 0x3C),
+                refresh_interval=display_config.get("refresh_interval", 0.5),
+            )
+            screen_manager.start()
+            logger.info("OLED display initialized (switch on GPIO to cycle pages)")
+        except Exception as e:
+            logger.warning(f"Failed to initialize display: {e}")
+            screen_manager = None
+
     # Run forever (threads are daemon threads, so Ctrl+C will stop everything)
     try:
         while True:
@@ -480,6 +527,8 @@ def run_gateway(config: dict) -> None:
             lora_receiver.stop()
         if local_reader:
             local_reader.stop()
+        if screen_manager:
+            screen_manager.close()
         if radio:
             radio.close()
         if led:
