@@ -124,6 +124,7 @@ class SX1262Driver:
         dio1_pin: int = 16,
         txen_pin: Optional[int] = 6,
         rxen_pin: Optional[int] = 5,
+        rfm9x_compatible: bool = True,
     ):
         """
         Initialize SX1262 driver.
@@ -136,9 +137,12 @@ class SX1262Driver:
             dio1_pin: GPIO pin for DIO1 (interrupt)
             txen_pin: GPIO pin for TX enable (RF switch), None if not used
             rxen_pin: GPIO pin for RX enable (RF switch), None if not used
+            rfm9x_compatible: If True, use IQ inversion for RX to interoperate
+                with SX127x/RFM9x radios. Set False for SX1262-only networks.
         """
         self._spi_bus = spi_bus
         self._spi_cs = spi_cs
+        self._rfm9x_compatible = rfm9x_compatible
 
         # Initialize SPI
         self._spi = spidev.SpiDev()
@@ -461,7 +465,7 @@ class SX1262Driver:
             self.set_buffer_base_address(0x00, 0x00)
             self.write_buffer(0x00, data)
 
-            # Update packet length
+            # Update packet length (invert_iq = 0 for TX, standard IQ for RFM9x compatibility)
             self.set_packet_params(8, 0, len(data), 1, 0)
 
             # Start TX
@@ -499,6 +503,11 @@ class SX1262Driver:
             self.set_standby()
             self.clear_irq_status()
             self.set_buffer_base_address(0x00, 0x00)
+
+            # Set IQ inversion for RX if in RFM9x compatibility mode
+            # SX127x transmits with standard IQ, SX126x must receive with inverted IQ
+            rx_invert_iq = 1 if self._rfm9x_compatible else 0
+            self.set_packet_params(8, 0, 255, 1, rx_invert_iq)
 
             # Start RX
             if timeout_ms == 0:

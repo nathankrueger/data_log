@@ -92,6 +92,7 @@ def create_radio(args) -> Radio:
             rxen_pin=args.rxen_pin,
             spi_bus=args.spi_bus,
             spi_cs=args.spi_cs,
+            rfm9x_compatible=not getattr(args, 'sx126x_native', False),
         )
     else:
         raise ValueError(f"Unknown radio type: {args.type}")
@@ -209,6 +210,11 @@ def main():
     sx_group.add_argument("--rxen-pin", type=int, default=5, help="RXEN GPIO pin (default: 5)")
     sx_group.add_argument("--spi-bus", type=int, default=0, help="SPI bus (default: 0)")
     sx_group.add_argument("--spi-cs", type=int, default=0, help="SPI chip select (default: 0)")
+    sx_group.add_argument(
+        "--sx126x-native",
+        action="store_true",
+        help="Use SX126x-native mode (no IQ inversion). Default uses RFM9x-compatible mode.",
+    )
 
     # Other options
     parser.add_argument("--no-led", action="store_true", help="Disable LED feedback on receive")

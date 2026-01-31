@@ -57,6 +57,7 @@ class SX1262Radio(Radio):
         rxen_pin: int = 5,
         spi_bus: int = 0,
         spi_cs: int = 0,
+        rfm9x_compatible: bool = True,
     ):
         """
         Initialize SX1262 radio configuration.
@@ -75,6 +76,8 @@ class SX1262Radio(Radio):
             rxen_pin: GPIO pin for RX enable (RF switch)
             spi_bus: SPI bus number
             spi_cs: SPI chip select
+            rfm9x_compatible: If True, use IQ inversion for interoperability
+                with SX127x/RFM9x radios. Set False for SX1262-only networks.
         """
         self._frequency_mhz = frequency_mhz
         self._tx_power = min(tx_power, 22)  # SX1262 max is 22 dBm
@@ -90,6 +93,7 @@ class SX1262Radio(Radio):
         self._rxen_pin = rxen_pin
         self._spi_bus = spi_bus
         self._spi_cs = spi_cs
+        self._rfm9x_compatible = rfm9x_compatible
 
         self._driver: SX1262Driver | None = None
         self._last_rssi: int | None = None
@@ -112,6 +116,7 @@ class SX1262Radio(Radio):
             dio1_pin=self._dio1_pin,
             txen_pin=self._txen_pin,
             rxen_pin=self._rxen_pin,
+            rfm9x_compatible=self._rfm9x_compatible,
         )
 
         # Initialize the radio
@@ -166,11 +171,12 @@ class SX1262Radio(Radio):
             preamble_len=self._preamble_length,
         )
 
+        compat_mode = "RFM9x-compatible" if self._rfm9x_compatible else "SX126x-native"
         logger.info(
             f"SX1262 initialized: {self._frequency_mhz} MHz, "
             f"SF{self._spreading_factor}, BW {self._bandwidth}Hz, "
             f"CR 4/{self._coding_rate}, TX {self._tx_power} dBm, "
-            f"sync=0x1424 (RFM9x-compatible)"
+            f"sync=0x1424, mode={compat_mode}"
         )
 
     def send(self, data: bytes) -> bool:
