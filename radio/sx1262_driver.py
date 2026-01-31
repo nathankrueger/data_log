@@ -165,6 +165,7 @@ class SX1262Driver:
         self._spreading_factor = self.SF7
         self._bandwidth = self.BW_125000
         self._coding_rate = self.CR_4_5
+        self._preamble_length = 8  # Default preamble length
 
     def reset(self) -> None:
         """Perform hardware reset of the radio."""
@@ -351,6 +352,7 @@ class SX1262Driver:
             self._txen.off()
         if self._rxen:
             self._rxen.on()
+        time.sleep(0.001)  # 1ms for RF switch settling
 
     def set_rf_switch_tx(self) -> None:
         """Set RF switch to TX mode."""
@@ -358,6 +360,7 @@ class SX1262Driver:
             self._rxen.off()
         if self._txen:
             self._txen.on()
+        time.sleep(0.001)  # 1ms for RF switch settling
 
     def set_rf_switch_off(self) -> None:
         """Turn off RF switch."""
@@ -418,8 +421,8 @@ class SX1262Driver:
             self.set_dio_irq_params(self.IRQ_ALL, self.IRQ_ALL, 0, 0)
             self.clear_irq_status()
 
-            # Enable DIO2 for RF switch if using it
-            self.set_dio2_as_rf_switch(True)
+            # Disable DIO2 RF switch - Waveshare module uses manual TXEN/RXEN control
+            self.set_dio2_as_rf_switch(False)
 
             return True
 
@@ -452,6 +455,7 @@ class SX1262Driver:
         self.set_tx_params(tx_power, 0x04)
 
         self.set_modulation_params(spreading_factor, bandwidth, coding_rate)
+        self._preamble_length = preamble_len  # Store for send/receive
         self.set_packet_params(preamble_len, 0, 255, 1, 0)
         self.set_sync_word(sync_word)
 
@@ -466,7 +470,7 @@ class SX1262Driver:
             self.write_buffer(0x00, data)
 
             # Update packet length (invert_iq = 0 for TX, standard IQ for RFM9x compatibility)
-            self.set_packet_params(8, 0, len(data), 1, 0)
+            self.set_packet_params(self._preamble_length, 0, len(data), 1, 0)
 
             # Start TX
             self.set_tx(timeout_ms)
@@ -477,19 +481,23 @@ class SX1262Driver:
                 irq = self.get_irq_status()
                 if irq & self.IRQ_TX_DONE:
                     self.clear_irq_status()
-                    self.set_rf_switch_off()
+                    self.set_standby()
+                    self.set_rf_switch_rx()  # Return to RX mode for listening
                     return True
                 if irq & self.IRQ_TIMEOUT:
                     self.clear_irq_status()
-                    self.set_rf_switch_off()
+                    self.set_standby()
+                    self.set_rf_switch_rx()  # Return to RX mode
                     return False
                 time.sleep(0.001)
 
-            self.set_rf_switch_off()
+            self.set_standby()
+            self.set_rf_switch_rx()  # Return to RX mode
             return False
 
         except Exception:
-            self.set_rf_switch_off()
+            self.set_standby()
+            self.set_rf_switch_rx()  # Return to RX mode
             return False
 
     def receive(self, timeout_ms: int = 5000) -> Optional[tuple[bytes, int, int]]:
@@ -507,7 +515,7 @@ class SX1262Driver:
             # Set IQ inversion for RX if in RFM9x compatibility mode
             # SX127x transmits with standard IQ, SX126x must receive with inverted IQ
             rx_invert_iq = 1 if self._rfm9x_compatible else 0
-            self.set_packet_params(8, 0, 255, 1, rx_invert_iq)
+            self.set_packet_params(self._preamble_length, 0, 255, 1, rx_invert_iq)
 
             # Start RX
             if timeout_ms == 0:
@@ -524,10 +532,11 @@ class SX1262Driver:
 
                 if irq & self.IRQ_RX_DONE:
                     self.clear_irq_status()
-                    self.set_rf_switch_off()
+                    self.set_standby()
 
                     # Check for CRC error
                     if irq & self.IRQ_CRC_ERR:
+                        self.set_rf_switch_rx()  # Stay in RX mode for next packet
                         return None
 
                     # Get packet info
@@ -536,20 +545,24 @@ class SX1262Driver:
 
                     # Read data
                     data = self.read_buffer(start_ptr, length)
+                    self.set_rf_switch_rx()  # Stay in RX mode for next packet
                     return data, rssi, snr
 
                 if irq & self.IRQ_TIMEOUT:
                     self.clear_irq_status()
-                    self.set_rf_switch_off()
+                    self.set_standby()
+                    self.set_rf_switch_rx()  # Stay in RX mode
                     return None
 
                 time.sleep(0.001)
 
-            self.set_rf_switch_off()
+            self.set_standby()
+            self.set_rf_switch_rx()  # Stay in RX mode
             return None
 
         except Exception:
-            self.set_rf_switch_off()
+            self.set_standby()
+            self.set_rf_switch_rx()  # Stay in RX mode
             return None
 
     def close(self) -> None:
