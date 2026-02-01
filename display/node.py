@@ -10,6 +10,7 @@ Provides ScreenPage implementations specific to sensor nodes:
 import logging
 import threading
 import time
+from pathlib import Path
 
 from .base import ScreenPage, _format_duration, _get_ip_address
 from utils.node_state import NodeState
@@ -119,7 +120,7 @@ class ArducamOCRPage(ScreenPage):
 
         def _do_capture():
             try:
-                result = self._capture_and_ocr(output_dir='~/Pictures')
+                result = self._capture_and_ocr(output_dir=Path('~/Pictures'))
                 self._state.set_ocr_result(result if result else "No result found")
             except Exception as e:
                 logger.error(f"OCR capture failed: {e}")
