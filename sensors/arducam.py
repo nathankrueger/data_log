@@ -164,13 +164,15 @@ def run_ocr(image_path, crop_region: tuple | None = None):
     # Convert to grayscale
     gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
 
-    # Resize for better OCR (ssocr works better with larger images)
-    scale = 3
-    gray = cv2.resize(
-        gray,
-        (gray.shape[1] * scale, gray.shape[0] * scale),
-        interpolation=cv2.INTER_CUBIC,
-    )
+    # Only scale up small images (cropped regions) - ssocr works better with larger images
+    # Skip scaling for large images (full frame) to avoid memory/performance issues
+    if gray.shape[1] < 1000:
+        scale = 3
+        gray = cv2.resize(
+            gray,
+            (gray.shape[1] * scale, gray.shape[0] * scale),
+            interpolation=cv2.INTER_CUBIC,
+        )
 
     # Save grayscale cropped image
     gray_path = Path(image_path).parent / "ocr_gray.png"
