@@ -17,5 +17,18 @@
         "tx_power": 23,
         "cs_pin": 24,
         "reset_pin": 25
+    },
+    "display": {
+        "enabled": true,
+        "advance_switch_pin": 16,
+        "action_switch_pin": 26,
+        "i2c_port": 1,
+        "i2c_address": 60,
+        "refresh_interval": 0.5
+    },
+    "arducam": {
+        "enabled": true,
+        "size": "4056x3040",
+        "flip": true
     }
 }

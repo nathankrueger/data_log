@@ -40,12 +40,10 @@ from urllib.error import URLError, HTTPError
 from gpiozero import Button
 from utils.led import RgbLed
 from utils.gateway_state import GatewayState
-from utils.display import (
+from utils.display import OffPage, ScreenManager, SSD1306Display
+from utils.gateway_display import (
     GatewayLocalSensors,
     LastPacketPage,
-    OffPage,
-    ScreenManager,
-    SSD1306Display,
     SystemInfoPage,
 )
 

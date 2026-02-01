@@ -42,6 +42,7 @@ import sensors as sensors_module
 from radio import RFM9xRadio
 from sensors import Sensor
 from utils.protocol import SensorReading, build_lora_packets
+from utils.node_state import NodeState
 
 # Configure logging
 logging.basicConfig(
@@ -178,6 +179,7 @@ def broadcast_loop(
     radio: RFM9xRadio,
     node_id: str,
     sensors: list[SensorEntry],
+    node_state: NodeState | None = None,
 ) -> None:
     """
     Main broadcast loop with per-sensor intervals.
@@ -189,6 +191,7 @@ def broadcast_loop(
         radio: Initialized radio instance
         node_id: This node's identifier
         sensors: List of SensorEntry objects with interval configuration
+        node_state: Optional shared state for display updates
     """
     logger.info(f"Starting broadcast loop for node '{node_id}'")
     logger.info(f"Radio: {radio.frequency_mhz} MHz, TX power: {radio.tx_power} dBm")
@@ -213,6 +216,15 @@ def broadcast_loop(
                 # Read only sensors that are due
                 readings = read_sensors(due_sensors)
 
+                # Update node state with latest readings for display
+                if node_state and readings:
+                    node_state.update_sensor_readings(
+                        [
+                            (r.name, r.value, r.units, r.sensor_class)
+                            for r in readings
+                        ]
+                    )
+
                 if readings:
                     # Build compact packets (auto-splits if too large)
                     packets = build_lora_packets(node_id, readings)
@@ -233,6 +245,10 @@ def broadcast_loop(
 
                     sensor_names = ", ".join(e.class_name for e in due_sensors)
                     if all_success:
+                        # Update node state broadcast count
+                        if node_state:
+                            node_state.increment_broadcast_count()
+
                         logger.info(
                             f"Broadcast #{broadcast_count}: {len(readings)} readings "
                             f"from [{sensor_names}], "
@@ -308,17 +324,70 @@ def main():
         reset_pin=lora_config.get("reset_pin", 25),
     )
 
+    # Create node state for display
+    node_state = NodeState()
+
+    # Initialize display if configured
+    screen_manager = None
+    display_advance_button = None
+    action_button = None
+    display_config = config.get("display", {})
+
+    if display_config.get("enabled", False):
+        try:
+            from gpiozero import Button
+
+            from utils.display import OffPage, ScreenManager, SSD1306Display
+            from utils.node_display import (
+                ArducamOCRPage,
+                NodeInfoPage,
+                SensorValuesPage,
+            )
+
+            display = SSD1306Display(
+                i2c_port=display_config.get("i2c_port", 1),
+                i2c_address=display_config.get("i2c_address", 0x3C),
+            )
+            pages = [
+                OffPage(),
+                SensorValuesPage(node_state),
+                NodeInfoPage(node_state),
+                ArducamOCRPage(node_state),
+            ]
+            screen_manager = ScreenManager(
+                display=display,
+                pages=pages,
+                refresh_interval=display_config.get("refresh_interval", 0.5),
+            )
+            screen_manager.start()
+
+            # Page advance button
+            if advance_pin := display_config.get("advance_switch_pin"):
+                display_advance_button = Button(advance_pin)
+                display_advance_button.when_pressed = screen_manager.advance_page
+
+            # Action button (context-sensitive by page)
+            if action_pin := display_config.get("action_switch_pin"):
+                action_button = Button(action_pin)
+                action_button.when_pressed = screen_manager.do_page_action
+
+            logger.info("OLED display initialized")
+        except Exception as e:
+            logger.warning(f"Failed to initialize display: {e}")
+
     try:
         radio.init()
         logger.info("Radio initialized")
 
         # Start broadcast loop
-        broadcast_loop(radio, node_id, sensors)
+        broadcast_loop(radio, node_id, sensors, node_state)
 
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     finally:
         radio.close()
+        if screen_manager:
+            screen_manager.close()
 
 
 if __name__ == "__main__":

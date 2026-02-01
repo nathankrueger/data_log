@@ -6,18 +6,13 @@ Includes an abstract Display class for hardware abstraction and
 SSD1306Display as the concrete implementation.
 """
 
-import socket
 import threading
 import time
 from abc import ABC, abstractmethod
-from datetime import datetime
-from urllib.parse import urlparse
 
 from luma.core.interface.serial import i2c
 from luma.core.render import canvas
 from luma.oled.device import ssd1306
-
-from .gateway_state import GatewayState
 
 
 # =============================================================================
@@ -144,126 +139,23 @@ class ScreenPage(ABC):
         """Return True if this page should turn the screen off."""
         return all(line is None for line in self.get_lines())
 
+    def get_autoscroll_interval(self) -> float | None:
+        """Return autoscroll interval in seconds, or None to disable.
+
+        Override in subclasses to enable automatic line scrolling.
+        """
+        return None
+
+    def do_action(self) -> None:
+        """Handle action button press. Override in subclasses for page-specific behavior."""
+        pass
+
 
 class OffPage(ScreenPage):
     """Page that turns the screen off."""
 
     def get_lines(self) -> list[str | None]:
         return [None, None, None, None]
-
-
-class SystemInfoPage(ScreenPage):
-    """
-    System information page.
-
-    Shows:
-    - Header
-    - IP address
-    - Uptime
-    - Time since last packet
-    - Dashboard IP
-    """
-
-    def __init__(self, state: GatewayState):
-        self._state = state
-
-    def get_lines(self) -> list[str | None]:
-        ip = _get_ip_address()
-        uptime = _format_duration(time.time() - self._state.start_time)
-
-        last_pkt = self._state.get_last_packet()
-        if last_pkt.timestamp > 0:
-            ago = _format_duration(time.time() - last_pkt.timestamp)
-            last_pkt_str = f"{ago} ago"
-        else:
-            last_pkt_str = "Never"
-
-        # Extract host from dashboard URL
-        dashboard_ip = "N/A"
-        if self._state.dashboard_url:
-            parsed = urlparse(self._state.dashboard_url)
-            dashboard_ip = parsed.hostname or "N/A"
-
-        return [
-            "System Information",
-            f"IP: {ip}",
-            f"Uptime: {uptime}",
-            f"Last pkt: {last_pkt_str}",
-            f"Dashbrd: {dashboard_ip}",
-        ]
-
-
-class LastPacketPage(ScreenPage):
-    """
-    Last packet details page.
-
-    Shows:
-    - Header [RSSI]
-    - Timestamp
-    - Sensor name
-    - Sensor value
-    """
-
-    def __init__(self, state: GatewayState):
-        self._state = state
-
-    def get_lines(self) -> list[str | None]:
-        last_pkt = self._state.get_last_packet()
-
-        if last_pkt.timestamp == 0:
-            return [
-                "Last Packet",
-                "---",
-                "No packets yet",
-                None,
-            ]
-
-        ts = datetime.fromtimestamp(last_pkt.timestamp)
-        time_str = ts.strftime("%H:%M:%S")
-
-        # Truncate long names to fit display
-        name = last_pkt.sensor_name[:16]
-        node = last_pkt.node_id[:16]
-        rssi = last_pkt.rssi
-        value_str = f"{last_pkt.sensor_value:.1f} {last_pkt.sensor_units}"
-
-        return [
-            f"Last Packet [RSSI: {rssi}]",
-            f"time: {time_str}",
-            f"name: {node}:{name}",
-            f"val: {value_str}",
-        ]
-
-
-class GatewayLocalSensors(ScreenPage):
-    """
-    Gateway local sensors page.
-
-    Shows:
-    - Header
-    - Up to 3 local sensor readings (name: value units)
-    - Shows "---" for missing sensor slots
-    """
-
-    def __init__(self, state: GatewayState):
-        self._state = state
-
-    def get_lines(self) -> list[str | None]:
-        sensors = self._state.get_local_sensors()
-
-        lines: list[str | None] = ["Local Sensors"]
-
-        # Show up to 3 sensors (we have 4 lines, 1 for header)
-        for i in range(3):
-            if i < len(sensors):
-                s = sensors[i]
-                # Truncate name to fit, leave room for value
-                name = s.name[:8]
-                lines.append(f"{name}: {s.value:.1f} {s.units}")
-            else:
-                lines.append("---")
-
-        return lines
 
 
 # =============================================================================
@@ -306,12 +198,14 @@ class ScreenManager:
         self._running = False
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
+        self._last_autoscroll_time: float = 0.0
 
     def advance_page(self) -> None:
         """Advance to the next page, wrapping to first. Resets scroll offset."""
         with self._lock:
             self._current_page_idx = (self._current_page_idx + 1) % len(self._pages)
             self._line_offset = 0
+            self._last_autoscroll_time = time.time()
         self._refresh()
 
     def set_page(self, index: int) -> None:
@@ -320,6 +214,7 @@ class ScreenManager:
             if 0 <= index < len(self._pages):
                 self._current_page_idx = index
                 self._line_offset = 0
+                self._last_autoscroll_time = time.time()
         self._refresh()
 
     def scroll_page(self, delta: int = 1) -> None:
@@ -344,6 +239,34 @@ class ScreenManager:
             elif self._line_offset < 0:
                 self._line_offset = max(0, total_lines - max_lines)
         self._refresh()
+
+    def do_page_action(self) -> None:
+        """Execute the current page's action (context-sensitive button behavior)."""
+        with self._lock:
+            page = self._pages[self._current_page_idx]
+        page.do_action()
+
+    def _check_autoscroll(self) -> None:
+        """Auto-advance line offset if current page has autoscroll enabled."""
+        with self._lock:
+            page = self._pages[self._current_page_idx]
+            interval = page.get_autoscroll_interval()
+
+            if interval is None:
+                return
+
+            now = time.time()
+            if now - self._last_autoscroll_time >= interval:
+                lines = page.get_lines()
+                total_lines = len(lines)
+                max_lines = self._display.max_lines
+
+                if total_lines > max_lines:
+                    self._line_offset += 1
+                    if self._line_offset + max_lines > total_lines:
+                        self._line_offset = 0
+
+                self._last_autoscroll_time = now
 
     def _refresh(self) -> None:
         """Refresh the display with current page content."""
@@ -384,6 +307,7 @@ class ScreenManager:
         """Background thread that periodically refreshes the display."""
         while self._running:
             try:
+                self._check_autoscroll()
                 self._refresh()
             except Exception:
                 pass  # Don't crash on display errors
@@ -393,37 +317,3 @@ class ScreenManager:
         """Clean up resources."""
         self.stop()
 
-
-# =============================================================================
-# Utility Functions
-# =============================================================================
-
-
-def _get_ip_address() -> str:
-    """Get the primary IP address of this machine."""
-    try:
-        # Connect to a remote address to determine local IP
-        # (doesn't actually send data)
-        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-        s.connect(("8.8.8.8", 80))
-        ip = s.getsockname()[0]
-        s.close()
-        return ip
-    except Exception:
-        return "Unknown"
-
-
-def _format_duration(seconds: float) -> str:
-    """Format a duration in seconds to a human-readable string."""
-    seconds = int(seconds)
-
-    if seconds < 60:
-        return f"{seconds}s"
-    elif seconds < 3600:
-        m = seconds // 60
-        s = seconds % 60
-        return f"{m}m{s}s"
-    else:
-        h = seconds // 3600
-        m = (seconds % 3600) // 60
-        return f"{h}h{m}m"
