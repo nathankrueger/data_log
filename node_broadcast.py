@@ -13,7 +13,7 @@ Configuration is loaded from config/node_config.json:
         {"class": "BME280TempPressureHumidity", "interval_sec": 60},
         {"class": "MMA8452Accelerometer", "interval_sec": 1}
     ],
-    "broadcast_interval_sec": 30,
+    "default_sensor_interval_sec": 30,
     "lora": {
         "frequency_mhz": 915.0,
         "tx_power": 23,
@@ -23,7 +23,7 @@ Configuration is loaded from config/node_config.json:
 }
 
 Each sensor can have its own "interval_sec". If not specified, falls back
-to the global "broadcast_interval_sec" (default: 30s).
+to the global "default_sensor_interval_sec" (default: 30s).
 
 Usage:
     python3 node_broadcast.py [config_file]
@@ -302,7 +302,7 @@ def main():
         sys.exit(1)
 
     # Get default broadcast interval
-    default_interval = config.get("broadcast_interval_sec", 30)
+    default_interval = config.get("default_sensor_interval_sec", 30)
 
     # Initialize sensors
     sensor_configs = config.get("sensors", [])

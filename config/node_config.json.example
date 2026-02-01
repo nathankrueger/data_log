@@ -11,7 +11,7 @@
             "interval_sec": 1
         }
     ],
-    "broadcast_interval_sec": 30,
+    "default_sensor_interval_sec": 30,
     "lora": {
         "frequency_mhz": 915.0,
         "tx_power": 23,
