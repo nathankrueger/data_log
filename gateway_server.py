@@ -430,7 +430,6 @@ def run_gateway(config: dict, verbose_logging: bool = False) -> None:
     # Create shared state for display
     gateway_state = GatewayState()
     gateway_state.dashboard_url = dashboard_url
-    gateway_state.gateway_name = node_id
 
     # Create dashboard client and collector
     dashboard_client = DashboardClient(dashboard_url, node_id)

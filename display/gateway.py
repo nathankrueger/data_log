@@ -7,6 +7,7 @@ Provides ScreenPage implementations specific to gateways:
 - GatewayLocalSensors: Shows local sensor readings
 """
 
+import socket
 import time
 from datetime import datetime
 from urllib.parse import urlparse
@@ -31,7 +32,7 @@ class SystemInfoPage(ScreenPage):
         self._state = state
 
     def get_lines(self) -> list[str | None]:
-        name = self._state.gateway_name
+        hostname = socket.gethostname()
         ip = _get_ip_address()
         uptime = _format_duration(time.time() - self._state.start_time)
 
@@ -49,7 +50,7 @@ class SystemInfoPage(ScreenPage):
             dashboard_ip = parsed.hostname or "N/A"
 
         return [
-            f"Sys Info [{name}]",
+            f"Sys Info [{hostname}]",
             f"IP: {ip}",
             f"Uptime: {uptime}",
             f"Last pkt: {last_pkt_str}",
