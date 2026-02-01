@@ -266,6 +266,7 @@ def capture_image(
         return output_path
     finally:
         picam2.stop()
+        picam2.close()
 
 
 def capture_and_ocr(
@@ -482,6 +483,7 @@ def _main():
 
     finally:
         picam2.stop()
+        picam2.close()
 
 
 if __name__ == "__main__":
