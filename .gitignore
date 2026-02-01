@@ -2,7 +2,7 @@
 .pytest_cache
 logs/*
 *.egg-info
-.claude
+.claude/*.local.json
 .venv
 
 # Config files (use .example as templates)

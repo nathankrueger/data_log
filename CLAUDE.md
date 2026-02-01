@@ -99,12 +99,14 @@ Display config in `gateway_config.json`:
 ```json
 "display": {
     "enabled": true,
-    "switch_pin": 16,
+    "advance_switch_pin": 16,
+    "scroll_switch_pin": 26,
     "i2c_port": 1,
     "i2c_address": 60,
     "refresh_interval": 0.5
 }
 ```
+Both switch pins are optional - the system works without any buttons configured.
 
 ## Adding New Components
 
@@ -118,15 +120,18 @@ Display config in `gateway_config.json`:
 
 ```
 utils/gateway_state.py    - GatewayState, LastPacketInfo (shared runtime state)
-utils/display.py          - ScreenPage ABC, concrete pages, ScreenManager
-gateway_server.py         - Creates state, pages, and ScreenManager
+utils/display.py          - Display ABC, SSD1306Display, ScreenPage ABC, ScreenManager
+gateway_server.py         - Creates display, pages, ScreenManager, and GPIO buttons
 ```
 
+- `Display` ABC abstracts hardware (width, height, line_height, show, hide, clear, render_lines)
+- `SSD1306Display` is the concrete implementation for 128x64 OLED
 - `GatewayState` holds thread-safe runtime state (start time, last packet info)
-- `ScreenPage` ABC defines `get_lines() -> list[str | None]` for up to 4 lines
+- `ScreenPage` ABC defines `get_lines() -> list[str | None]` (any number of lines)
 - If all lines are `None`, screen turns off
-- `ScreenManager` handles display refresh (500ms) and switch input for page cycling
-- Built-in pages: `OffPage`, `SystemInfoPage`, `LastPacketPage`
+- `ScreenManager` handles display refresh (500ms), page cycling, and line scrolling
+- GPIO buttons are set up externally in gateway_server.py using `advance_page()` and `scroll_page()`
+- Built-in pages: `OffPage`, `SystemInfoPage`, `LastPacketPage`, `GatewayLocalSensors`
 
 ## Development Workflow
 
@@ -138,23 +143,9 @@ Development happens on a separate machine (not the Pi Zero 2W targets). The SSH/
 
 ### Publishing to Target Hardware
 
-To test code on the actual Pi Zero 2W devices:
+Use the `/publish` skill to deploy code to Pi Zero 2W devices (commit, push, run `./publish.sh`).
 
-1. **Commit changes to git** (changes must be committed for publish to work)
-2. **Run `./publish.sh`** - This SSHs to all 4 Pi Zero 2Ws (pz2w1-4) and runs `git pull`
-3. **User tests on target device**
-
-```bash
-./publish.sh              # Pull on all Pi devices
-./publish.sh --reinstall  # Pull and reinstall venv (if dependencies changed)
-```
-
-**IMPORTANT FOR CLAUDE:** When you think there's something ready to test on hardware, or the user says "publish this" or similar:
-1. **Ask the user** using AskUserQuestion with Yes/No options: "Ready to commit and publish to Pi devices?"
-2. Only after "Yes": create a git commit with appropriate message
-3. Then run `./publish.sh` to deploy to the Pi devices
-
-Do NOT commit and publish without asking first, unless explicitly instructed.
+Git credentials must be stored in `~/.git-credentials` for non-interactive push to work.
 
 ## Important
 
