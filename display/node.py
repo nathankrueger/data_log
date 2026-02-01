@@ -111,8 +111,10 @@ class ArducamOCRPage(ScreenPage):
         if self._state.is_ocr_in_progress():
             return  # Already running
 
+        # Set immediately so display updates on next refresh
+        self._state.set_ocr_in_progress(True)
+
         def _do_capture():
-            self._state.set_ocr_in_progress(True)
             try:
                 from sensors.arducam import capture_and_ocr
 
