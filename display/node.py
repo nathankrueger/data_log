@@ -81,8 +81,9 @@ class ArducamOCRPage(ScreenPage):
     def __init__(self, state: NodeState):
         self._state = state
         # Import at construction time to avoid delay on first button press
-        from sensors.arducam import capture_and_ocr
+        from sensors.arducam import CropMode, capture_and_ocr
         self._capture_and_ocr = capture_and_ocr
+        self._crop_mode = CropMode
 
     def get_lines(self) -> list[str | None]:
         if self._state.is_ocr_in_progress():
@@ -120,7 +121,10 @@ class ArducamOCRPage(ScreenPage):
 
         def _do_capture():
             try:
-                result = self._capture_and_ocr(output_dir=Path.home() / "Pictures")
+                result = self._capture_and_ocr(
+                    output_dir=Path.home() / "Pictures",
+                    crop_mode=self._crop_mode.NONE,
+                )
                 self._state.set_ocr_result(result if result else "No result found")
             except Exception as e:
                 logger.error(f"OCR capture failed: {e}")

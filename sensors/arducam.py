@@ -24,11 +24,20 @@ Setup Notes:
 import argparse
 import subprocess
 import time
+from enum import Enum
 from pathlib import Path
 
 import cv2
 import numpy as np
 from PIL import Image
+
+
+class CropMode(Enum):
+    """Crop mode for OCR processing."""
+
+    NONE = "none"  # Use full image, no cropping
+    MANUAL = "manual"  # Use provided crop_region
+    AUTO = "auto"  # Auto-detect display region
 
 # Available sizes from rpicam-hello --list-cameras (imx477)
 AVAILABLE_SIZES = {
@@ -131,22 +140,26 @@ def detect_display(image_path, min_area=5000, max_area_ratio=0.05):
     return [(x, y, w, h) for x, y, w, h, _ in candidates]
 
 
-def run_ocr(image_path, crop_region):
+def run_ocr(image_path, crop_region: tuple | None = None):
     """
-    Run ssocr on a cropped region of the image.
+    Run ssocr on an image, optionally cropping first.
 
     Args:
         image_path: Path to the image file
-        crop_region: Tuple of (x, y, w, h) for the crop region
+        crop_region: Optional (x, y, w, h) tuple for crop region. If None, uses full image.
 
     Returns:
         OCR result string, or None if recognition failed.
     """
-    x, y, w, h = crop_region
-
-    # Load and crop using OpenCV for preprocessing
+    # Load image
     img = cv2.imread(str(image_path))
-    cropped = img[y : y + h, x : x + w]
+
+    # Crop if region provided, otherwise use full image
+    if crop_region is not None:
+        x, y, w, h = crop_region
+        cropped = img[y : y + h, x : x + w]
+    else:
+        cropped = img
 
     # Convert to grayscale
     gray = cv2.cvtColor(cropped, cv2.COLOR_BGR2GRAY)
@@ -273,19 +286,21 @@ def capture_and_ocr(
     output_dir: Path | None = None,
     size: str = DEFAULT_SIZE,
     flip: bool = True,
+    crop_mode: CropMode = CropMode.AUTO,
     crop_region: tuple | None = None,
 ) -> str | None:
     """
     Capture image and run OCR, returning result or None.
 
     This is the main function for external use. Captures an image,
-    auto-detects or uses provided crop region, and runs OCR.
+    optionally crops based on crop_mode, and runs OCR.
 
     Args:
         output_dir: Directory to save captured image (default: sensors/)
         size: Image size key from AVAILABLE_SIZES
         flip: Whether to rotate image 180 degrees
-        crop_region: Optional (x, y, w, h) tuple for manual crop region
+        crop_mode: CropMode enum value for cropping behavior
+        crop_region: (x, y, w, h) tuple required when crop_mode=CropMode.MANUAL
 
     Returns:
         OCR result string, or None if no result found.
@@ -298,12 +313,22 @@ def capture_and_ocr(
     # Capture image
     capture_image(output_path=output_path, size=size, flip=flip)
 
-    # Auto-detect or use provided crop region
-    if crop_region is None:
+    # Determine crop region based on mode
+    if crop_mode == CropMode.NONE:
+        # Use full image, no cropping
+        crop_region = None
+    elif crop_mode == CropMode.MANUAL:
+        # Use provided crop_region (must be set)
+        if crop_region is None:
+            raise ValueError("crop_region required when crop_mode=CropMode.MANUAL")
+    elif crop_mode == CropMode.AUTO:
+        # Auto-detect display region
         candidates = detect_display(output_path)
         if not candidates:
             return None
         crop_region = candidates[0]
+    else:
+        raise ValueError(f"Invalid crop_mode: {crop_mode}")
 
     return run_ocr(output_path, crop_region)
 
@@ -334,9 +359,15 @@ def _parse_args():
         help="Crop region for OCR as X,Y,WIDTH,HEIGHT (e.g., 1800,1400,400,200)",
     )
     parser.add_argument(
+        "--crop-mode",
+        choices=["none", "manual", "auto"],
+        default="auto",
+        help="Crop mode: none (full image), manual (use --crop), auto (detect display)",
+    )
+    parser.add_argument(
         "--ocr",
         action="store_true",
-        help="Run 7-segment OCR (auto-detects display, or use --crop for manual region)",
+        help="Run 7-segment OCR with specified crop mode",
     )
     parser.add_argument(
         "--debug-detect",
@@ -364,6 +395,10 @@ def _main():
 
     args = _parse_args()
     size = AVAILABLE_SIZES[args.size]
+
+    # --crop implies --crop-mode=manual for backward compatibility
+    if args.crop and args.crop_mode == "auto":
+        args.crop_mode = "manual"
 
     # Initialize the camera
     picam2 = Picamera2()
@@ -410,71 +445,57 @@ def _main():
 
             # Run OCR if requested
             if args.ocr:
-                if args.crop:
-                    # Manual crop region specified
+                crop_mode = CropMode(args.crop_mode)
+                crop_region = None
+
+                if crop_mode == CropMode.MANUAL:
+                    if not args.crop:
+                        print("Error: --crop required when --crop-mode=manual")
+                        continue
                     crop_region = tuple(map(int, args.crop.split(",")))
                     if len(crop_region) != 4:
                         print("Error: --crop must be X,Y,WIDTH,HEIGHT")
-                    else:
-                        print(f"Running OCR on region {crop_region}...")
+                        continue
+                    print(f"Running OCR on manual region {crop_region}...")
 
-                        if args.debug_detect:
-                            # Save debug image with manual crop region
-                            debug_img = cv2.imread(str(output_path))
-                            x, y, w, h = crop_region
-                            cv2.rectangle(
-                                debug_img, (x, y), (x + w, y + h), (0, 255, 0), 3
-                            )
-                            cv2.putText(
-                                debug_img,
-                                "manual",
-                                (x, y - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                1,
-                                (0, 255, 0),
-                                2,
-                            )
-                            debug_path = output_path.parent / "debug_detect.jpg"
-                            cv2.imwrite(str(debug_path), debug_img)
-                            print(f"Debug image saved to: {debug_path}")
-
-                        ocr_result = run_ocr(output_path, crop_region)
-                        if ocr_result:
-                            print(f"OCR Result: {ocr_result}")
-                else:
-                    # Auto-detect display
+                elif crop_mode == CropMode.AUTO:
                     print("Auto-detecting 7-segment display...")
                     candidates = detect_display(output_path)
-
-                    if args.debug_detect:
-                        # Save debug image with detected regions
-                        debug_img = cv2.imread(str(output_path))
-                        for i, (x, y, w, h) in enumerate(candidates):
-                            color = (0, 255, 0) if i == 0 else (0, 165, 255)
-                            cv2.rectangle(
-                                debug_img, (x, y), (x + w, y + h), color, 3
-                            )
-                            cv2.putText(
-                                debug_img,
-                                f"#{i+1}",
-                                (x, y - 10),
-                                cv2.FONT_HERSHEY_SIMPLEX,
-                                1,
-                                color,
-                                2,
-                            )
-                        debug_path = output_path.parent / "debug_detect.jpg"
-                        cv2.imwrite(str(debug_path), debug_img)
-                        print(f"Debug image saved to: {debug_path}")
-
                     if candidates:
-                        crop_region = candidates[0]  # Use best candidate
+                        crop_region = candidates[0]
                         print(f"Found display at region {crop_region}")
-                        ocr_result = run_ocr(output_path, crop_region)
-                        if ocr_result:
-                            print(f"OCR Result: {ocr_result}")
                     else:
                         print("No 7-segment display detected in image")
+                        continue
+
+                else:  # CropMode.NONE
+                    print("Running OCR on full image (no crop)...")
+
+                # Save debug image if requested
+                if args.debug_detect and crop_region:
+                    debug_img = cv2.imread(str(output_path))
+                    x, y, w, h = crop_region
+                    cv2.rectangle(
+                        debug_img, (x, y), (x + w, y + h), (0, 255, 0), 3
+                    )
+                    cv2.putText(
+                        debug_img,
+                        crop_mode.value,
+                        (x, y - 10),
+                        cv2.FONT_HERSHEY_SIMPLEX,
+                        1,
+                        (0, 255, 0),
+                        2,
+                    )
+                    debug_path = output_path.parent / "debug_detect.jpg"
+                    cv2.imwrite(str(debug_path), debug_img)
+                    print(f"Debug image saved to: {debug_path}")
+
+                ocr_result = run_ocr(output_path, crop_region)
+                if ocr_result:
+                    print(f"OCR Result: {ocr_result}")
+                else:
+                    print("No OCR result found")
 
             # Delay between captures if specified
             if capture_num < args.cnt - 1 and args.delay > 0:
