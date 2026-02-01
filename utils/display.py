@@ -11,6 +11,7 @@ import threading
 import time
 from abc import ABC, abstractmethod
 from datetime import datetime
+from urllib.parse import urlparse
 
 from luma.core.interface.serial import i2c
 from luma.core.render import canvas
@@ -160,6 +161,7 @@ class SystemInfoPage(ScreenPage):
     - IP address
     - Uptime
     - Time since last packet
+    - Dashboard IP
     """
 
     def __init__(self, state: GatewayState):
@@ -176,12 +178,18 @@ class SystemInfoPage(ScreenPage):
         else:
             last_pkt_str = "Never"
 
+        # Extract host from dashboard URL
+        dashboard_ip = "N/A"
+        if self._state.dashboard_url:
+            parsed = urlparse(self._state.dashboard_url)
+            dashboard_ip = parsed.hostname or "N/A"
+
         return [
             "System Information",
             f"IP: {ip}",
             f"Uptime: {uptime}",
             f"Last pkt: {last_pkt_str}",
-            None,
+            f"Dashbrd: {dashboard_ip}",
         ]
 
 

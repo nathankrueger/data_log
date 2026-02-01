@@ -43,6 +43,7 @@ class GatewayState:
     start_time: float = field(default_factory=time.time)
     last_packet: LastPacketInfo = field(default_factory=LastPacketInfo)
     local_sensors: list[LocalSensorReading] = field(default_factory=list)
+    dashboard_url: str = ""
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     def update_last_packet(
