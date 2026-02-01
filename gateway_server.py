@@ -37,6 +37,7 @@ from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
 
+from gpiozero import Button
 from utils.led import RgbLed
 from utils.gateway_state import GatewayState
 from utils.display import (
@@ -44,6 +45,7 @@ from utils.display import (
     LastPacketPage,
     OffPage,
     ScreenManager,
+    SSD1306Display,
     SystemInfoPage,
 )
 
@@ -499,10 +501,16 @@ def run_gateway(config: dict, verbose_logging: bool = False) -> None:
 
     # Initialize OLED display if configured
     screen_manager = None
+    display_advance_button = None
+    display_scroll_button = None
     display_config = config.get("display", {})
 
     if display_config.get("enabled", False):
         try:
+            display = SSD1306Display(
+                i2c_port=display_config.get("i2c_port", 1),
+                i2c_address=display_config.get("i2c_address", 0x3C),
+            )
             pages = [
                 OffPage(),
                 SystemInfoPage(gateway_state),
@@ -510,14 +518,24 @@ def run_gateway(config: dict, verbose_logging: bool = False) -> None:
                 GatewayLocalSensors(gateway_state),
             ]
             screen_manager = ScreenManager(
+                display=display,
                 pages=pages,
-                switch_pin=display_config.get("switch_pin", 16),
-                i2c_port=display_config.get("i2c_port", 1),
-                i2c_address=display_config.get("i2c_address", 0x3C),
                 refresh_interval=display_config.get("refresh_interval", 0.5),
             )
             screen_manager.start()
-            logger.info("OLED display initialized (switch on GPIO to cycle pages)")
+
+            # Set up optional GPIO buttons for page cycling and scrolling
+            if advance_pin := display_config.get("advance_switch_pin"):
+                display_advance_button = Button(advance_pin)
+                display_advance_button.when_pressed = screen_manager.advance_page
+                logger.info(f"Display advance button on GPIO {advance_pin}")
+
+            if scroll_pin := display_config.get("scroll_switch_pin"):
+                display_scroll_button = Button(scroll_pin)
+                display_scroll_button.when_pressed = lambda: screen_manager.scroll_page(1)
+                logger.info(f"Display scroll button on GPIO {scroll_pin}")
+
+            logger.info("OLED display initialized")
         except Exception as e:
             logger.warning(f"Failed to initialize display: {e}")
             screen_manager = None
@@ -554,6 +572,10 @@ def run_gateway(config: dict, verbose_logging: bool = False) -> None:
             local_reader.stop()
         if screen_manager:
             screen_manager.close()
+        if display_advance_button:
+            display_advance_button.close()
+        if display_scroll_button:
+            display_scroll_button.close()
         if radio:
             radio.close()
         if led:

@@ -1,8 +1,9 @@
 """
-OLED display management with page cycling via microswitch.
+OLED display management with page cycling.
 
-Provides a modular system for displaying information on an SSD1306 OLED.
-Pages can be cycled through using a connected microswitch.
+Provides a modular system for displaying information on OLED displays.
+Includes an abstract Display class for hardware abstraction and
+SSD1306Display as the concrete implementation.
 """
 
 import socket
@@ -11,12 +12,105 @@ import time
 from abc import ABC, abstractmethod
 from datetime import datetime
 
-from gpiozero import Button
 from luma.core.interface.serial import i2c
 from luma.core.render import canvas
 from luma.oled.device import ssd1306
 
 from .gateway_state import GatewayState
+
+
+# =============================================================================
+# Display Hardware Abstraction
+# =============================================================================
+
+
+class Display(ABC):
+    """Abstract base class for display hardware."""
+
+    @property
+    @abstractmethod
+    def width(self) -> int:
+        """Display width in pixels."""
+        pass
+
+    @property
+    @abstractmethod
+    def height(self) -> int:
+        """Display height in pixels."""
+        pass
+
+    @property
+    @abstractmethod
+    def line_height(self) -> int:
+        """Height of a single text line in pixels."""
+        pass
+
+    @property
+    def max_lines(self) -> int:
+        """Maximum visible lines based on height and line_height."""
+        return self.height // self.line_height
+
+    @abstractmethod
+    def show(self) -> None:
+        """Turn on/wake up the display."""
+        pass
+
+    @abstractmethod
+    def hide(self) -> None:
+        """Turn off/sleep the display."""
+        pass
+
+    @abstractmethod
+    def clear(self) -> None:
+        """Clear all pixels from the display."""
+        pass
+
+    @abstractmethod
+    def render_lines(self, lines: list[str | None]) -> None:
+        """Render lines of text to the display.
+
+        Args:
+            lines: List of text lines to display. None entries are blank lines.
+                   Only the first `max_lines` will be shown.
+        """
+        pass
+
+
+class SSD1306Display(Display):
+    """SSD1306 OLED display implementation using luma.oled."""
+
+    def __init__(self, i2c_port: int = 1, i2c_address: int = 0x3C):
+        serial = i2c(port=i2c_port, address=i2c_address)
+        self._device = ssd1306(serial)
+
+    @property
+    def width(self) -> int:
+        return 128
+
+    @property
+    def height(self) -> int:
+        return 64
+
+    @property
+    def line_height(self) -> int:
+        return 16
+
+    def show(self) -> None:
+        self._device.show()
+
+    def hide(self) -> None:
+        self._device.hide()
+
+    def clear(self) -> None:
+        self._device.clear()
+
+    def render_lines(self, lines: list[str | None]) -> None:
+        with canvas(self._device) as draw:
+            y = 0
+            for line in lines[: self.max_lines]:
+                if line is not None:
+                    draw.text((0, y), line, fill="white")
+                y += self.line_height
 
 
 # =============================================================================
@@ -28,18 +122,20 @@ class ScreenPage(ABC):
     """
     Abstract base class for display pages.
 
-    Each page provides up to 4 lines of text to display.
+    Each page provides lines of text to display. If more lines are returned
+    than can fit on the display, ScreenManager handles scrolling.
     To add a new page, subclass this and implement get_lines().
     """
 
     @abstractmethod
     def get_lines(self) -> list[str | None]:
         """
-        Return up to 4 lines of text for the display.
+        Return lines of text for the display.
 
         Returns:
-            List of up to 4 strings. None means blank/skip line.
+            List of strings. None means blank/skip line.
             If all lines are None, the screen will be turned off.
+            Can return any number of lines; ScreenManager handles scrolling.
         """
         pass
 
@@ -169,78 +265,96 @@ class GatewayLocalSensors(ScreenPage):
 
 class ScreenManager:
     """
-    Manages the OLED display and page cycling.
+    Manages display pages and scrolling.
 
     Handles:
-    - SSD1306 display initialization and rendering
-    - Microswitch input for page cycling
+    - Page management and cycling
+    - Line scrolling within pages
     - Periodic display refresh
+
+    GPIO button handling is external; use advance_page() and scroll_page()
+    methods to wire up buttons.
     """
 
     def __init__(
         self,
+        display: Display,
         pages: list[ScreenPage],
-        switch_pin: int = 16,
-        i2c_port: int = 1,
-        i2c_address: int = 0x3C,
         refresh_interval: float = 0.5,
     ):
         """
         Initialize the screen manager.
 
         Args:
+            display: Display instance to render to
             pages: List of ScreenPage instances to cycle through
-            switch_pin: GPIO pin for the microswitch (BCM numbering)
-            i2c_port: I2C bus number (usually 1 on Pi)
-            i2c_address: I2C address of SSD1306 (usually 0x3C)
             refresh_interval: How often to refresh the display (seconds)
         """
+        self._display = display
         self._pages = pages
         self._current_page_idx = 0
+        self._line_offset = 0
         self._refresh_interval = refresh_interval
         self._running = False
         self._thread: threading.Thread | None = None
         self._lock = threading.Lock()
 
-        # Initialize display
-        serial = i2c(port=i2c_port, address=i2c_address)
-        self._device = ssd1306(serial)
-
-        # Initialize switch
-        self._switch = Button(switch_pin)
-        self._switch.when_pressed = self._on_switch_pressed
-
-    def _on_switch_pressed(self) -> None:
-        """Handle switch press - cycle to next page."""
+    def advance_page(self) -> None:
+        """Advance to the next page, wrapping to first. Resets scroll offset."""
         with self._lock:
             self._current_page_idx = (self._current_page_idx + 1) % len(self._pages)
+            self._line_offset = 0
         self._refresh()
 
     def set_page(self, index: int) -> None:
-        """Set the current page by index (thread-safe)."""
+        """Set the current page by index (thread-safe). Resets scroll offset."""
         with self._lock:
             if 0 <= index < len(self._pages):
                 self._current_page_idx = index
+                self._line_offset = 0
+        self._refresh()
+
+    def scroll_page(self, delta: int = 1) -> None:
+        """Scroll the visible window by delta lines (positive = down).
+
+        Wraps to top when reaching the bottom.
+        """
+        with self._lock:
+            page = self._pages[self._current_page_idx]
+            lines = page.get_lines()
+            total_lines = len(lines)
+            max_lines = self._display.max_lines
+
+            if total_lines <= max_lines:
+                # No scrolling needed, content fits
+                return
+
+            self._line_offset += delta
+            # Wrap to top when we've scrolled past the end
+            if self._line_offset + max_lines > total_lines:
+                self._line_offset = 0
+            elif self._line_offset < 0:
+                self._line_offset = max(0, total_lines - max_lines)
         self._refresh()
 
     def _refresh(self) -> None:
         """Refresh the display with current page content."""
         with self._lock:
             page = self._pages[self._current_page_idx]
+            offset = self._line_offset
 
         if page.is_off():
-            self._device.hide()
+            self._display.hide()
             return
 
-        self._device.show()
+        self._display.show()
         lines = page.get_lines()
 
-        with canvas(self._device) as draw:
-            y = 0
-            for line in lines:
-                if line is not None:
-                    draw.text((0, y), line, fill="white")
-                y += 16  # 4 lines fit in 64 pixels
+        # Slice the visible window
+        max_lines = self._display.max_lines
+        visible_lines = lines[offset : offset + max_lines]
+
+        self._display.render_lines(visible_lines)
 
     def start(self) -> None:
         """Start the display refresh thread."""
@@ -256,7 +370,7 @@ class ScreenManager:
         self._running = False
         if self._thread:
             self._thread.join(timeout=2.0)
-        self._device.clear()
+        self._display.clear()
 
     def _run(self) -> None:
         """Background thread that periodically refreshes the display."""
@@ -270,8 +384,6 @@ class ScreenManager:
     def close(self) -> None:
         """Clean up resources."""
         self.stop()
-        if self._switch:
-            self._switch.close()
 
 
 # =============================================================================
