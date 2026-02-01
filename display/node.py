@@ -120,7 +120,7 @@ class ArducamOCRPage(ScreenPage):
 
         def _do_capture():
             try:
-                result = self._capture_and_ocr(output_dir=Path('~/Pictures'))
+                result = self._capture_and_ocr(output_dir=Path.home() / "Pictures")
                 self._state.set_ocr_result(result if result else "No result found")
             except Exception as e:
                 logger.error(f"OCR capture failed: {e}")
