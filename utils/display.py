@@ -6,6 +6,7 @@ Includes an abstract Display class for hardware abstraction and
 SSD1306Display as the concrete implementation.
 """
 
+import socket
 import threading
 import time
 from abc import ABC, abstractmethod
@@ -316,4 +317,39 @@ class ScreenManager:
     def close(self) -> None:
         """Clean up resources."""
         self.stop()
+
+
+# =============================================================================
+# Utility Functions
+# =============================================================================
+
+
+def _get_ip_address() -> str:
+    """Get the primary IP address of this machine."""
+    try:
+        # Connect to a remote address to determine local IP
+        # (doesn't actually send data)
+        s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+        s.connect(("8.8.8.8", 80))
+        ip = s.getsockname()[0]
+        s.close()
+        return ip
+    except Exception:
+        return "Unknown"
+
+
+def _format_duration(seconds: float) -> str:
+    """Format a duration in seconds to a human-readable string."""
+    seconds = int(seconds)
+
+    if seconds < 60:
+        return f"{seconds}s"
+    elif seconds < 3600:
+        m = seconds // 60
+        s = seconds % 60
+        return f"{m}m{s}s"
+    else:
+        h = seconds // 3600
+        m = (seconds % 3600) // 60
+        return f"{h}h{m}m"
 
