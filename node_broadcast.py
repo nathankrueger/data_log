@@ -337,11 +337,13 @@ def main():
         try:
             from gpiozero import Button
 
-            from utils.display import OffPage, ScreenManager, SSD1306Display
-            from utils.node_display import (
+            from display import (
                 ArducamOCRPage,
                 NodeInfoPage,
+                OffPage,
+                ScreenManager,
                 SensorValuesPage,
+                SSD1306Display,
             )
 
             display = SSD1306Display(

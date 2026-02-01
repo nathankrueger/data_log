@@ -40,10 +40,12 @@ from urllib.error import URLError, HTTPError
 from gpiozero import Button
 from utils.led import RgbLed
 from utils.gateway_state import GatewayState
-from utils.display import OffPage, ScreenManager, SSD1306Display
-from utils.gateway_display import (
+from display import (
     GatewayLocalSensors,
     LastPacketPage,
+    OffPage,
+    ScreenManager,
+    SSD1306Display,
     SystemInfoPage,
 )
 
@@ -428,6 +430,7 @@ def run_gateway(config: dict, verbose_logging: bool = False) -> None:
     # Create shared state for display
     gateway_state = GatewayState()
     gateway_state.dashboard_url = dashboard_url
+    gateway_state.gateway_name = node_id
 
     # Create dashboard client and collector
     dashboard_client = DashboardClient(dashboard_url, node_id)

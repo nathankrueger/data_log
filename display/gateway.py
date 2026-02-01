@@ -11,8 +11,8 @@ import time
 from datetime import datetime
 from urllib.parse import urlparse
 
-from .display import ScreenPage, _format_duration, _get_ip_address
-from .gateway_state import GatewayState
+from .base import ScreenPage, _format_duration, _get_ip_address
+from utils.gateway_state import GatewayState
 
 
 class SystemInfoPage(ScreenPage):
@@ -31,6 +31,7 @@ class SystemInfoPage(ScreenPage):
         self._state = state
 
     def get_lines(self) -> list[str | None]:
+        name = self._state.gateway_name
         ip = _get_ip_address()
         uptime = _format_duration(time.time() - self._state.start_time)
 
@@ -48,7 +49,7 @@ class SystemInfoPage(ScreenPage):
             dashboard_ip = parsed.hostname or "N/A"
 
         return [
-            "System Information",
+            f"Sys Info [{name}]",
             f"IP: {ip}",
             f"Uptime: {uptime}",
             f"Last pkt: {last_pkt_str}",

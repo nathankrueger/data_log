@@ -13,12 +13,17 @@ Raspberry Pi-based distributed sensor network with LoRa radio communication. Out
 
 ## Commands
 
+**IMPORTANT:** Always activate the virtual environment before running any Python commands:
+```bash
+source .venv/bin/activate
+```
+
 ```bash
 # Setup
 source install.sh              # Create/activate venv and install deps
 ./install.sh --reinstall       # Full reinstall
 
-# Tests
+# Tests (venv must be active)
 ./run_tests.sh                 # Run pytest
 pytest tests/ -v               # Verbose test output
 

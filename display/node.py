@@ -11,8 +11,8 @@ import logging
 import threading
 import time
 
-from .display import ScreenPage, _format_duration, _get_ip_address
-from .node_state import NodeState
+from .base import ScreenPage, _format_duration, _get_ip_address
+from utils.node_state import NodeState
 
 logger = logging.getLogger(__name__)
 
