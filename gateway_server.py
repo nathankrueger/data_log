@@ -272,6 +272,7 @@ class LoRaReceiver(threading.Thread):
             r = readings[0]
             self._gateway_state.update_last_packet(
                 node_id=node_id,
+                rssi=rssi,
                 sensor_name=r.name,
                 sensor_value=r.value,
                 sensor_units=r.units,

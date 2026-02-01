@@ -16,6 +16,7 @@ class LastPacketInfo:
 
     timestamp: float = 0.0
     node_id: str = ""
+    rssi: int = 0
     sensor_name: str = ""
     sensor_value: float = 0.0
     sensor_units: str = ""
@@ -47,6 +48,7 @@ class GatewayState:
     def update_last_packet(
         self,
         node_id: str,
+        rssi: int,
         sensor_name: str,
         sensor_value: float,
         sensor_units: str,
@@ -55,6 +57,7 @@ class GatewayState:
         with self._lock:
             self.last_packet.timestamp = time.time()
             self.last_packet.node_id = node_id
+            self.last_packet.rssi = rssi
             self.last_packet.sensor_name = sensor_name
             self.last_packet.sensor_value = sensor_value
             self.last_packet.sensor_units = sensor_units
@@ -65,6 +68,7 @@ class GatewayState:
             return LastPacketInfo(
                 timestamp=self.last_packet.timestamp,
                 node_id=self.last_packet.node_id,
+                rssi=self.last_packet.rssi,
                 sensor_name=self.last_packet.sensor_name,
                 sensor_value=self.last_packet.sensor_value,
                 sensor_units=self.last_packet.sensor_units,
