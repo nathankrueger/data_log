@@ -365,12 +365,12 @@ def main():
 
             # Page advance button
             if advance_pin := display_config.get("advance_switch_pin"):
-                display_advance_button = Button(advance_pin)
+                display_advance_button = Button(advance_pin, bounce_time=0.02)
                 display_advance_button.when_pressed = screen_manager.advance_page
 
             # Action button (context-sensitive by page)
             if action_pin := display_config.get("action_switch_pin"):
-                action_button = Button(action_pin)
+                action_button = Button(action_pin, bounce_time=0.02)
                 action_button.when_pressed = screen_manager.do_page_action
 
             logger.info("OLED display initialized")

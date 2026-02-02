@@ -527,12 +527,12 @@ def run_gateway(config: dict, verbose_logging: bool = False) -> None:
 
             # Set up optional GPIO buttons for page cycling and scrolling
             if advance_pin := display_config.get("advance_switch_pin"):
-                display_advance_button = Button(advance_pin)
+                display_advance_button = Button(advance_pin, bounce_time=0.02)
                 display_advance_button.when_pressed = screen_manager.advance_page
                 logger.info(f"Display advance button on GPIO {advance_pin}")
 
             if scroll_pin := display_config.get("scroll_switch_pin"):
-                display_scroll_button = Button(scroll_pin)
+                display_scroll_button = Button(scroll_pin, bounce_time=0.02)
                 display_scroll_button.when_pressed = lambda: screen_manager.scroll_page(1)
                 logger.info(f"Display scroll button on GPIO {scroll_pin}")
 
