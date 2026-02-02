@@ -140,13 +140,21 @@ def detect_display(image_path, min_area=5000, max_area_ratio=0.05):
     return [(x, y, w, h) for x, y, w, h, _ in candidates]
 
 
-def run_ocr(image_path, crop_region: tuple | None = None):
+def run_ocr(
+    image_path,
+    crop_region: tuple | None = None,
+    preprocess: bool = True,
+    num_digits: int | None = None,
+):
     """
     Run ssocr on an image, optionally cropping first.
 
     Args:
         image_path: Path to the image file
         crop_region: Optional (x, y, w, h) tuple for crop region. If None, uses full image.
+        preprocess: If True, apply normalization, blur, and Otsu thresholding (posterization).
+                    If False, just use grayscale image directly.
+        num_digits: Expected number of digits. If None, ssocr auto-detects.
 
     Returns:
         OCR result string, or None if recognition failed.
@@ -178,59 +186,47 @@ def run_ocr(image_path, crop_region: tuple | None = None):
     gray_path = Path(image_path).parent / "ocr_gray.png"
     cv2.imwrite(str(gray_path), gray)
 
-    # Normalize to use full 0-255 range (stretch contrast)
-    normalized = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
+    if preprocess:
+        # Normalize to use full 0-255 range (stretch contrast)
+        normalized = cv2.normalize(gray, None, 0, 255, cv2.NORM_MINMAX)
 
-    # Light blur to reduce noise
-    blurred = cv2.GaussianBlur(normalized, (3, 3), 0)
+        # Light blur to reduce noise
+        blurred = cv2.GaussianBlur(normalized, (3, 3), 0)
 
-    # Simple Otsu threshold on normalized image
-    _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        # Simple Otsu threshold on normalized image
+        _, thresh = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
 
-    # For dark LCD displays, digits are lighter than background
-    # After Otsu, check if we need to invert for ssocr (expects dark on light)
-    if np.mean(thresh) > 127:
-        thresh = cv2.bitwise_not(thresh)
+        # For dark LCD displays, digits are lighter than background
+        # After Otsu, check if we need to invert for ssocr (expects dark on light)
+        if np.mean(thresh) > 127:
+            thresh = cv2.bitwise_not(thresh)
+
+        ocr_image = thresh
+    else:
+        # No preprocessing - use grayscale directly
+        ocr_image = gray
 
     # Save preprocessed image
     crop_path = Path(image_path).parent / "ocr_crop.png"
-    cv2.imwrite(str(crop_path), thresh)
+    cv2.imwrite(str(crop_path), ocr_image)
 
-    # Run ssocr
-    # -d 4: expect up to 4 digits (typical for temp/humidity displays)
+    # Build ssocr command
     # -t 50: threshold percentage
+    # -d N: expected number of digits (omit for auto-detect)
+    cmd = ["ssocr", "-t", "50"]
+    if num_digits is not None:
+        cmd.extend(["-d", str(num_digits)])
+    cmd.append(str(crop_path))
+
     try:
         result = subprocess.run(
-            ["ssocr", "-d", "4", "-t", "50", str(crop_path)],
+            cmd,
             capture_output=True,
             text=True,
             timeout=30,
         )
         if result.returncode == 0 and result.stdout.strip():
             return result.stdout.strip()
-
-        # Try with 2 digits
-        result = subprocess.run(
-            ["ssocr", "-d", "2", "-t", "50", str(crop_path)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-
-        # Try with inverted image
-        thresh_inv = cv2.bitwise_not(thresh)
-        cv2.imwrite(str(crop_path), thresh_inv)
-        result = subprocess.run(
-            ["ssocr", "-d", "2", "-t", "50", str(crop_path)],
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            return result.stdout.strip()
-
         return None
     except FileNotFoundError:
         print("ssocr not found. Install with: sudo apt install ssocr")
@@ -290,6 +286,8 @@ def capture_and_ocr(
     flip: bool = True,
     crop_mode: CropMode = CropMode.AUTO,
     crop_region: tuple | None = None,
+    preprocess: bool = True,
+    num_digits: int | None = None,
 ) -> str | None:
     """
     Capture image and run OCR, returning result or None.
@@ -303,6 +301,9 @@ def capture_and_ocr(
         flip: Whether to rotate image 180 degrees
         crop_mode: CropMode enum value for cropping behavior
         crop_region: (x, y, w, h) tuple required when crop_mode=CropMode.MANUAL
+        preprocess: If True, apply posterization (normalize, blur, threshold).
+                    If False, use grayscale image directly.
+        num_digits: Expected number of digits. If None, ssocr auto-detects.
 
     Returns:
         OCR result string, or None if no result found.
@@ -332,7 +333,7 @@ def capture_and_ocr(
     else:
         raise ValueError(f"Invalid crop_mode: {crop_mode}")
 
-    return run_ocr(output_path, crop_region)
+    return run_ocr(output_path, crop_region, preprocess=preprocess, num_digits=num_digits)
 
 
 def _parse_args():
@@ -370,6 +371,19 @@ def _parse_args():
         "--ocr",
         action="store_true",
         help="Run 7-segment OCR with specified crop mode",
+    )
+    parser.add_argument(
+        "--preprocess",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Apply posterization preprocessing (default: True, use --no-preprocess to disable)",
+    )
+    parser.add_argument(
+        "--digits",
+        "-d",
+        type=int,
+        default=None,
+        help="Expected number of digits (default: auto-detect)",
     )
     parser.add_argument(
         "--debug-detect",
@@ -493,7 +507,12 @@ def _main():
                     cv2.imwrite(str(debug_path), debug_img)
                     print(f"Debug image saved to: {debug_path}")
 
-                ocr_result = run_ocr(output_path, crop_region)
+                ocr_result = run_ocr(
+                    output_path,
+                    crop_region,
+                    preprocess=args.preprocess,
+                    num_digits=args.digits,
+                )
                 if ocr_result:
                     print(f"OCR Result: {ocr_result}")
                 else:

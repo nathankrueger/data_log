@@ -124,6 +124,7 @@ class ArducamOCRPage(ScreenPage):
                 result = self._capture_and_ocr(
                     output_dir=Path.home() / "Pictures",
                     crop_mode=self._crop_mode.NONE,
+                    preprocess=False
                 )
                 self._state.set_ocr_result(result if result else "No result found")
             except Exception as e:
