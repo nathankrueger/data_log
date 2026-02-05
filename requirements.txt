@@ -6,6 +6,10 @@ gpiozero
 luma.oled
 pytest
 
+# Optional: Reed-Solomon FEC for stream protocol (packet-level erasure coding)
+# Only needed if using pack_stream_with_rs_fec / unpack_stream_with_rs_fec
+reedsolo
+
 # Camera/OCR dependencies (on Pi, prefer apt packages for faster install):
 # sudo apt install python3-picamera2 python3-opencv python3-numpy python3-pil -y
 #opencv-python

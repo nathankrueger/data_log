@@ -550,3 +550,323 @@ def unpack_stream_with_fec(packets: list[bytes]) -> bytes:
     # Reassemble using standard unpacking
     ordered_packets = [data_packets[i] for i in range(total_count)]
     return unpack_stream(ordered_packets)
+
+
+# =============================================================================
+# Optional Reed-Solomon FEC (requires 'reedsolo' package)
+# =============================================================================
+
+MAGIC_RS_PARITY = 0xDA7C  # RS parity packet magic
+
+# RS parity packet header format:
+# magic(2) + total_len(4) + parity_idx(2) + num_parity(2) + num_data(2) = 12 bytes
+RS_HEADER_FMT = ">HIHHH"
+RS_HEADER_SIZE = struct.calcsize(RS_HEADER_FMT)
+RS_MAX_PAYLOAD = LORA_MAX_PACKET - RS_HEADER_SIZE - CRC16_SIZE  # 236 bytes
+
+
+def _check_reedsolo() -> None:
+    """Check if reedsolo is available, raise ImportError with helpful message if not."""
+    try:
+        import reedsolo  # noqa: F401
+    except ImportError:
+        raise ImportError(
+            "Reed-Solomon FEC requires the 'reedsolo' package. "
+            "Install with: pip install reedsolo"
+        )
+
+
+def pack_stream_with_rs_fec(
+    data: bytes,
+    num_parity: int = 2,
+) -> list[bytes]:
+    """
+    Pack data with Reed-Solomon erasure coding.
+
+    Creates K data packets + M parity packets. Can recover from ANY M lost packets
+    (not just 1 per block like XOR parity).
+
+    Args:
+        data: Raw bytes to send
+        num_parity: Number of parity packets to generate (default: 2)
+                   Higher = more redundancy, more overhead
+
+    Returns:
+        List of packets (K data + M parity) ready to transmit
+
+    Raises:
+        PackError: If data too large or invalid parameters
+        ImportError: If reedsolo package not installed
+
+    Example:
+        10 data packets + 2 parity = can lose ANY 2 packets and still recover
+        Overhead: num_parity / num_data = 20% for 2 parity on 10 data
+
+    Note:
+        RS works on GF(2^8), so max K + M = 255 packets.
+        For larger transfers, data is split into blocks.
+    """
+    _check_reedsolo()
+    from reedsolo import RSCodec
+
+    if num_parity < 1:
+        raise PackError("num_parity must be >= 1")
+    if num_parity > 32:
+        raise PackError("num_parity too large (max 32 for practical use)")
+
+    # Get data packets using standard packing
+    data_packets = pack_stream(data)
+    num_data = len(data_packets)
+
+    if num_data + num_parity > 255:
+        raise PackError(
+            f"Too many packets for RS: {num_data} data + {num_parity} parity > 255. "
+            "Split your data into smaller chunks."
+        )
+
+    total_len = len(data) + CRC32_SIZE
+
+    # Pad all payloads to same length for RS encoding
+    max_payload_len = max(len(pkt) - HEADER_SIZE - CRC16_SIZE for pkt in data_packets)
+
+    # Extract payloads and pad
+    payloads = []
+    for pkt in data_packets:
+        payload = pkt[HEADER_SIZE:-CRC16_SIZE]
+        payload = payload.ljust(max_payload_len, b'\x00')
+        payloads.append(payload)
+
+    # Create RS codec for this configuration
+    # RSCodec(nsym) creates a codec that adds nsym parity symbols
+    rs = RSCodec(num_parity)
+
+    # Apply RS encoding to each byte position across all packets
+    # This creates num_parity parity bytes for each position
+    parity_payloads = [bytearray(max_payload_len) for _ in range(num_parity)]
+
+    for byte_pos in range(max_payload_len):
+        # Gather this byte from all data packets
+        column = bytes(payloads[i][byte_pos] for i in range(num_data))
+
+        # Encode with RS - this appends num_parity parity bytes
+        encoded = rs.encode(column)
+
+        # Extract just the parity bytes (last num_parity bytes)
+        parity_bytes = encoded[num_data:]
+
+        # Distribute to parity payloads
+        for i, b in enumerate(parity_bytes):
+            parity_payloads[i][byte_pos] = b
+
+    # Build parity packets
+    parity_packets = []
+    for parity_idx, parity_payload in enumerate(parity_payloads):
+        header = struct.pack(
+            RS_HEADER_FMT,
+            MAGIC_RS_PARITY,
+            total_len,
+            parity_idx,
+            num_parity,
+            num_data,
+        )
+        pkt_data = header + bytes(parity_payload)
+        pkt_crc = struct.pack(">H", crc16_ccitt(pkt_data))
+        parity_packets.append(pkt_data + pkt_crc)
+
+    return data_packets + parity_packets
+
+
+@dataclass
+class RSParityPacket:
+    """A Reed-Solomon parity packet."""
+    total_len: int
+    parity_idx: int   # Which parity packet this is (0 to num_parity-1)
+    num_parity: int   # Total number of parity packets
+    num_data: int     # Number of data packets
+    parity_data: bytes
+
+
+def _parse_rs_parity_packet(packet: bytes) -> RSParityPacket:
+    """Parse an RS parity packet. Raises UnpackError if invalid."""
+    min_size = RS_HEADER_SIZE + CRC16_SIZE
+    if len(packet) < min_size:
+        raise UnpackError(f"RS parity packet too small: {len(packet)} < {min_size}")
+
+    pkt_data = packet[:-CRC16_SIZE]
+    pkt_crc_bytes = packet[-CRC16_SIZE:]
+
+    expected_crc = struct.unpack(">H", pkt_crc_bytes)[0]
+    actual_crc = crc16_ccitt(pkt_data)
+    if expected_crc != actual_crc:
+        raise UnpackError(f"RS parity CRC16 mismatch")
+
+    header = pkt_data[:RS_HEADER_SIZE]
+    magic, total_len, parity_idx, num_parity, num_data = struct.unpack(RS_HEADER_FMT, header)
+
+    if magic != MAGIC_RS_PARITY:
+        raise UnpackError(f"Not an RS parity packet: magic {magic:04x}")
+
+    return RSParityPacket(
+        total_len=total_len,
+        parity_idx=parity_idx,
+        num_parity=num_parity,
+        num_data=num_data,
+        parity_data=pkt_data[RS_HEADER_SIZE:],
+    )
+
+
+def unpack_stream_with_rs_fec(packets: list[bytes]) -> bytes:
+    """
+    Reassemble packets with Reed-Solomon erasure recovery.
+
+    Can recover from ANY M lost packets (where M = num_parity).
+
+    Args:
+        packets: List of raw packets (data + RS parity, any order)
+
+    Returns:
+        Original data
+
+    Raises:
+        UnpackError: If too many packets lost to recover
+        ImportError: If reedsolo package not installed
+    """
+    _check_reedsolo()
+    from reedsolo import RSCodec, ReedSolomonError
+
+    if not packets:
+        raise UnpackError("No packets to unpack")
+
+    # Separate data and RS parity packets
+    data_packets: dict[int, bytes] = {}
+    rs_parity_packets: dict[int, RSParityPacket] = {}
+    total_len = None
+    total_count = None
+    num_parity = None
+    num_data = None
+
+    for pkt in packets:
+        if len(pkt) < HEADER_SIZE:
+            continue
+
+        magic = struct.unpack(">H", pkt[:2])[0]
+
+        if magic == MAGIC_DATA:
+            try:
+                parsed = unpack_packet(pkt)
+                data_packets[parsed.seq] = pkt
+                if total_len is None:
+                    total_len = parsed.total_len
+                    total_count = parsed.count
+            except UnpackError:
+                continue
+
+        elif magic == MAGIC_RS_PARITY:
+            try:
+                parsed = _parse_rs_parity_packet(pkt)
+                rs_parity_packets[parsed.parity_idx] = parsed
+                if num_parity is None:
+                    num_parity = parsed.num_parity
+                    num_data = parsed.num_data
+                    total_len = parsed.total_len
+            except UnpackError:
+                continue
+
+    if total_len is None:
+        raise UnpackError("No valid packets found")
+
+    # If we have all data packets, no need for RS decoding
+    if total_count and len(data_packets) == total_count:
+        ordered = [data_packets[i] for i in range(total_count)]
+        return unpack_stream(ordered)
+
+    # Need RS recovery
+    if num_parity is None or num_data is None:
+        raise UnpackError("Missing RS parity information and not all data packets received")
+
+    total_count = num_data
+    missing_data_seqs = set(range(num_data)) - set(data_packets.keys())
+    num_lost = len(missing_data_seqs)
+
+    # Count available parity packets
+    available_parity = len(rs_parity_packets)
+
+    if num_lost > available_parity:
+        raise UnpackError(
+            f"Lost {num_lost} data packets but only have {available_parity} parity packets. "
+            f"Need at least {num_lost} parity packets to recover."
+        )
+
+    # Determine payload length from received packets
+    sample_pkt = next(iter(data_packets.values()), None)
+    if sample_pkt:
+        max_payload_len = len(sample_pkt) - HEADER_SIZE - CRC16_SIZE
+    else:
+        # Use parity packet payload length
+        sample_parity = next(iter(rs_parity_packets.values()))
+        max_payload_len = len(sample_parity.parity_data)
+
+    # Pad all payloads to same length
+    payloads: dict[int, bytes] = {}
+    for seq, pkt in data_packets.items():
+        payload = pkt[HEADER_SIZE:-CRC16_SIZE]
+        payloads[seq] = payload.ljust(max_payload_len, b'\x00')
+
+    # Create RS codec
+    rs = RSCodec(num_parity)
+
+    # Recover each byte position
+    recovered_payloads: list[bytearray] = [bytearray(max_payload_len) for _ in range(num_data)]
+
+    for byte_pos in range(max_payload_len):
+        # Build the received codeword with erasures marked
+        # RS decode expects: data_bytes + parity_bytes, with erasure positions
+        received = bytearray(num_data + num_parity)
+        erasure_pos = []
+
+        # Fill in data bytes
+        for seq in range(num_data):
+            if seq in payloads:
+                received[seq] = payloads[seq][byte_pos]
+            else:
+                received[seq] = 0  # Placeholder for erased
+                erasure_pos.append(seq)
+
+        # Fill in parity bytes
+        for parity_idx in range(num_parity):
+            if parity_idx in rs_parity_packets:
+                parity = rs_parity_packets[parity_idx]
+                if byte_pos < len(parity.parity_data):
+                    received[num_data + parity_idx] = parity.parity_data[byte_pos]
+                else:
+                    received[num_data + parity_idx] = 0
+                    erasure_pos.append(num_data + parity_idx)
+            else:
+                received[num_data + parity_idx] = 0
+                erasure_pos.append(num_data + parity_idx)
+
+        # Decode with erasure positions
+        try:
+            decoded = rs.decode(bytes(received), erase_pos=erasure_pos)
+            # decoded is (data, parity, errata_pos) - we want just data
+            if isinstance(decoded, tuple):
+                data_bytes = decoded[0]
+            else:
+                data_bytes = decoded
+        except ReedSolomonError as e:
+            raise UnpackError(f"RS decode failed at byte {byte_pos}: {e}")
+
+        # Store recovered data bytes
+        for seq in range(num_data):
+            recovered_payloads[seq][byte_pos] = data_bytes[seq]
+
+    # Rebuild missing data packets
+    for seq in missing_data_seqs:
+        header = struct.pack(HEADER_FMT, MAGIC_DATA, total_len, seq, num_data)
+        pkt_data = header + bytes(recovered_payloads[seq])
+        pkt_crc = struct.pack(">H", crc16_ccitt(pkt_data))
+        data_packets[seq] = pkt_data + pkt_crc
+
+    # Now unpack normally
+    ordered = [data_packets[i] for i in range(num_data)]
+    return unpack_stream(ordered)

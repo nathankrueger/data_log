@@ -657,6 +657,191 @@ class TestFECWithMockRadio:
 
 
 # =============================================================================
+# Reed-Solomon FEC Tests (requires reedsolo package)
+# =============================================================================
+
+# Try to import reedsolo for RS tests
+try:
+    import reedsolo
+    REEDSOLO_AVAILABLE = True
+except ImportError:
+    REEDSOLO_AVAILABLE = False
+
+# Conditionally import RS functions
+if REEDSOLO_AVAILABLE:
+    from utils.stream_protocol import (
+        pack_stream_with_rs_fec,
+        unpack_stream_with_rs_fec,
+        MAGIC_RS_PARITY,
+    )
+
+
+@pytest.mark.skipif(not REEDSOLO_AVAILABLE, reason="reedsolo package not installed")
+class TestReedSolomonFEC:
+    """Test Reed-Solomon FEC pack/unpack functions."""
+
+    def test_small_data_with_rs(self):
+        """Single packet with RS parity."""
+        data = b"Hello, RS!"
+        packets = pack_stream_with_rs_fec(data, num_parity=2)
+        # 1 data packet + 2 parity packets
+        assert len(packets) == 3
+        result = unpack_stream_with_rs_fec(packets)
+        assert result == data
+
+    def test_multi_packet_with_rs(self):
+        """Multiple packets with RS roundtrip."""
+        data = b"x" * 1000
+        packets = pack_stream_with_rs_fec(data, num_parity=3)
+
+        data_only = pack_stream(data)
+        assert len(packets) == len(data_only) + 3
+
+        result = unpack_stream_with_rs_fec(packets)
+        assert result == data
+
+    def test_recover_one_lost_packet(self):
+        """Can recover from one lost packet."""
+        data = b"y" * 2000
+        packets = pack_stream_with_rs_fec(data, num_parity=2)
+
+        # Remove a data packet
+        del packets[2]
+
+        result = unpack_stream_with_rs_fec(packets)
+        assert result == data
+
+    def test_recover_two_lost_packets(self):
+        """Can recover from two lost packets with 2 parity."""
+        data = b"z" * 2000
+        packets = pack_stream_with_rs_fec(data, num_parity=2)
+
+        # Remove two data packets
+        del packets[1]
+        del packets[2]
+
+        result = unpack_stream_with_rs_fec(packets)
+        assert result == data
+
+    def test_recover_max_lost_packets(self):
+        """Can recover exactly num_parity lost packets."""
+        data = b"a" * 3000
+        num_parity = 4
+        packets = pack_stream_with_rs_fec(data, num_parity=num_parity)
+
+        # Remove exactly num_parity data packets
+        data_only = pack_stream(data)
+        num_data = len(data_only)
+
+        # Remove packets 0, 2, 4, 6 (or as many as available)
+        indices_to_remove = [i for i in range(0, num_data, 2)][:num_parity]
+        for idx in sorted(indices_to_remove, reverse=True):
+            del packets[idx]
+
+        result = unpack_stream_with_rs_fec(packets)
+        assert result == data
+
+    def test_too_many_lost_fails(self):
+        """Cannot recover more than num_parity lost packets."""
+        data = b"b" * 2000
+        packets = pack_stream_with_rs_fec(data, num_parity=2)
+
+        # Remove 3 data packets (more than 2 parity can handle)
+        del packets[0]
+        del packets[0]
+        del packets[0]
+
+        with pytest.raises(UnpackError, match="Need at least"):
+            unpack_stream_with_rs_fec(packets)
+
+    def test_lost_parity_reduces_recovery(self):
+        """Losing parity packets reduces recovery capability."""
+        data = b"c" * 2000
+        packets = pack_stream_with_rs_fec(data, num_parity=3)
+
+        # Find and remove a parity packet
+        for i, pkt in enumerate(packets):
+            magic = struct.unpack(">H", pkt[:2])[0]
+            if magic == MAGIC_RS_PARITY:
+                del packets[i]
+                break
+
+        # Now we can only recover 2 lost data packets
+        # Remove 2 data packets (should still work)
+        del packets[0]
+        del packets[0]
+
+        result = unpack_stream_with_rs_fec(packets)
+        assert result == data
+
+    def test_no_recovery_needed(self):
+        """All data packets received - no RS decoding needed."""
+        data = b"d" * 1000
+        packets = pack_stream_with_rs_fec(data, num_parity=2)
+
+        # Only send data packets, no parity
+        data_only = [p for p in packets if struct.unpack(">H", p[:2])[0] != MAGIC_RS_PARITY]
+
+        result = unpack_stream_with_rs_fec(data_only)
+        assert result == data
+
+    def test_rs_overhead_calculation(self):
+        """Verify RS overhead is predictable."""
+        data = b"e" * 5000
+
+        for num_parity in [1, 2, 4, 8]:
+            packets = pack_stream_with_rs_fec(data, num_parity=num_parity)
+            data_only = pack_stream(data)
+
+            num_data = len(data_only)
+            expected_total = num_data + num_parity
+
+            assert len(packets) == expected_total
+
+            overhead_pct = (num_parity / num_data) * 100
+            print(f"num_parity={num_parity}: {overhead_pct:.1f}% overhead")
+
+
+@pytest.mark.skipif(not REEDSOLO_AVAILABLE, reason="reedsolo package not installed")
+class TestRSFECWithMockRadio:
+    """Test RS-FEC with simulated lossy channel."""
+
+    def test_survives_burst_loss(self):
+        """RS can handle burst losses (consecutive packets)."""
+        data = b"f" * 5000
+        num_parity = 4
+        packets = pack_stream_with_rs_fec(data, num_parity=num_parity)
+
+        # Remove 4 consecutive packets (burst loss)
+        del packets[3:7]
+
+        # Can still recover if we have enough parity
+        result = unpack_stream_with_rs_fec(packets)
+        assert result == data
+
+    def test_random_loss_recovery(self):
+        """RS handles random packet loss up to its limit."""
+        random.seed(456)
+        data = b"g" * 8000
+        num_parity = 5
+
+        packets = pack_stream_with_rs_fec(data, num_parity=num_parity)
+        data_count = len(pack_stream(data))
+
+        # Randomly remove up to num_parity packets from data portion
+        data_indices = list(range(data_count))
+        random.shuffle(data_indices)
+        to_remove = data_indices[:num_parity]
+
+        # Remove in reverse order to preserve indices
+        for idx in sorted(to_remove, reverse=True):
+            del packets[idx]
+
+        result = unpack_stream_with_rs_fec(packets)
+        assert result == data
+
+
+# =============================================================================
 # Test Vectors for Arduino Verification
 # =============================================================================
 
