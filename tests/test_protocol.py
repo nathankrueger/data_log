@@ -7,12 +7,15 @@ import pytest
 
 from sensors import SENSOR_CLASS_IDS, get_sensor_class_id, get_sensor_class_name
 from utils.protocol import (
+    AckPacket,
     CommandPacket,
     LORA_MAX_PAYLOAD,
     SensorReading,
+    build_ack_packet,
     build_command_packet,
     build_lora_packets,
     calculate_crc32,
+    parse_ack_packet,
     parse_command_packet,
     parse_lora_packet,
     verify_crc,
@@ -370,7 +373,7 @@ class TestBuildCommandPacket:
 
     def test_builds_valid_packet(self):
         """Should build a valid JSON packet with all fields."""
-        packet = build_command_packet("reboot", ["--force"], "node_001")
+        packet, command_id = build_command_packet("reboot", ["--force"], "node_001")
         data = json.loads(packet.decode("utf-8"))
 
         assert data["t"] == "cmd"
@@ -380,30 +383,39 @@ class TestBuildCommandPacket:
         assert "ts" in data
         assert "c" in data
 
+    def test_returns_command_id(self):
+        """Should return command_id in format timestamp_crcprefix."""
+        packet, command_id = build_command_packet("test", [], "node_001")
+        data = json.loads(packet.decode("utf-8"))
+
+        # command_id should be {timestamp}_{first 4 chars of crc}
+        expected_id = f"{data['ts']}_{data['c'][:4]}"
+        assert command_id == expected_id
+
     def test_broadcast_has_empty_node_id(self):
         """Broadcast commands should have empty node_id."""
-        packet = build_command_packet("ping", [])
+        packet, _ = build_command_packet("ping", [])
         data = json.loads(packet.decode("utf-8"))
 
         assert data["n"] == ""
 
     def test_packet_has_valid_crc(self):
         """Packet CRC should validate correctly."""
-        packet = build_command_packet("test", ["arg1", "arg2"], "node_001")
+        packet, _ = build_command_packet("test", ["arg1", "arg2"], "node_001")
         data = json.loads(packet.decode("utf-8"))
 
         assert verify_crc(data, crc_key="c")
 
     def test_empty_args(self):
         """Empty args list should be preserved."""
-        packet = build_command_packet("ping", [])
+        packet, _ = build_command_packet("ping", [])
         data = json.loads(packet.decode("utf-8"))
 
         assert data["a"] == []
 
     def test_multiple_args(self):
         """Multiple args should be preserved in order."""
-        packet = build_command_packet("set_config", ["key", "value", "option"])
+        packet, _ = build_command_packet("set_config", ["key", "value", "option"])
         data = json.loads(packet.decode("utf-8"))
 
         assert data["a"] == ["key", "value", "option"]
@@ -414,7 +426,7 @@ class TestParseCommandPacket:
 
     def test_roundtrip(self):
         """Build then parse should return equivalent data."""
-        packet = build_command_packet("reboot", ["--force"], "node_001")
+        packet, _ = build_command_packet("reboot", ["--force"], "node_001")
         result = parse_command_packet(packet)
 
         assert result is not None
@@ -422,11 +434,11 @@ class TestParseCommandPacket:
         assert result.command == "reboot"
         assert result.args == ["--force"]
         assert result.node_id == "node_001"
-        assert isinstance(result.timestamp, float)
+        assert isinstance(result.timestamp, int)
 
     def test_roundtrip_broadcast(self):
         """Broadcast command should parse correctly."""
-        packet = build_command_packet("ping", [])
+        packet, _ = build_command_packet("ping", [])
         result = parse_command_packet(packet)
 
         assert result is not None
@@ -436,11 +448,19 @@ class TestParseCommandPacket:
 
     def test_is_broadcast_method(self):
         """is_broadcast should return correct value."""
-        targeted = build_command_packet("cmd", [], "node_001")
-        broadcast = build_command_packet("cmd", [])
+        targeted, _ = build_command_packet("cmd", [], "node_001")
+        broadcast, _ = build_command_packet("cmd", [])
 
         assert parse_command_packet(targeted).is_broadcast() is False
         assert parse_command_packet(broadcast).is_broadcast() is True
+
+    def test_get_command_id(self):
+        """Parsed packet should provide matching command_id."""
+        packet, command_id = build_command_packet("test", [], "node_001")
+        result = parse_command_packet(packet)
+
+        assert result is not None
+        assert result.get_command_id() == command_id
 
     def test_parse_invalid_json(self):
         """Invalid JSON should return None."""
@@ -448,7 +468,7 @@ class TestParseCommandPacket:
 
     def test_parse_invalid_crc(self):
         """Tampered packet should return None."""
-        packet = build_command_packet("test", [], "node_001")
+        packet, _ = build_command_packet("test", [], "node_001")
 
         # Tamper with the packet
         data = json.loads(packet.decode("utf-8"))
@@ -630,3 +650,125 @@ class TestCommandRegistry:
 
         commands = registry.get_registered_commands()
         assert sorted(commands) == ["cmd1", "cmd2"]
+
+
+# =============================================================================
+# ACK Packet Tests
+# =============================================================================
+
+
+class TestBuildAckPacket:
+    """Tests for build_ack_packet function."""
+
+    def test_builds_valid_packet(self):
+        """Should build a valid JSON ACK packet with all fields."""
+        packet = build_ack_packet("1699999999_a1b2", "node_001")
+        data = json.loads(packet.decode("utf-8"))
+
+        assert data["t"] == "ack"
+        assert data["id"] == "1699999999_a1b2"
+        assert data["n"] == "node_001"
+        assert "c" in data
+
+    def test_packet_has_valid_crc(self):
+        """ACK packet CRC should validate correctly."""
+        packet = build_ack_packet("1699999999_a1b2", "node_001")
+        data = json.loads(packet.decode("utf-8"))
+
+        assert verify_crc(data, crc_key="c")
+
+    def test_different_command_ids_produce_different_packets(self):
+        """Different command IDs should produce different packets."""
+        packet1 = build_ack_packet("1699999999_a1b2", "node_001")
+        packet2 = build_ack_packet("1699999998_c3d4", "node_001")
+
+        assert packet1 != packet2
+
+
+class TestParseAckPacket:
+    """Tests for parse_ack_packet function."""
+
+    def test_roundtrip(self):
+        """Build then parse should return equivalent data."""
+        command_id = "1699999999_a1b2"
+        node_id = "node_001"
+        packet = build_ack_packet(command_id, node_id)
+        result = parse_ack_packet(packet)
+
+        assert result is not None
+        assert isinstance(result, AckPacket)
+        assert result.command_id == command_id
+        assert result.node_id == node_id
+
+    def test_parse_invalid_json(self):
+        """Invalid JSON should return None."""
+        assert parse_ack_packet(b"not json") is None
+
+    def test_parse_invalid_crc(self):
+        """Tampered ACK packet should return None."""
+        packet = build_ack_packet("1699999999_a1b2", "node_001")
+
+        # Tamper with the packet
+        data = json.loads(packet.decode("utf-8"))
+        data["id"] = "tampered"
+        tampered = json.dumps(data).encode("utf-8")
+
+        assert parse_ack_packet(tampered) is None
+
+    def test_parse_wrong_type(self):
+        """Packet with wrong type should return None."""
+        # Build a command packet and try to parse as ACK
+        cmd_packet, _ = build_command_packet("test", [], "node_001")
+        assert parse_ack_packet(cmd_packet) is None
+
+    def test_parse_sensor_packet_returns_none(self):
+        """Sensor packet should return None."""
+        readings = [make_reading("Test", "x", 1.0, "BME280TempPressureHumidity")]
+        sensor_packet = build_lora_packets("test-node", readings)[0]
+
+        assert parse_ack_packet(sensor_packet) is None
+
+    def test_parse_missing_fields(self):
+        """ACK packet missing required fields should return None."""
+        incomplete = json.dumps({"t": "ack", "id": "test"}).encode("utf-8")
+        assert parse_ack_packet(incomplete) is None
+
+
+class TestCommandIdMatching:
+    """Tests for command ID generation and matching."""
+
+    def test_command_id_format(self):
+        """Command ID should be timestamp_crcprefix format."""
+        packet, command_id = build_command_packet("test", [], "node_001")
+        data = json.loads(packet.decode("utf-8"))
+
+        parts = command_id.split("_")
+        assert len(parts) == 2
+        assert parts[0] == str(data["ts"])
+        assert parts[1] == data["c"][:4]
+
+    def test_ack_matches_command(self):
+        """ACK command_id should match the command's get_command_id()."""
+        packet, command_id = build_command_packet("test", [], "node_001")
+        cmd = parse_command_packet(packet)
+
+        # Node receives command and sends ACK
+        ack_packet = build_ack_packet(cmd.get_command_id(), "node_001")
+        ack = parse_ack_packet(ack_packet)
+
+        assert ack.command_id == command_id
+
+    def test_different_commands_have_different_ids(self):
+        """Different commands should have different IDs."""
+        # Same command sent twice will have different timestamps
+        _, id1 = build_command_packet("test", [], "node_001")
+
+        # Force different timestamp by modifying time (in practice, different seconds)
+        import time
+        time.sleep(0.001)  # Ensure some time passes
+
+        # Different command content produces different CRC
+        _, id2 = build_command_packet("test2", [], "node_001")
+
+        # At minimum the CRC prefix should differ
+        assert id1 != id2

@@ -29,11 +29,12 @@ import argparse
 import json
 import logging
 import inspect
-import queue
 import signal
 import sys
 import threading
 import time
+from collections import deque
+from dataclasses import dataclass, field
 from pathlib import Path
 from urllib.request import Request, urlopen
 from urllib.error import URLError, HTTPError
@@ -58,6 +59,7 @@ from utils.protocol import (
     SensorReading,
     build_command_packet,
     make_sensor_id,
+    parse_ack_packet,
     parse_lora_packet,
 )
 
@@ -68,6 +70,163 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+
+
+# =============================================================================
+# Command Queue with ACK-based Reliability
+# =============================================================================
+
+
+@dataclass
+class PendingCommand:
+    """A command awaiting ACK from the target node."""
+
+    command_id: str
+    cmd: str
+    args: list[str]
+    node_id: str
+    packet: bytes
+    next_retry_time: float
+    retry_count: int = 0
+    max_retries: int = 10
+
+
+class CommandQueue:
+    """
+    Serial command queue with ACK-based retirement.
+
+    Commands are sent one at a time. After sending, the gateway waits for
+    an ACK from the target node. If no ACK is received, the command is
+    retried with exponential backoff until max_retries is reached.
+    """
+
+    def __init__(
+        self,
+        max_size: int = 128,
+        max_retries: int = 10,
+        initial_retry_ms: int = 100,
+        max_retry_ms: int = 5000,
+    ):
+        """
+        Initialize the command queue.
+
+        Args:
+            max_size: Maximum number of pending commands
+            max_retries: Maximum retry attempts before giving up
+            initial_retry_ms: Initial retry delay in milliseconds
+            max_retry_ms: Maximum retry delay (backoff cap)
+        """
+        self._queue: deque[PendingCommand] = deque()
+        self._max_size = max_size
+        self._current: PendingCommand | None = None
+        self._lock = threading.Lock()
+        self._max_retries = max_retries
+        self._initial_retry_ms = initial_retry_ms
+        self._max_retry_ms = max_retry_ms
+
+    def add(self, cmd: str, args: list[str], node_id: str) -> str | None:
+        """
+        Add a command to the queue.
+
+        Args:
+            cmd: Command name
+            args: Command arguments
+            node_id: Target node ID (empty for broadcast)
+
+        Returns:
+            Command ID for tracking, or None if queue is full
+        """
+        packet, command_id = build_command_packet(cmd, args, node_id)
+
+        pending = PendingCommand(
+            command_id=command_id,
+            cmd=cmd,
+            args=args,
+            node_id=node_id,
+            packet=packet,
+            next_retry_time=0,  # Send immediately
+            max_retries=self._max_retries,
+        )
+
+        with self._lock:
+            if len(self._queue) >= self._max_size:
+                return None
+            self._queue.append(pending)
+        return command_id
+
+    def get_next_to_send(self) -> PendingCommand | None:
+        """
+        Get the next command to transmit, if ready.
+
+        Returns:
+            PendingCommand if one is ready to send, None otherwise
+        """
+        with self._lock:
+            # If no current command, pop from queue
+            if self._current is None and self._queue:
+                self._current = self._queue.popleft()
+                self._current.next_retry_time = 0  # Send immediately
+
+            # Check if current command is ready to send (retry timer elapsed)
+            if self._current and time.time() >= self._current.next_retry_time:
+                return self._current
+        return None
+
+    def mark_sent(self) -> None:
+        """Mark the current command as sent and schedule retry."""
+        with self._lock:
+            if self._current:
+                self._current.retry_count += 1
+                # Exponential backoff: 100ms, 200ms, 400ms, 800ms... capped
+                delay_ms = min(
+                    self._initial_retry_ms * (2 ** (self._current.retry_count - 1)),
+                    self._max_retry_ms,
+                )
+                self._current.next_retry_time = time.time() + (delay_ms / 1000)
+
+    def ack_received(self, command_id: str) -> bool:
+        """
+        Handle an ACK - retire the command if it matches.
+
+        Args:
+            command_id: ID from the ACK packet
+
+        Returns:
+            True if the ACK matched the current command
+        """
+        with self._lock:
+            if self._current and self._current.command_id == command_id:
+                logger.info(
+                    f"Command '{self._current.cmd}' ACK'd after "
+                    f"{self._current.retry_count} attempt(s)"
+                )
+                self._current = None
+                return True
+        return False
+
+    def check_expired(self) -> PendingCommand | None:
+        """
+        Check if the current command has exceeded max retries.
+
+        Returns:
+            The expired PendingCommand if one expired, None otherwise
+        """
+        with self._lock:
+            if self._current and self._current.retry_count >= self._current.max_retries:
+                expired = self._current
+                self._current = None
+                return expired
+        return None
+
+    def pending_count(self) -> int:
+        """Return number of commands in queue (not including current)."""
+        with self._lock:
+            return len(self._queue)
+
+    def has_current(self) -> bool:
+        """Return True if there's a command currently being sent/retried."""
+        with self._lock:
+            return self._current is not None
 
 
 # =============================================================================
@@ -206,14 +365,15 @@ class LoRaTransceiver(threading.Thread):
 
     Handles both:
     - Receiving sensor data from nodes → forwards to collector
-    - Sending commands from queue → transmits over LoRa
+    - Receiving ACKs from nodes → retires commands from queue
+    - Sending commands from queue → transmits over LoRa with retry
     """
 
     def __init__(
         self,
         radio: RFM9xRadio,
         collector: SensorDataCollector,
-        command_queue: "queue.Queue[dict]",
+        command_queue: CommandQueue,
         led: RgbLed | None = None,
         flash_color: tuple[int, int, int] = (255, 0, 0),
         flash_duration: float = 0.1,
@@ -259,35 +419,48 @@ class LoRaTransceiver(threading.Thread):
         self._running = False
 
     def _process_command_queue(self) -> None:
-        """Send any pending commands from the queue."""
-        try:
-            cmd = self._command_queue.get_nowait()
-            self._send_command(cmd)
-        except queue.Empty:
-            pass
-
-    def _send_command(self, cmd: dict) -> None:
-        """Build and transmit a command packet."""
-        try:
-            packet = build_command_packet(
-                command=cmd["cmd"],
-                args=cmd["args"],
-                node_id=cmd["node_id"],
+        """Send pending commands with retry logic."""
+        # Check for expired commands
+        expired = self._command_queue.check_expired()
+        if expired:
+            target = expired.node_id or "broadcast"
+            logger.warning(
+                f"Command '{expired.cmd}' to {target} expired after "
+                f"{expired.max_retries} retries"
             )
-            success = self._radio.send(packet)
-            target = cmd["node_id"] if cmd["node_id"] else "broadcast"
-            if success:
-                logger.info(f"Sent command '{cmd['cmd']}' to {target}")
-            else:
-                logger.warning(f"Failed to send command '{cmd['cmd']}' to {target}")
-        except Exception as e:
-            logger.error(f"Error sending command: {e}")
+
+        # Get next command to send (if retry timer elapsed)
+        pending = self._command_queue.get_next_to_send()
+        if pending:
+            try:
+                success = self._radio.send(pending.packet)
+                target = pending.node_id or "broadcast"
+                if success:
+                    logger.debug(
+                        f"Sent '{pending.cmd}' to {target} "
+                        f"(attempt {pending.retry_count + 1})"
+                    )
+                else:
+                    logger.warning(f"Radio send failed for '{pending.cmd}' to {target}")
+                self._command_queue.mark_sent()
+            except Exception as e:
+                logger.error(f"Error sending command: {e}")
 
     def _process_received_packet(self, packet: bytes) -> None:
-        """Validate CRC, parse JSON, forward to collector."""
+        """Validate CRC, parse JSON, forward to collector or handle ACK."""
         receive_time = time.time()
         rssi = self._radio.get_last_rssi()
 
+        # First, check if it's an ACK packet
+        ack = parse_ack_packet(packet)
+        if ack:
+            if self._command_queue.ack_received(ack.command_id):
+                logger.info(f"ACK received from '{ack.node_id}' (RSSI: {rssi} dB)")
+            else:
+                logger.debug(f"Unexpected ACK from '{ack.node_id}': {ack.command_id}")
+            return
+
+        # Otherwise, process as sensor data
         result = parse_lora_packet(packet)
         if result is None:
             if self._verbose_logging:
@@ -498,12 +671,17 @@ def run_gateway(config: dict, verbose_logging: bool = False) -> None:
     flash_duration = led_config.get("flash_duration_sec", 0.1)
     flash_on_recv_default = led_config.get("flash_on_recv", True)
 
-    # Create command queue for gateway → node commands
-    command_queue: queue.Queue[dict] = queue.Queue(maxsize=128)
+    # Create command queue for gateway → node commands with ACK-based reliability
+    command_config = config.get("command_server", {})
+    command_queue = CommandQueue(
+        max_size=command_config.get("max_queue_size", 128),
+        max_retries=command_config.get("max_retries", 10),
+        initial_retry_ms=command_config.get("initial_retry_ms", 100),
+        max_retry_ms=command_config.get("max_retry_ms", 5000),
+    )
 
     # Start command server if enabled
     command_server = None
-    command_config = config.get("command_server", {})
 
     if command_config.get("enabled", False):
         port = command_config.get("port", 5001)

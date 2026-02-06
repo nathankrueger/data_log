@@ -284,14 +284,28 @@ class CommandPacket:
     command: str
     args: list[str]
     node_id: str  # Empty string for broadcast
-    timestamp: float
+    timestamp: int
+    crc: str
 
     def is_broadcast(self) -> bool:
         """Return True if this is a broadcast command (no specific target)."""
         return self.node_id == ""
 
+    def get_command_id(self) -> str:
+        """Get unique command ID for ACK matching."""
+        return f"{self.timestamp}_{self.crc[:4]}"
 
-def build_command_packet(command: str, args: list[str], node_id: str = "") -> bytes:
+
+@dataclass
+class AckPacket:
+    """An acknowledgment for a received command."""
+    command_id: str
+    node_id: str
+
+
+def build_command_packet(
+    command: str, args: list[str], node_id: str = ""
+) -> tuple[bytes, str]:
     """
     Build a LoRa command packet with CRC.
 
@@ -309,17 +323,21 @@ def build_command_packet(command: str, args: list[str], node_id: str = "") -> by
         node_id: Target node ID, or empty string for broadcast
 
     Returns:
-        UTF-8 encoded JSON packet ready to transmit
+        Tuple of (packet_bytes, command_id) where command_id is for ACK matching
     """
+    timestamp = int(time.time())
     message: dict[str, Any] = {
         "t": "cmd",
         "n": node_id,
         "cmd": command,
         "a": args,
-        "ts": int(time.time()),
+        "ts": timestamp,
     }
-    message["c"] = calculate_crc32(message)
-    return json.dumps(message, separators=(",", ":")).encode("utf-8")
+    crc = calculate_crc32(message)
+    message["c"] = crc
+    command_id = f"{timestamp}_{crc[:4]}"
+    packet = json.dumps(message, separators=(",", ":")).encode("utf-8")
+    return packet, command_id
 
 
 def parse_command_packet(data: bytes) -> CommandPacket | None:
@@ -351,6 +369,70 @@ def parse_command_packet(data: bytes) -> CommandPacket | None:
             args=message["a"],
             node_id=message["n"],
             timestamp=message["ts"],
+            crc=message["c"],
+        )
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+# =============================================================================
+# LoRa ACK Messages (Node → Gateway)
+# =============================================================================
+
+
+def build_ack_packet(command_id: str, node_id: str) -> bytes:
+    """
+    Build an ACK packet for a received command.
+
+    Compact format keys:
+        t = "ack" (message type)
+        id = command_id (timestamp_crcprefix)
+        n = node_id sending the ACK
+        c = CRC
+
+    Args:
+        command_id: ID of the command being acknowledged
+        node_id: ID of the node sending the ACK
+
+    Returns:
+        UTF-8 encoded JSON packet ready to transmit
+    """
+    message: dict[str, Any] = {
+        "t": "ack",
+        "id": command_id,
+        "n": node_id,
+    }
+    message["c"] = calculate_crc32(message)
+    return json.dumps(message, separators=(",", ":")).encode("utf-8")
+
+
+def parse_ack_packet(data: bytes) -> AckPacket | None:
+    """
+    Parse and verify a LoRa ACK packet.
+
+    Args:
+        data: Raw bytes received from LoRa
+
+    Returns:
+        AckPacket if valid, None if invalid/corrupted or not an ACK
+    """
+    try:
+        message = json.loads(data.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+    # Check message type
+    if message.get("t") != "ack":
+        return None
+
+    # Verify CRC
+    if not verify_crc(message, crc_key="c"):
+        return None
+
+    try:
+        return AckPacket(
+            command_id=message["id"],
+            node_id=message["n"],
         )
     except (KeyError, TypeError, ValueError):
         return None

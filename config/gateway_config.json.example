@@ -30,6 +30,10 @@
     },
     "command_server": {
         "enabled": true,
-        "port": 5001
+        "port": 5001,
+        "max_queue_size": 128,
+        "max_retries": 10,
+        "initial_retry_ms": 100,
+        "max_retry_ms": 5000
     }
 }

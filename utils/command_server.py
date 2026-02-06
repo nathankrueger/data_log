@@ -5,11 +5,16 @@ Uses Python's built-in http.server module (no dependencies).
 Dashboard sends POST requests to /command endpoint with JSON body.
 """
 
+from __future__ import annotations
+
 import json
 import logging
-import queue
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from gateway_server import CommandQueue
 
 logger = logging.getLogger(__name__)
 
@@ -64,27 +69,26 @@ class CommandHandler(BaseHTTPRequestHandler):
             self.send_error(400, "'node_id' must be a string")
             return
 
-        # Queue the command for LoRa transmission
-        command_data = {
-            "cmd": cmd,
-            "args": args,
-            "node_id": node_id,
-        }
+        # Queue the command for LoRa transmission with ACK-based delivery
+        command_id = self.server.command_queue.add(cmd, args, node_id)  # type: ignore
 
-        try:
-            self.server.command_queue.put_nowait(command_data)  # type: ignore
-        except queue.Full:
+        if command_id is None:
             self.send_error(503, "Command queue full")
             return
 
         target = node_id if node_id else "broadcast"
-        logger.info(f"Queued command '{cmd}' for {target}")
+        logger.info(f"Queued command '{cmd}' for {target} (id: {command_id})")
 
-        # Send success response
+        # Send success response with command_id for tracking
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
-        response = json.dumps({"status": "queued", "cmd": cmd, "target": target})
+        response = json.dumps({
+            "status": "queued",
+            "command_id": command_id,
+            "cmd": cmd,
+            "target": target,
+        })
         self.wfile.write(response.encode("utf-8"))
 
     def log_message(self, format: str, *args) -> None:
@@ -97,27 +101,24 @@ class CommandServer(threading.Thread):
     HTTP server thread for receiving commands from dashboard.
 
     Runs as a daemon thread, listening for POST /command requests.
-    Commands are validated and placed on a queue for the LoRa
-    transceiver to send.
+    Commands are validated and placed on a CommandQueue for the LoRa
+    transceiver to send with ACK-based reliability.
 
     Example:
-        command_queue = queue.Queue(maxsize=100)
+        command_queue = CommandQueue(max_size=128)
         server = CommandServer(port=5001, command_queue=command_queue)
         server.start()
 
-        # Commands are added to command_queue when received
-        # In your transceiver thread:
-        cmd = command_queue.get()
-        # Send cmd over LoRa...
+        # Commands are sent with retry until ACK received
     """
 
-    def __init__(self, port: int, command_queue: "queue.Queue[dict]"):
+    def __init__(self, port: int, command_queue: "CommandQueue"):
         """
         Initialize the command server.
 
         Args:
             port: TCP port to listen on
-            command_queue: Queue to place received commands
+            command_queue: CommandQueue for reliable command delivery
         """
         super().__init__(daemon=True, name="CommandServer")
         self.port = port

@@ -43,7 +43,12 @@ import sensors as sensors_module
 from radio import RFM9xRadio
 from sensors import Sensor
 from utils.command_registry import CommandRegistry, CommandScope
-from utils.protocol import SensorReading, build_lora_packets, parse_command_packet
+from utils.protocol import (
+    SensorReading,
+    build_ack_packet,
+    build_lora_packets,
+    parse_command_packet,
+)
 from utils.node_state import NodeState
 
 # Configure logging
@@ -132,15 +137,30 @@ class CommandReceiver(threading.Thread):
         self._running = False
 
     def _process_packet(self, packet: bytes) -> None:
-        """Parse and dispatch a received command packet."""
+        """Parse and dispatch a received command packet, send ACK."""
         cmd = parse_command_packet(packet)
         if cmd is None:
             # Not a valid command packet (might be a sensor packet from another node)
             return
 
+        # Check if command is for this node
+        if cmd.node_id and cmd.node_id != self._node_id:
+            return  # Not for us (targeted to another node)
+
         target = cmd.node_id if cmd.node_id else "broadcast"
         logger.info(f"Received command '{cmd.command}' for {target}")
 
+        # Send ACK immediately before dispatching
+        command_id = cmd.get_command_id()
+        ack_packet = build_ack_packet(command_id, self._node_id)
+        with self._radio_lock:
+            success = self._radio.send(ack_packet)
+        if success:
+            logger.debug(f"Sent ACK for command '{cmd.command}' (id: {command_id})")
+        else:
+            logger.warning(f"Failed to send ACK for command '{cmd.command}'")
+
+        # Dispatch to handlers
         handled = self._registry.dispatch(cmd.command, cmd.args, cmd.node_id)
         if not handled:
             logger.debug(f"No handler for command '{cmd.command}'")
