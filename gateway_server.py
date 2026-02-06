@@ -104,7 +104,7 @@ class CommandQueue:
         self,
         max_size: int = 128,
         max_retries: int = 10,
-        initial_retry_ms: int = 100,
+        initial_retry_ms: int = 300,
         max_retry_ms: int = 5000,
     ):
         """
