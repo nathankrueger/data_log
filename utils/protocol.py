@@ -6,6 +6,7 @@ shared between outdoor nodes and gateways.
 
 Message Types:
 - LoRa broadcast: Outdoor node → Gateway (JSON with CRC)
+- LoRa command: Gateway → Node (JSON with CRC)
 """
 
 import json
@@ -269,5 +270,87 @@ def parse_lora_packet(data: bytes) -> tuple[str, list[SensorReading]] | None:
 
         return node_id, readings
 
+    except (KeyError, TypeError, ValueError):
+        return None
+
+
+# =============================================================================
+# LoRa Command Messages (Gateway → Node)
+# =============================================================================
+
+@dataclass
+class CommandPacket:
+    """A command to be sent to nodes."""
+    command: str
+    args: list[str]
+    node_id: str  # Empty string for broadcast
+    timestamp: float
+
+    def is_broadcast(self) -> bool:
+        """Return True if this is a broadcast command (no specific target)."""
+        return self.node_id == ""
+
+
+def build_command_packet(command: str, args: list[str], node_id: str = "") -> bytes:
+    """
+    Build a LoRa command packet with CRC.
+
+    Compact format keys:
+        t = "cmd" (message type)
+        n = node_id (empty string for broadcast)
+        cmd = command name
+        a = args list
+        ts = timestamp
+        c = CRC
+
+    Args:
+        command: Command name (e.g., "reboot", "set_interval")
+        args: List of string arguments
+        node_id: Target node ID, or empty string for broadcast
+
+    Returns:
+        UTF-8 encoded JSON packet ready to transmit
+    """
+    message: dict[str, Any] = {
+        "t": "cmd",
+        "n": node_id,
+        "cmd": command,
+        "a": args,
+        "ts": int(time.time()),
+    }
+    message["c"] = calculate_crc32(message)
+    return json.dumps(message, separators=(",", ":")).encode("utf-8")
+
+
+def parse_command_packet(data: bytes) -> CommandPacket | None:
+    """
+    Parse and verify a LoRa command packet.
+
+    Args:
+        data: Raw bytes received from LoRa
+
+    Returns:
+        CommandPacket if valid, None if invalid/corrupted
+    """
+    try:
+        message = json.loads(data.decode("utf-8"))
+    except (json.JSONDecodeError, UnicodeDecodeError):
+        return None
+
+    # Check message type
+    if message.get("t") != "cmd":
+        return None
+
+    # Verify CRC
+    if not verify_crc(message, crc_key="c"):
+        return None
+
+    try:
+        return CommandPacket(
+            command=message["cmd"],
+            args=message["a"],
+            node_id=message["n"],
+            timestamp=message["ts"],
+        )
     except (KeyError, TypeError, ValueError):
         return None

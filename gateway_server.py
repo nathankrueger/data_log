@@ -29,6 +29,7 @@ import argparse
 import json
 import logging
 import inspect
+import queue
 import signal
 import sys
 import threading
@@ -40,6 +41,7 @@ from urllib.error import URLError, HTTPError
 from gpiozero import Button
 from utils.led import RgbLed
 from utils.gateway_state import GatewayState
+from utils.command_server import CommandServer
 from display import (
     GatewayLocalSensors,
     LastPacketPage,
@@ -54,6 +56,7 @@ from radio import RFM9xRadio
 from sensors import Sensor
 from utils.protocol import (
     SensorReading,
+    build_command_packet,
     make_sensor_id,
     parse_lora_packet,
 )
@@ -193,26 +196,34 @@ class SensorDataCollector:
 
 
 # =============================================================================
-# LoRa Receiver Thread
+# LoRa Transceiver Thread
 # =============================================================================
 
 
-class LoRaReceiver(threading.Thread):
-    """Background thread that receives LoRa packets and forwards to collector."""
+class LoRaTransceiver(threading.Thread):
+    """
+    Background thread that receives LoRa packets and sends commands.
+
+    Handles both:
+    - Receiving sensor data from nodes → forwards to collector
+    - Sending commands from queue → transmits over LoRa
+    """
 
     def __init__(
         self,
         radio: RFM9xRadio,
         collector: SensorDataCollector,
+        command_queue: "queue.Queue[dict]",
         led: RgbLed | None = None,
         flash_color: tuple[int, int, int] = (255, 0, 0),
         flash_duration: float = 0.1,
         gateway_state: GatewayState | None = None,
         verbose_logging: bool = False,
     ):
-        super().__init__(daemon=True)
+        super().__init__(daemon=True, name="LoRaTransceiver")
         self._radio = radio
         self._collector = collector
+        self._command_queue = command_queue
         self._led = led
         self._flash_color = flash_color
         self._flash_duration = flash_duration
@@ -228,21 +239,51 @@ class LoRaReceiver(threading.Thread):
 
     def run(self) -> None:
         self._running = True
-        logger.info("LoRa receiver started")
+        logger.info("LoRa transceiver started")
 
         while self._running:
             try:
-                packet = self._radio.receive(timeout=5.0)
+                # Receive with short timeout to allow command transmission
+                packet = self._radio.receive(timeout=0.1)
                 if packet is not None:
-                    self._process_packet(packet)
+                    self._process_received_packet(packet)
+
+                # Check for pending commands to transmit
+                self._process_command_queue()
+
             except Exception as e:
-                logger.error(f"LoRa receive error: {e}")
+                logger.error(f"LoRa transceiver error: {e}")
                 time.sleep(1)  # Back off on error
 
     def stop(self) -> None:
         self._running = False
 
-    def _process_packet(self, packet: bytes) -> None:
+    def _process_command_queue(self) -> None:
+        """Send any pending commands from the queue."""
+        try:
+            cmd = self._command_queue.get_nowait()
+            self._send_command(cmd)
+        except queue.Empty:
+            pass
+
+    def _send_command(self, cmd: dict) -> None:
+        """Build and transmit a command packet."""
+        try:
+            packet = build_command_packet(
+                command=cmd["cmd"],
+                args=cmd["args"],
+                node_id=cmd["node_id"],
+            )
+            success = self._radio.send(packet)
+            target = cmd["node_id"] if cmd["node_id"] else "broadcast"
+            if success:
+                logger.info(f"Sent command '{cmd['cmd']}' to {target}")
+            else:
+                logger.warning(f"Failed to send command '{cmd['cmd']}' to {target}")
+        except Exception as e:
+            logger.error(f"Error sending command: {e}")
+
+    def _process_received_packet(self, packet: bytes) -> None:
         """Validate CRC, parse JSON, forward to collector."""
         receive_time = time.time()
         rssi = self._radio.get_last_rssi()
@@ -457,8 +498,21 @@ def run_gateway(config: dict, verbose_logging: bool = False) -> None:
     flash_duration = led_config.get("flash_duration_sec", 0.1)
     flash_on_recv_default = led_config.get("flash_on_recv", True)
 
-    # Start LoRa receiver if enabled
-    lora_receiver = None
+    # Create command queue for gateway → node commands
+    command_queue: queue.Queue[dict] = queue.Queue(maxsize=128)
+
+    # Start command server if enabled
+    command_server = None
+    command_config = config.get("command_server", {})
+
+    if command_config.get("enabled", False):
+        port = command_config.get("port", 5001)
+        command_server = CommandServer(port=port, command_queue=command_queue)
+        command_server.start()
+        logger.info(f"Command server listening on port {port}")
+
+    # Start LoRa transceiver if enabled
+    lora_transceiver = None
     radio = None
     lora_config = config.get("lora", {})
 
@@ -471,21 +525,22 @@ def run_gateway(config: dict, verbose_logging: bool = False) -> None:
                 reset_pin=lora_config.get("reset_pin", 25),
             )
             radio.init()
-            lora_receiver = LoRaReceiver(
+            lora_transceiver = LoRaTransceiver(
                 radio,
                 collector,
+                command_queue=command_queue,
                 led=led,
                 flash_color=flash_color,
                 flash_duration=flash_duration,
                 gateway_state=gateway_state,
                 verbose_logging=verbose_logging,
             )
-            lora_receiver.set_flash_enabled(flash_on_recv_default)
-            lora_receiver.start()
-            logger.info(f"LoRa receiver enabled at {radio.frequency_mhz} MHz")
+            lora_transceiver.set_flash_enabled(flash_on_recv_default)
+            lora_transceiver.start()
+            logger.info(f"LoRa transceiver enabled at {radio.frequency_mhz} MHz")
         except Exception as e:
             logger.error(f"Failed to initialize LoRa: {e}")
-            logger.info("Continuing without LoRa receiver")
+            logger.info("Continuing without LoRa transceiver")
 
     # Start local sensor reader if configured
     local_reader = None
@@ -544,13 +599,13 @@ def run_gateway(config: dict, verbose_logging: bool = False) -> None:
     # Set up signal handlers for runtime LED/display toggle
     def enable_flash(signum, frame):
         logger.info("Received SIGUSR1 signal - enabling LED flash")
-        if lora_receiver:
-            lora_receiver.set_flash_enabled(True)
+        if lora_transceiver:
+            lora_transceiver.set_flash_enabled(True)
 
     def disable_flash(signum, frame):
         logger.info("Received SIGUSR2 signal - disabling LED flash and display")
-        if lora_receiver:
-            lora_receiver.set_flash_enabled(False)
+        if lora_transceiver:
+            lora_transceiver.set_flash_enabled(False)
         if screen_manager:
             screen_manager.set_page(0)  # Switch to OffPage
 
@@ -567,8 +622,10 @@ def run_gateway(config: dict, verbose_logging: bool = False) -> None:
     finally:
         # Cleanup
         logger.info("Shutting down...")
-        if lora_receiver:
-            lora_receiver.stop()
+        if lora_transceiver:
+            lora_transceiver.stop()
+        if command_server:
+            command_server.stop()
         if local_reader:
             local_reader.stop()
         if screen_manager:

@@ -34,6 +34,7 @@ import inspect
 import json
 import logging
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -41,7 +42,8 @@ from pathlib import Path
 import sensors as sensors_module
 from radio import RFM9xRadio
 from sensors import Sensor
-from utils.protocol import SensorReading, build_lora_packets
+from utils.command_registry import CommandRegistry, CommandScope
+from utils.protocol import SensorReading, build_lora_packets, parse_command_packet
 from utils.node_state import NodeState
 
 # Configure logging
@@ -65,6 +67,83 @@ class SensorEntry:
     def class_name(self) -> str:
         """Get the sensor's class name."""
         return type(self.sensor).__name__
+
+
+# =============================================================================
+# Command Receiver Thread
+# =============================================================================
+
+
+class CommandReceiver(threading.Thread):
+    """
+    Dedicated thread for receiving commands immediately.
+
+    Runs continuously, acquiring radio_lock for short receive windows.
+    This ensures commands are received promptly even while the main
+    broadcast loop is sleeping between broadcasts.
+    """
+
+    def __init__(
+        self,
+        radio: RFM9xRadio,
+        radio_lock: threading.Lock,
+        node_id: str,
+        registry: CommandRegistry,
+        receive_timeout: float = 0.1,
+    ):
+        """
+        Initialize the command receiver.
+
+        Args:
+            radio: Radio instance to receive from
+            radio_lock: Lock shared with broadcast loop for half-duplex coordination
+            node_id: This node's ID for command filtering
+            registry: Command registry for dispatching received commands
+            receive_timeout: Timeout for each receive attempt (default 0.1s)
+        """
+        super().__init__(daemon=True, name="CommandReceiver")
+        self._radio = radio
+        self._radio_lock = radio_lock
+        self._node_id = node_id
+        self._registry = registry
+        self._receive_timeout = receive_timeout
+        self._running = False
+
+    def run(self) -> None:
+        """Run the receive loop."""
+        self._running = True
+        logger.info("Command receiver started")
+
+        while self._running:
+            try:
+                # Acquire lock for receive operation
+                with self._radio_lock:
+                    packet = self._radio.receive(timeout=self._receive_timeout)
+
+                if packet is not None:
+                    self._process_packet(packet)
+
+            except Exception as e:
+                logger.error(f"Command receive error: {e}")
+                time.sleep(0.5)  # Back off on error
+
+    def stop(self) -> None:
+        """Signal the thread to stop."""
+        self._running = False
+
+    def _process_packet(self, packet: bytes) -> None:
+        """Parse and dispatch a received command packet."""
+        cmd = parse_command_packet(packet)
+        if cmd is None:
+            # Not a valid command packet (might be a sensor packet from another node)
+            return
+
+        target = cmd.node_id if cmd.node_id else "broadcast"
+        logger.info(f"Received command '{cmd.command}' for {target}")
+
+        handled = self._registry.dispatch(cmd.command, cmd.args, cmd.node_id)
+        if not handled:
+            logger.debug(f"No handler for command '{cmd.command}'")
 
 
 def load_config(config_path: str) -> dict:
@@ -180,6 +259,7 @@ def broadcast_loop(
     node_id: str,
     sensors: list[SensorEntry],
     node_state: NodeState | None = None,
+    radio_lock: threading.Lock | None = None,
 ) -> None:
     """
     Main broadcast loop with per-sensor intervals.
@@ -192,6 +272,7 @@ def broadcast_loop(
         node_id: This node's identifier
         sensors: List of SensorEntry objects with interval configuration
         node_state: Optional shared state for display updates
+        radio_lock: Optional lock for half-duplex coordination with CommandReceiver
     """
     logger.info(f"Starting broadcast loop for node '{node_id}'")
     logger.info(f"Radio: {radio.frequency_mhz} MHz, TX power: {radio.tx_power} dBm")
@@ -234,7 +315,12 @@ def broadcast_loop(
                     total_bytes = 0
 
                     for packet in packets:
-                        success = radio.send(packet)
+                        # Acquire lock if using half-duplex coordination
+                        if radio_lock:
+                            with radio_lock:
+                                success = radio.send(packet)
+                        else:
+                            success = radio.send(packet)
                         total_bytes += len(packet)
                         if not success:
                             all_success = False
@@ -377,16 +463,55 @@ def main():
         except Exception as e:
             logger.warning(f"Failed to initialize display: {e}")
 
+    # Create command registry and register handlers
+    command_registry = CommandRegistry(node_id)
+
+    # Register built-in command handlers
+    def handle_ping(cmd: str, args: list[str]) -> None:
+        logger.info(f"[HANDLER] Received broadcast ping command with args: {args}")
+
+    def handle_private_ping(cmd: str, args: list[str]) -> None:
+        logger.info(f"[HANDLER] Received private ping command with args: {args}")
+
+    command_registry.register("ping", handle_ping, CommandScope.BROADCAST)
+    command_registry.register("ping", handle_private_ping, CommandScope.PRIVATE)
+
+    # Create radio lock for half-duplex coordination
+    radio_lock: threading.Lock | None = None
+    command_receiver: CommandReceiver | None = None
+
+    # Check if command receiver is enabled
+    command_config = config.get("command_receiver", {})
+    command_receiver_enabled = command_config.get("enabled", False)
+
+    if command_receiver_enabled:
+        radio_lock = threading.Lock()
+
     try:
         radio.init()
         logger.info("Radio initialized")
 
+        # Start command receiver if enabled
+        if command_receiver_enabled and radio_lock is not None:
+            receive_timeout = command_config.get("receive_timeout", 0.1)
+            command_receiver = CommandReceiver(
+                radio=radio,
+                radio_lock=radio_lock,
+                node_id=node_id,
+                registry=command_registry,
+                receive_timeout=receive_timeout,
+            )
+            command_receiver.start()
+            logger.info("Command receiver enabled")
+
         # Start broadcast loop
-        broadcast_loop(radio, node_id, sensors, node_state)
+        broadcast_loop(radio, node_id, sensors, node_state, radio_lock)
 
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     finally:
+        if command_receiver:
+            command_receiver.stop()
         radio.close()
         if screen_manager:
             screen_manager.close()

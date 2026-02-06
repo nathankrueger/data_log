@@ -7,13 +7,17 @@ import pytest
 
 from sensors import SENSOR_CLASS_IDS, get_sensor_class_id, get_sensor_class_name
 from utils.protocol import (
+    CommandPacket,
     LORA_MAX_PAYLOAD,
     SensorReading,
+    build_command_packet,
     build_lora_packets,
     calculate_crc32,
+    parse_command_packet,
     parse_lora_packet,
     verify_crc,
 )
+from utils.command_registry import CommandRegistry, CommandScope
 
 
 def make_reading(name: str, units: str, value: float, sensor_class: str) -> SensorReading:
@@ -354,3 +358,275 @@ class TestSensorRegistry:
         """Sensor IDs should be assigned in alphabetical order of class names."""
         class_names = list(SENSOR_CLASS_IDS.keys())
         assert class_names == sorted(class_names)
+
+
+# =============================================================================
+# Command Packet Tests
+# =============================================================================
+
+
+class TestBuildCommandPacket:
+    """Tests for build_command_packet function."""
+
+    def test_builds_valid_packet(self):
+        """Should build a valid JSON packet with all fields."""
+        packet = build_command_packet("reboot", ["--force"], "node_001")
+        data = json.loads(packet.decode("utf-8"))
+
+        assert data["t"] == "cmd"
+        assert data["cmd"] == "reboot"
+        assert data["a"] == ["--force"]
+        assert data["n"] == "node_001"
+        assert "ts" in data
+        assert "c" in data
+
+    def test_broadcast_has_empty_node_id(self):
+        """Broadcast commands should have empty node_id."""
+        packet = build_command_packet("ping", [])
+        data = json.loads(packet.decode("utf-8"))
+
+        assert data["n"] == ""
+
+    def test_packet_has_valid_crc(self):
+        """Packet CRC should validate correctly."""
+        packet = build_command_packet("test", ["arg1", "arg2"], "node_001")
+        data = json.loads(packet.decode("utf-8"))
+
+        assert verify_crc(data, crc_key="c")
+
+    def test_empty_args(self):
+        """Empty args list should be preserved."""
+        packet = build_command_packet("ping", [])
+        data = json.loads(packet.decode("utf-8"))
+
+        assert data["a"] == []
+
+    def test_multiple_args(self):
+        """Multiple args should be preserved in order."""
+        packet = build_command_packet("set_config", ["key", "value", "option"])
+        data = json.loads(packet.decode("utf-8"))
+
+        assert data["a"] == ["key", "value", "option"]
+
+
+class TestParseCommandPacket:
+    """Tests for parse_command_packet function."""
+
+    def test_roundtrip(self):
+        """Build then parse should return equivalent data."""
+        packet = build_command_packet("reboot", ["--force"], "node_001")
+        result = parse_command_packet(packet)
+
+        assert result is not None
+        assert isinstance(result, CommandPacket)
+        assert result.command == "reboot"
+        assert result.args == ["--force"]
+        assert result.node_id == "node_001"
+        assert isinstance(result.timestamp, float)
+
+    def test_roundtrip_broadcast(self):
+        """Broadcast command should parse correctly."""
+        packet = build_command_packet("ping", [])
+        result = parse_command_packet(packet)
+
+        assert result is not None
+        assert result.command == "ping"
+        assert result.node_id == ""
+        assert result.is_broadcast() is True
+
+    def test_is_broadcast_method(self):
+        """is_broadcast should return correct value."""
+        targeted = build_command_packet("cmd", [], "node_001")
+        broadcast = build_command_packet("cmd", [])
+
+        assert parse_command_packet(targeted).is_broadcast() is False
+        assert parse_command_packet(broadcast).is_broadcast() is True
+
+    def test_parse_invalid_json(self):
+        """Invalid JSON should return None."""
+        assert parse_command_packet(b"not json") is None
+
+    def test_parse_invalid_crc(self):
+        """Tampered packet should return None."""
+        packet = build_command_packet("test", [], "node_001")
+
+        # Tamper with the packet
+        data = json.loads(packet.decode("utf-8"))
+        data["cmd"] = "tampered"
+        tampered = json.dumps(data).encode("utf-8")
+
+        assert parse_command_packet(tampered) is None
+
+    def test_parse_wrong_type(self):
+        """Packet with wrong type should return None."""
+        # Build a sensor packet and try to parse as command
+        readings = [make_reading("Test", "x", 1.0, "BME280TempPressureHumidity")]
+        sensor_packet = build_lora_packets("test-node", readings)[0]
+
+        assert parse_command_packet(sensor_packet) is None
+
+    def test_parse_missing_fields(self):
+        """Packet missing required fields should return None."""
+        incomplete = json.dumps({"t": "cmd", "cmd": "test"}).encode("utf-8")
+        assert parse_command_packet(incomplete) is None
+
+
+# =============================================================================
+# Command Registry Tests
+# =============================================================================
+
+
+class TestCommandRegistry:
+    """Tests for CommandRegistry class."""
+
+    def test_register_and_dispatch(self):
+        """Registered handlers should be called on dispatch."""
+        registry = CommandRegistry("node_001")
+        called = []
+
+        def handler(cmd: str, args: list[str]):
+            called.append((cmd, args))
+
+        registry.register("test_cmd", handler)
+        result = registry.dispatch("test_cmd", ["arg1"], "node_001")
+
+        assert result is True
+        assert called == [("test_cmd", ["arg1"])]
+
+    def test_dispatch_unknown_command(self):
+        """Dispatching unknown command should return False."""
+        registry = CommandRegistry("node_001")
+        result = registry.dispatch("unknown", [], "node_001")
+
+        assert result is False
+
+    def test_scope_broadcast_only(self):
+        """BROADCAST scope should only respond to broadcasts."""
+        registry = CommandRegistry("node_001")
+        called = []
+
+        def handler(cmd: str, args: list[str]):
+            called.append(cmd)
+
+        registry.register("cmd", handler, CommandScope.BROADCAST)
+
+        # Should be called for broadcast
+        registry.dispatch("cmd", [], "")
+        assert len(called) == 1
+
+        # Should NOT be called for targeted
+        registry.dispatch("cmd", [], "node_001")
+        assert len(called) == 1
+
+    def test_scope_private_only(self):
+        """PRIVATE scope should only respond to targeted commands."""
+        registry = CommandRegistry("node_001")
+        called = []
+
+        def handler(cmd: str, args: list[str]):
+            called.append(cmd)
+
+        registry.register("cmd", handler, CommandScope.PRIVATE)
+
+        # Should NOT be called for broadcast
+        registry.dispatch("cmd", [], "")
+        assert len(called) == 0
+
+        # Should be called for targeted
+        registry.dispatch("cmd", [], "node_001")
+        assert len(called) == 1
+
+    def test_scope_any(self):
+        """ANY scope should respond to both broadcast and targeted."""
+        registry = CommandRegistry("node_001")
+        called = []
+
+        def handler(cmd: str, args: list[str]):
+            called.append(cmd)
+
+        registry.register("cmd", handler, CommandScope.ANY)
+
+        # Should be called for broadcast
+        registry.dispatch("cmd", [], "")
+        assert len(called) == 1
+
+        # Should be called for targeted
+        registry.dispatch("cmd", [], "node_001")
+        assert len(called) == 2
+
+    def test_ignores_other_nodes(self):
+        """Commands targeted to other nodes should be ignored."""
+        registry = CommandRegistry("node_001")
+        called = []
+
+        def handler(cmd: str, args: list[str]):
+            called.append(cmd)
+
+        registry.register("cmd", handler, CommandScope.ANY)
+
+        # Should be ignored - targeted to different node
+        result = registry.dispatch("cmd", [], "node_002")
+        assert result is False
+        assert len(called) == 0
+
+    def test_multiple_handlers_same_command(self):
+        """Multiple handlers for same command should all be called."""
+        registry = CommandRegistry("node_001")
+        called = []
+
+        def handler1(cmd: str, args: list[str]):
+            called.append("handler1")
+
+        def handler2(cmd: str, args: list[str]):
+            called.append("handler2")
+
+        registry.register("cmd", handler1)
+        registry.register("cmd", handler2)
+
+        registry.dispatch("cmd", [], "node_001")
+        assert called == ["handler1", "handler2"]
+
+    def test_handler_exception_doesnt_stop_others(self):
+        """Exception in one handler shouldn't prevent others from running."""
+        registry = CommandRegistry("node_001")
+        called = []
+
+        def bad_handler(cmd: str, args: list[str]):
+            raise RuntimeError("Simulated error")
+
+        def good_handler(cmd: str, args: list[str]):
+            called.append("good")
+
+        registry.register("cmd", bad_handler)
+        registry.register("cmd", good_handler)
+
+        # Should still return True since good_handler ran
+        result = registry.dispatch("cmd", [], "node_001")
+        assert result is True
+        assert called == ["good"]
+
+    def test_unregister(self):
+        """Unregistered handlers should not be called."""
+        registry = CommandRegistry("node_001")
+        called = []
+
+        def handler(cmd: str, args: list[str]):
+            called.append(cmd)
+
+        registry.register("cmd", handler)
+        registry.unregister("cmd", handler)
+
+        result = registry.dispatch("cmd", [], "node_001")
+        assert result is False
+        assert len(called) == 0
+
+    def test_get_registered_commands(self):
+        """Should return list of registered commands."""
+        registry = CommandRegistry("node_001")
+
+        registry.register("cmd1", lambda c, a: None)
+        registry.register("cmd2", lambda c, a: None)
+        registry.register("cmd1", lambda c, a: None)  # Duplicate
+
+        commands = registry.get_registered_commands()
+        assert sorted(commands) == ["cmd1", "cmd2"]

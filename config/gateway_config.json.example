@@ -27,5 +27,9 @@
         "i2c_port": 1,
         "i2c_address": 60,
         "refresh_interval": 0.5
+    },
+    "command_server": {
+        "enabled": true,
+        "port": 5001
     }
 }
