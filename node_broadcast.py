@@ -94,7 +94,7 @@ class CommandReceiver(threading.Thread):
         radio_lock: threading.Lock,
         node_id: str,
         registry: CommandRegistry,
-        receive_timeout: float = 0.1,
+        receive_timeout: float = 0.5,
     ):
         """
         Initialize the command receiver.
