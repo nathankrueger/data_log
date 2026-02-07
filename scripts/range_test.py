@@ -40,12 +40,8 @@ FREQ_G2N = 915.5   # Gateway-to-Node: commands
 
 
 def set_frequency(radio: RFM9xRadio, freq_mhz: float) -> None:
-    """Switch the radio frequency at runtime.
-
-    The RFM9xRadio wrapper doesn't expose frequency changes, but the
-    underlying adafruit_rfm9x driver supports it via a writable property.
-    """
-    radio._rfm9x.frequency_mhz = freq_mhz
+    """Switch the radio frequency at runtime."""
+    radio.set_frequency(freq_mhz)
 
 
 def parse_sensor_packet(data: bytes) -> dict | None:
@@ -76,7 +72,9 @@ def parse_sensor_packet(data: bytes) -> dict | None:
     for r in message.get("r", []):
         key = r.get("k", "")
         value = r.get("v")
-        if key == "Latitude":
+        if key == "Altitude":
+            result["altitude"] = value
+        elif key == "Latitude":
             result["latitude"] = value
         elif key == "Longitude":
             result["longitude"] = value
@@ -144,7 +142,8 @@ def run_range_test(args: argparse.Namespace) -> None:
         csv_writer = csv.writer(csv_file)
         csv_writer.writerow([
             "timestamp", "seq", "gateway_rssi", "node_rssi",
-            "latitude", "longitude", "satellites", "ack", "round_trip_ms",
+            "latitude", "longitude", "altitude", "satellites",
+            "ack", "round_trip_ms",
         ])
 
     # Header
@@ -152,7 +151,7 @@ def run_range_test(args: argparse.Namespace) -> None:
           f"tx_power={args.tx_power}dBm")
     header = (
         f"{'Time':<12} {'Seq':>4} {'GW RSSI':>8} {'Node RSSI':>10} "
-        f"{'Latitude':>11} {'Longitude':>12} {'Sats':>5} {'ACK':>4} {'RTT':>7}"
+        f"{'Latitude':>11} {'Longitude':>12} {'Alt(m)':>8} {'Sats':>5} {'ACK':>4} {'RTT':>7}"
     )
     print(header)
     print("-" * len(header))
@@ -219,6 +218,7 @@ def run_range_test(args: argparse.Namespace) -> None:
 
             lat = sensor_data.get("latitude", "") if sensor_data else ""
             lon = sensor_data.get("longitude", "") if sensor_data else ""
+            alt = sensor_data.get("altitude", "") if sensor_data else ""
             sats = sensor_data.get("satellites", "") if sensor_data else ""
             node_rssi = sensor_data.get("node_rssi", "") if sensor_data else ""
 
@@ -230,11 +230,12 @@ def run_range_test(args: argparse.Namespace) -> None:
             ack_str = "Y" if ack_received else "N"
             gw_rssi_str = str(gw_rssi) if gw_rssi is not None else "--"
             node_rssi_str = str(int(node_rssi)) if node_rssi != "" else "--"
+            alt_str = f"{alt:.1f}" if isinstance(alt, (int, float)) else "--"
             rtt_str = f"{round_trip_ms:.0f}ms"
 
             line = (
                 f"{timestamp:<12} {seq:>4} {gw_rssi_str:>8} {node_rssi_str:>10} "
-                f"{str(lat):>11} {str(lon):>12} {str(sats):>5} "
+                f"{str(lat):>11} {str(lon):>12} {alt_str:>8} {str(sats):>5} "
                 f"{ack_str:>4} {rtt_str:>7}"
             )
             print(line)
@@ -243,7 +244,7 @@ def run_range_test(args: argparse.Namespace) -> None:
                 csv_writer.writerow([
                     datetime.now().isoformat(), seq,
                     gw_rssi if gw_rssi is not None else "",
-                    node_rssi, lat, lon, sats,
+                    node_rssi, lat, lon, alt, sats,
                     ack_received, f"{round_trip_ms:.0f}",
                 ])
                 csv_file.flush()
