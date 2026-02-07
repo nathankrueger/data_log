@@ -6,11 +6,11 @@ Sensor data collection and LoRa radio communication for Raspberry Pi.
 
 ```
 [Sensor Node]  --LoRa-->  [Gateway]  --HTTP-->  [Server Dashboard]
-   (Pi Zero)              (Pi Zero)              (Pi 5)
+   (Pi Zero)   <--cmd--   (Pi Zero)  <--POST--       (Pi 5)
 ```
 
-- **Sensor Node** (`node_broadcast.py`): Reads sensors, broadcasts via LoRa
-- **Gateway** (`gateway_server.py`): Receives LoRa, posts to dashboard via REST API
+- **Sensor Node** (`node_broadcast.py`): Reads sensors, broadcasts via LoRa, receives commands
+- **Gateway** (`gateway_server.py`): Receives LoRa sensor data, posts to dashboard, forwards commands to nodes
 
 ## Setup
 
@@ -44,6 +44,62 @@ Key settings:
 ```bash
 ./scripts/launch_gateway_server.sh
 ```
+
+## Gateway Commands (Gateway → Node)
+
+The gateway can send commands to nodes over LoRa with ACK-based reliable delivery.
+
+### Sending Commands
+
+Send commands via HTTP POST to the gateway:
+```bash
+curl -X POST http://gateway:5001/command \
+  -H "Content-Type: application/json" \
+  -d '{"cmd": "ping", "node_id": "patio"}'
+
+# Broadcast to all nodes (omit node_id)
+curl -X POST http://gateway:5001/command \
+  -d '{"cmd": "ping"}'
+
+# With arguments
+curl -X POST http://gateway:5001/command \
+  -d '{"cmd": "set_interval", "args": ["30"], "node_id": "patio"}'
+```
+
+### Command Timing Configuration
+
+LoRa is half-duplex (can't TX and RX simultaneously), so timing parameters control reliability:
+
+**Gateway** (`gateway_config.json`):
+```json
+"command_server": {
+    "enabled": true,
+    "port": 5001,
+    "initial_retry_ms": 1000,
+    "max_retry_ms": 5000,
+    "max_retries": 10
+}
+```
+
+**Node** (`node_config.json`):
+```json
+"command_receiver": {
+    "enabled": true,
+    "receive_timeout": 0.5
+}
+```
+
+| Parameter | Location | Description |
+|-----------|----------|-------------|
+| `initial_retry_ms` | Gateway | Time to wait for ACK before first retry |
+| `max_retry_ms` | Gateway | Maximum retry delay (backoff cap) |
+| `max_retries` | Gateway | Attempts before giving up |
+| `receive_timeout` | Node | How long each receive window stays open |
+
+**Tuning tips:**
+- For non-idempotent commands (reboot, capture photo), use `initial_retry_ms >= 1000` to avoid duplicate execution
+- `initial_retry_ms` should exceed `receive_timeout` + ~200ms for reliable first-attempt delivery
+- First send is immediate; retry delays only affect recovery from lost packets
 
 ### Runtime LED Control
 

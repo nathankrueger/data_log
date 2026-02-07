@@ -8,7 +8,7 @@ Raspberry Pi-based distributed sensor network with LoRa radio communication. Out
 
 ```
 [Outdoor Node] --LoRa--> [Gateway] --HTTP--> [Pi 5 Dashboard]
-  Pi Zero 2W              Pi Zero 2W           /api/timeseries/ingest
+  Pi Zero 2W   <--cmd--  Pi Zero 2W  <--POST--  (commands)
 ```
 
 ## Commands
@@ -60,9 +60,86 @@ This enables config-driven instantiation without hardcoding sensor types.
 - Sensor ID format: `{node_id}_{sensor_class}_{reading_name}` (lowercase)
 
 ### Threading
-- `LoRaReceiver` - Daemon thread for receiving packets
+- `LoRaTransceiver` - Gateway daemon thread for receiving packets and sending commands
+- `CommandReceiver` - Node daemon thread for receiving commands
 - `LocalSensorReader` - Daemon thread for periodic sensor reads
 - LED flashing uses generation tracking to prevent race conditions
+
+### LoRa Command System (Gateway → Node)
+
+Bidirectional command system with ACK-based reliability:
+
+```
+Dashboard --HTTP POST--> Gateway --LoRa--> Node
+                              <--ACK--
+```
+
+**Key files:**
+- `utils/protocol.py` - `build_command_packet()`, `parse_command_packet()`, `build_ack_packet()`, `parse_ack_packet()`
+- `utils/command_server.py` - HTTP server (POST /command)
+- `utils/command_registry.py` - `CommandRegistry`, `CommandScope`
+- `gateway_server.py` - `CommandQueue`, `LoRaTransceiver`
+- `node_broadcast.py` - `CommandReceiver`
+
+**Packet types:**
+- Command: `{"t":"cmd", "n":"node_id", "cmd":"ping", "a":[], "ts":1699999999, "c":"crc32"}`
+- ACK: `{"t":"ack", "id":"1699999999_a1b2", "n":"node_id", "c":"crc32"}`
+- Command ID format: `{timestamp}_{first 4 chars of CRC}`
+
+#### LoRa Timing Parameters (Critical for Tuning)
+
+The RFM9x is **half-duplex** - it cannot transmit and receive simultaneously. This creates timing constraints between gateway retries and node receive windows.
+
+**Gateway side (`gateway_config.json` → `command_server`):**
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `initial_retry_ms` | 300 | Wait time before first retry if no ACK |
+| `max_retry_ms` | 5000 | Maximum retry delay (backoff cap) |
+| `max_retries` | 10 | Give up after this many attempts |
+
+**Node side (`node_config.json` → `command_receiver`):**
+| Parameter | Default | Description |
+|-----------|---------|-------------|
+| `receive_timeout` | 0.5 | Seconds each `receive()` call blocks |
+
+**How timing works:**
+
+1. Gateway sends command immediately when queued (no initial delay)
+2. Node's `CommandReceiver` runs tight loop: `receive(timeout)` → process → send ACK
+3. If no ACK arrives, gateway waits `initial_retry_ms` before retransmitting
+4. Backoff doubles each retry: 300ms → 600ms → 1200ms → 2400ms... capped at `max_retry_ms`
+5. When ACK arrives, command retires; next queued command sends immediately
+
+**Why commands can be delayed:**
+- Node is transmitting sensor data (holds `radio_lock`, blocking receive)
+- Node's `receive()` started just after command arrived (worst case: full timeout delay before next receive window)
+- ACK collided with gateway's retry transmission
+
+**Tuning for non-idempotent commands** (e.g., reboot, capture_photo):
+- Use longer `initial_retry_ms` (1000-2000ms) to avoid duplicate execution before ACK arrives
+- Throughput is limited by round-trip time (~600-800ms), not retry delay
+- First send is always immediate; retry delay only affects recovery from lost packets/ACKs
+
+**Independence of parameters:**
+- `initial_retry_ms` (gateway) and `receive_timeout` (node) are independent - they run on different devices
+- However, `initial_retry_ms` should exceed node's worst-case response time: `receive_timeout` + processing + ACK TX (~100ms)
+- For `receive_timeout=0.5`, use `initial_retry_ms >= 800` to avoid most unnecessary retries
+
+**Node threading model:**
+```
+Main thread (broadcast_loop):
+  while True:
+    read sensors
+    with radio_lock: radio.send(packets)
+    sleep until next interval
+
+CommandReceiver thread:
+  while True:
+    with radio_lock: packet = radio.receive(timeout=0.5)
+    if packet: parse, send ACK, dispatch to handlers
+```
+
+The `radio_lock` ensures half-duplex safety. If broadcast loop is transmitting, CommandReceiver waits.
 
 ### Signal Handling (gateway_server.py)
 - `SIGUSR1` - Enable LED flash-on-receive

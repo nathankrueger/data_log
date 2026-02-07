@@ -33,6 +33,6 @@
     },
     "command_receiver": {
         "enabled": true,
-        "receive_timeout": 0.1
+        "receive_timeout": 0.5
     }
 }
