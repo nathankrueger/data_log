@@ -66,6 +66,16 @@ class Radio(ABC):
         """
         pass
 
+    @abstractmethod
+    def set_frequency(self, frequency_mhz: float) -> None:
+        """
+        Change the radio frequency at runtime.
+
+        Args:
+            frequency_mhz: New frequency in MHz (e.g., 915.0, 915.5)
+        """
+        pass
+
     def __enter__(self):
         """Context manager entry."""
         self.init()

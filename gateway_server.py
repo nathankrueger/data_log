@@ -379,6 +379,8 @@ class LoRaTransceiver(threading.Thread):
         flash_duration: float = 0.1,
         gateway_state: GatewayState | None = None,
         verbose_logging: bool = False,
+        n2g_freq: float = 915.0,
+        g2n_freq: float = 915.5,
     ):
         super().__init__(daemon=True, name="LoRaTransceiver")
         self._radio = radio
@@ -391,6 +393,8 @@ class LoRaTransceiver(threading.Thread):
         self._running = False
         self._gateway_state = gateway_state
         self._verbose_logging = verbose_logging
+        self._n2g_freq = n2g_freq  # Node to Gateway: sensors + ACKs
+        self._g2n_freq = g2n_freq  # Gateway to Node: commands
 
     def set_flash_enabled(self, enabled: bool) -> None:
         """Enable or disable LED flash on receive."""
@@ -433,11 +437,16 @@ class LoRaTransceiver(threading.Thread):
         pending = self._command_queue.get_next_to_send()
         if pending:
             try:
+                # Switch to G2N channel for command transmission
+                self._radio.set_frequency(self._g2n_freq)
                 success = self._radio.send(pending.packet)
+                # Switch back to N2G to receive ACK
+                self._radio.set_frequency(self._n2g_freq)
+
                 target = pending.node_id or "broadcast"
                 if success:
                     logger.debug(
-                        f"Sent '{pending.cmd}' to {target} "
+                        f"Sent '{pending.cmd}' to {target} on G2N "
                         f"(attempt {pending.retry_count + 1})"
                     )
                 else:
@@ -445,6 +454,11 @@ class LoRaTransceiver(threading.Thread):
                 self._command_queue.mark_sent()
             except Exception as e:
                 logger.error(f"Error sending command: {e}")
+                # Ensure we're back on N2G even on error
+                try:
+                    self._radio.set_frequency(self._n2g_freq)
+                except Exception:
+                    pass
 
     def _process_received_packet(self, packet: bytes) -> None:
         """Validate CRC, parse JSON, forward to collector or handle ACK."""
@@ -696,8 +710,12 @@ def run_gateway(config: dict, verbose_logging: bool = False) -> None:
 
     if lora_config.get("enabled", True):
         try:
+            # Dual-channel: N2G for sensors+ACKs, G2N for commands
+            n2g_freq = lora_config.get("n2g_frequency_mhz", 915.0)
+            g2n_freq = lora_config.get("g2n_frequency_mhz", 915.5)
+
             radio = RFM9xRadio(
-                frequency_mhz=lora_config.get("frequency_mhz", 915.0),
+                frequency_mhz=n2g_freq,  # Start on N2G (sensors + ACKs)
                 tx_power=lora_config.get("tx_power", 23),
                 cs_pin=lora_config.get("cs_pin", 24),
                 reset_pin=lora_config.get("reset_pin", 25),
@@ -712,10 +730,14 @@ def run_gateway(config: dict, verbose_logging: bool = False) -> None:
                 flash_duration=flash_duration,
                 gateway_state=gateway_state,
                 verbose_logging=verbose_logging,
+                n2g_freq=n2g_freq,
+                g2n_freq=g2n_freq,
             )
             lora_transceiver.set_flash_enabled(flash_on_recv_default)
             lora_transceiver.start()
-            logger.info(f"LoRa transceiver enabled at {radio.frequency_mhz} MHz")
+            logger.info(
+                f"LoRa transceiver enabled: N2G={n2g_freq} MHz, G2N={g2n_freq} MHz"
+            )
         except Exception as e:
             logger.error(f"Failed to initialize LoRa: {e}")
             logger.info("Continuing without LoRa transceiver")

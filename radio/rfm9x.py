@@ -62,6 +62,13 @@ class RFM9xRadio(Radio):
             self._spi, self._cs, self._reset, self._frequency_mhz
         )
         self._rfm9x.tx_power = self._tx_power
+        
+        # Match AB01 Arduino radio settings
+        self._rfm9x.spreading_factor = 7      # SF7
+        self._rfm9x.signal_bandwidth = 125000 # 125 kHz
+        self._rfm9x.coding_rate = 5           # 4/5 (library uses denominator)
+        self._rfm9x.preamble_length = 8       # 8 symbol preamble
+        self._rfm9x.enable_crc = True         # Enable CRC (should be default, but explicit)
 
     def send(self, data: bytes) -> bool:
         """Send data over LoRa."""
@@ -97,6 +104,13 @@ class RFM9xRadio(Radio):
             self._spi = None
         self._cs = None
         self._reset = None
+
+    def set_frequency(self, frequency_mhz: float) -> None:
+        """Change the radio frequency at runtime."""
+        if self._rfm9x is None:
+            raise RuntimeError("Radio not initialized. Call init() first.")
+        self._rfm9x.frequency_mhz = frequency_mhz
+        self._frequency_mhz = frequency_mhz
 
     @property
     def frequency_mhz(self) -> float:
