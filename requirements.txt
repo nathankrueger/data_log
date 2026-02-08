@@ -7,6 +7,7 @@ luma.oled
 pytest
 pynmea2
 pyserial
+folium
 
 # Camera/OCR dependencies (on Pi, prefer apt packages for faster install):
 # sudo apt install python3-picamera2 python3-opencv python3-numpy python3-pil -y

@@ -22,6 +22,7 @@ import csv
 import json
 import signal
 import sys
+import tempfile
 import time
 import zlib
 from datetime import datetime
@@ -72,15 +73,15 @@ def parse_sensor_packet(data: bytes) -> dict | None:
     for r in message.get("r", []):
         key = r.get("k", "")
         value = r.get("v")
-        if key == "Altitude":
+        if key == "alt":
             result["altitude"] = value
-        elif key == "Latitude":
+        elif key == "lat":
             result["latitude"] = value
-        elif key == "Longitude":
+        elif key == "lng":
             result["longitude"] = value
-        elif key == "Satellites":
+        elif key == "sats":
             result["satellites"] = value
-        elif key == "RSSI":
+        elif key == "rssi":
             result["node_rssi"] = value
 
     return result
@@ -123,6 +124,10 @@ def parse_args() -> argparse.Namespace:
         "--reset-pin", type=int, default=25,
         help="GPIO pin for radio reset (default: 25)",
     )
+    parser.add_argument(
+        "--map", action="store_true", default=False,
+        help="Generate an HTML map after the test",
+    )
     return parser.parse_args()
 
 
@@ -135,16 +140,19 @@ def run_range_test(args: argparse.Namespace) -> None:
     )
     radio.init()
 
+    csv_header = [
+        "timestamp", "seq", "gateway_rssi", "node_rssi",
+        "latitude", "longitude", "altitude", "satellites",
+        "ack", "round_trip_ms",
+    ]
+    csv_rows = []
+
     csv_writer = None
     csv_file = None
     if args.csv:
         csv_file = open(args.csv, "w", newline="")
         csv_writer = csv.writer(csv_file)
-        csv_writer.writerow([
-            "timestamp", "seq", "gateway_rssi", "node_rssi",
-            "latitude", "longitude", "altitude", "satellites",
-            "ack", "round_trip_ms",
-        ])
+        csv_writer.writerow(csv_header)
 
     # Header
     print(f"Range test → node={args.node}  interval={args.interval}s  "
@@ -240,13 +248,16 @@ def run_range_test(args: argparse.Namespace) -> None:
             )
             print(line)
 
+            row = [
+                datetime.now().isoformat(), seq,
+                gw_rssi if gw_rssi is not None else "",
+                node_rssi, lat, lon, alt, sats,
+                ack_received, f"{round_trip_ms:.0f}",
+            ]
+            csv_rows.append(row)
+
             if csv_writer:
-                csv_writer.writerow([
-                    datetime.now().isoformat(), seq,
-                    gw_rssi if gw_rssi is not None else "",
-                    node_rssi, lat, lon, alt, sats,
-                    ack_received, f"{round_trip_ms:.0f}",
-                ])
+                csv_writer.writerow(row)
                 csv_file.flush()
 
             # Wait for next interval
@@ -264,6 +275,36 @@ def run_range_test(args: argparse.Namespace) -> None:
         print(f"Pings sent: {seq}")
         duration = time.time() - start_time
         print(f"Duration: {duration:.1f}s")
+
+    if args.map:
+        try:
+            from range_map import generate_map_from_csv
+
+            if args.csv:
+                csv_for_map = args.csv
+                html_path = str(Path(args.csv).with_suffix(".html"))
+            else:
+                # Write accumulated rows to a temp file
+                tmp = tempfile.NamedTemporaryFile(
+                    mode="w", suffix=".csv", delete=False, newline="",
+                )
+                writer = csv.writer(tmp)
+                writer.writerow(csv_header)
+                writer.writerows(csv_rows)
+                tmp.close()
+                csv_for_map = tmp.name
+                html_path = f"range_test_{args.node}.html"
+
+            map_path = generate_map_from_csv(
+                csv_path=csv_for_map,
+                output_path=html_path,
+                title=f"Range Test - {args.node}",
+            )
+            print(f"Map saved to {map_path}")
+        except ImportError:
+            print("Warning: Could not import range_map (is folium installed?)")
+        except Exception as e:
+            print(f"Warning: Map generation failed: {e}")
 
 
 if __name__ == "__main__":
