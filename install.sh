@@ -35,10 +35,12 @@ while [[ $# -gt 0 ]]; do
             ;;
         -h|--help)
             usage
+            return 0 2>/dev/null || exit 0
             ;;
         *)
             echo "Unknown option: $1"
             usage
+            return 1 2>/dev/null || exit 1
             ;;
     esac
 done
@@ -69,9 +71,9 @@ if [ "$UPDATE" = true ]; then
         pip install -r requirements.txt
     else
         echo "Error: No .venv directory found. Run without --update first to create it."
-        return 1
+        return 1 2>/dev/null || exit 1
     fi
-    return 0
+    return 0 2>/dev/null || exit 0
 fi
 
 # Install or activate
