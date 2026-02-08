@@ -108,8 +108,8 @@ def parse_args() -> argparse.Namespace:
                     "with RSSI and GPS coordinates"
     )
     parser.add_argument(
-        "--node", "-n", default="ab01",
-        help="Target node ID (default: ab01)",
+        "--node", "-n", required=True,
+        help="Target node ID (e.g., ab01)",
     )
     parser.add_argument(
         "--interval", "-i", type=float, default=5.0,
@@ -234,11 +234,25 @@ def run_range_test(args: argparse.Namespace) -> None:
 
                 # Try sensor packet
                 parsed = parse_sensor_packet(response, debug=args.debug)
-                if parsed and parsed.get("node_id") == args.node:
-                    sensor_data = parsed
-                    if gw_rssi is None:
-                        gw_rssi = rssi
-                    break  # got everything we need
+                if parsed:
+                    pkt_node = parsed.get("node_id")
+                    if pkt_node == args.node:
+                        sensor_data = parsed
+                        if gw_rssi is None:
+                            gw_rssi = rssi
+                        break  # got everything we need
+                    elif args.debug:
+                        print(f"  [DEBUG] Ignoring sensor packet from '{pkt_node}' (target: {args.node})")
+
+            # Skip rows with no response from target node
+            if not ack_received and not sensor_data:
+                if args.debug:
+                    print(f"  [DEBUG] No response from {args.node}, skipping row")
+                # Wait for next interval
+                elapsed = time.time() - ping_time
+                if elapsed < args.interval:
+                    time.sleep(args.interval - elapsed)
+                continue
 
             # ── Format output ──
             round_trip_ms = (time.time() - ping_time) * 1000
