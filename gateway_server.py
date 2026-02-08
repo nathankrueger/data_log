@@ -123,6 +123,9 @@ class CommandQueue:
         self._max_retries = max_retries
         self._initial_retry_ms = initial_retry_ms
         self._max_retry_ms = max_retry_ms
+        # Store ACK payloads for retrieval by wait_for_response
+        self._completed_responses: dict[str, tuple[float, dict]] = {}
+        self._response_ttl = 60.0  # Keep responses for 60 seconds
 
     def add(self, cmd: str, args: list[str], node_id: str) -> str | None:
         """
@@ -184,12 +187,13 @@ class CommandQueue:
                 )
                 self._current.next_retry_time = time.time() + (delay_ms / 1000)
 
-    def ack_received(self, command_id: str) -> bool:
+    def ack_received(self, command_id: str, payload: dict | None = None) -> bool:
         """
         Handle an ACK - retire the command if it matches.
 
         Args:
             command_id: ID from the ACK packet
+            payload: Optional response payload from node
 
         Returns:
             True if the ACK matched the current command
@@ -200,6 +204,9 @@ class CommandQueue:
                     f"Command '{self._current.cmd}' ACK'd after "
                     f"{self._current.retry_count} attempt(s)"
                 )
+                # Store response payload for retrieval
+                if payload is not None:
+                    self._completed_responses[command_id] = (time.time(), payload)
                 self._current = None
                 return True
         return False
@@ -227,6 +234,44 @@ class CommandQueue:
         """Return True if there's a command currently being sent/retried."""
         with self._lock:
             return self._current is not None
+
+    def wait_for_response(self, command_id: str, timeout: float = 10.0) -> dict | None:
+        """
+        Wait for a command to complete and return its response payload.
+
+        Args:
+            command_id: ID of the command to wait for
+            timeout: Maximum seconds to wait
+
+        Returns:
+            Response payload dict, or None if timeout/no payload
+        """
+        deadline = time.time() + timeout
+        while time.time() < deadline:
+            with self._lock:
+                # Check if response is available
+                if command_id in self._completed_responses:
+                    _, payload = self._completed_responses.pop(command_id)
+                    return payload
+                # Check if command completed without payload
+                is_current = self._current and self._current.command_id == command_id
+                in_queue = any(p.command_id == command_id for p in self._queue)
+                if not is_current and not in_queue:
+                    # Command completed but no response stored
+                    return None
+            time.sleep(0.1)
+        return None
+
+    def cleanup_old_responses(self) -> None:
+        """Remove expired response payloads."""
+        now = time.time()
+        with self._lock:
+            expired = [
+                cid for cid, (ts, _) in self._completed_responses.items()
+                if now - ts > self._response_ttl
+            ]
+            for cid in expired:
+                del self._completed_responses[cid]
 
 
 # =============================================================================
@@ -468,8 +513,13 @@ class LoRaTransceiver(threading.Thread):
         # First, check if it's an ACK packet
         ack = parse_ack_packet(packet)
         if ack:
-            if self._command_queue.ack_received(ack.command_id):
-                logger.info(f"ACK received from '{ack.node_id}' (RSSI: {rssi} dB)")
+            if self._command_queue.ack_received(ack.command_id, ack.payload):
+                if ack.payload:
+                    logger.info(
+                        f"ACK with payload from '{ack.node_id}' (RSSI: {rssi} dB)"
+                    )
+                else:
+                    logger.info(f"ACK received from '{ack.node_id}' (RSSI: {rssi} dB)")
             else:
                 logger.debug(f"Unexpected ACK from '{ack.node_id}': {ack.command_id}")
             return

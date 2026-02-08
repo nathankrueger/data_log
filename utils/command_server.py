@@ -12,6 +12,7 @@ import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from typing import TYPE_CHECKING
+from urllib.parse import parse_qs, urlparse
 
 if TYPE_CHECKING:
     from gateway_server import CommandQueue
@@ -90,6 +91,58 @@ class CommandHandler(BaseHTTPRequestHandler):
             "target": target,
         })
         self.wfile.write(response.encode("utf-8"))
+
+    def do_GET(self) -> None:
+        """
+        Handle GET requests for commands that return responses.
+
+        Pattern: GET /{cmd}/{node_id}?a=arg1&a=arg2
+
+        Queues the command, waits for ACK with payload, returns payload.
+        The payload content is opaque to the gateway.
+        """
+        parsed = urlparse(self.path)
+        parts = parsed.path.strip("/").split("/")
+
+        if len(parts) != 2:
+            self.send_error(400, "Expected: /{cmd}/{node_id}")
+            return
+
+        cmd, node_id = parts
+        if not cmd or not node_id:
+            self.send_error(400, "Both cmd and node_id are required")
+            return
+
+        # Parse query params for args (e.g., ?a=foo&a=bar)
+        query = parse_qs(parsed.query)
+        args = query.get("a", [])  # List of arg values
+
+        # Queue the command
+        command_id = self.server.command_queue.add(cmd, args, node_id)  # type: ignore
+        if command_id is None:
+            self.send_error(503, "Command queue full")
+            return
+
+        logger.info(f"Queued '{cmd}' for {node_id}, waiting for response...")
+
+        # Wait for response with timeout
+        response = self.server.command_queue.wait_for_response(  # type: ignore
+            command_id, timeout=10.0
+        )
+
+        if response is not None:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps(response).encode("utf-8"))
+        else:
+            self.send_response(504)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "error": "timeout",
+                "message": f"No response from node '{node_id}' within 10 seconds",
+            }).encode("utf-8"))
 
     def log_message(self, format: str, *args) -> None:
         """Suppress default HTTP logging, use our logger instead."""

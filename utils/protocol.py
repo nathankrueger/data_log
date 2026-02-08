@@ -301,6 +301,7 @@ class AckPacket:
     """An acknowledgment for a received command."""
     command_id: str
     node_id: str
+    payload: dict | None = None  # Optional response data from node
 
 
 def build_command_packet(
@@ -433,6 +434,7 @@ def parse_ack_packet(data: bytes) -> AckPacket | None:
         return AckPacket(
             command_id=message["id"],
             node_id=message["n"],
+            payload=message.get("p"),  # Optional response payload
         )
     except (KeyError, TypeError, ValueError):
         return None
