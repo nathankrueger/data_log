@@ -249,20 +249,26 @@ class CommandQueue:
         Returns:
             Response payload dict, or None if timeout/no payload
         """
+        logger.info(f"Waiting for response to {command_id} (timeout={timeout}s)")
         deadline = time.time() + timeout
+        poll_count = 0
         while time.time() < deadline:
             with self._lock:
                 # Check if response is available
                 if command_id in self._completed_responses:
                     _, payload = self._completed_responses.pop(command_id)
+                    logger.info(f"Got response for {command_id}: {payload}")
                     return payload
                 # Check if command completed without payload
                 is_current = self._current and self._current.command_id == command_id
                 in_queue = any(p.command_id == command_id for p in self._queue)
                 if not is_current and not in_queue:
                     # Command completed but no response stored
+                    logger.info(f"Command {command_id} completed without response")
                     return None
+            poll_count += 1
             time.sleep(0.1)
+        logger.warning(f"Timeout waiting for {command_id} after {poll_count} polls")
         return None
 
     def cleanup_old_responses(self) -> None:
