@@ -5,7 +5,7 @@ rpi-lgpio
 gpiozero
 luma.oled
 pytest
-pynmea
+pynmea2
 pyserial
 
 # Camera/OCR dependencies (on Pi, prefer apt packages for faster install):
