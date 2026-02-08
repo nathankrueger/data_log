@@ -45,7 +45,7 @@ def set_frequency(radio: RFM9xRadio, freq_mhz: float) -> None:
     radio.set_frequency(freq_mhz)
 
 
-def parse_sensor_packet(data: bytes) -> dict | None:
+def parse_sensor_packet(data: bytes, debug: bool = False) -> dict | None:
     """Parse a sensor packet from the range test node.
 
     Verifies CRC and extracts GPS readings by key name.
@@ -54,11 +54,17 @@ def parse_sensor_packet(data: bytes) -> dict | None:
     """
     try:
         text = data.decode("utf-8").lstrip()  # strip ASR650x TX-FIFO padding
+        if debug:
+            print(f"  [DEBUG] Sensor packet text: {text[:100]}...")
         message = json.loads(text)
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        if debug:
+            print(f"  [DEBUG] JSON decode failed: {e}")
         return None
 
     if "r" not in message or "n" not in message:
+        if debug:
+            print(f"  [DEBUG] Missing 'r' or 'n' in message, keys: {list(message.keys())}")
         return None
 
     # Verify CRC
@@ -67,7 +73,13 @@ def parse_sensor_packet(data: bytes) -> dict | None:
     json_str = json.dumps(msg_no_crc, sort_keys=True, separators=(",", ":"))
     computed = f"{zlib.crc32(json_str.encode('utf-8')) & 0xFFFFFFFF:08x}"
     if computed != crc_field:
+        if debug:
+            print(f"  [DEBUG] CRC mismatch: expected={crc_field}, computed={computed}")
+            print(f"  [DEBUG] JSON for CRC: {json_str[:100]}...")
         return None
+
+    if debug:
+        print(f"  [DEBUG] CRC OK, node_id={message['n']}")
 
     result: dict = {"node_id": message["n"]}
     for r in message.get("r", []):
@@ -83,6 +95,9 @@ def parse_sensor_packet(data: bytes) -> dict | None:
             result["satellites"] = value
         elif key == "rssi":
             result["node_rssi"] = value
+
+    if debug:
+        print(f"  [DEBUG] Parsed result: {result}")
 
     return result
 
@@ -127,6 +142,10 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--map", action="store_true", default=False,
         help="Generate an HTML map after the test",
+    )
+    parser.add_argument(
+        "--debug", action="store_true", default=False,
+        help="Show debug output for packet parsing",
     )
     return parser.parse_args()
 
@@ -214,7 +233,7 @@ def run_range_test(args: argparse.Namespace) -> None:
                     continue  # keep listening for sensor packet
 
                 # Try sensor packet
-                parsed = parse_sensor_packet(response)
+                parsed = parse_sensor_packet(response, debug=args.debug)
                 if parsed and parsed.get("node_id") == args.node:
                     sensor_data = parsed
                     if gw_rssi is None:
