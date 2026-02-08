@@ -97,7 +97,7 @@ class CommandQueue:
 
     Commands are sent one at a time. After sending, the gateway waits for
     an ACK from the target node. If no ACK is received, the command is
-    retried with exponential backoff until max_retries is reached.
+    retried with multiplicative backoff until max_retries is reached.
     """
 
     def __init__(
@@ -106,6 +106,7 @@ class CommandQueue:
         max_retries: int = 10,
         initial_retry_ms: int = 300,
         max_retry_ms: int = 5000,
+        retry_multiplier: float = 1.1,
     ):
         """
         Initialize the command queue.
@@ -115,6 +116,7 @@ class CommandQueue:
             max_retries: Maximum retry attempts before giving up
             initial_retry_ms: Initial retry delay in milliseconds
             max_retry_ms: Maximum retry delay (backoff cap)
+            retry_multiplier: Multiplier applied to delay after each retry (default 1.1)
         """
         self._queue: deque[PendingCommand] = deque()
         self._max_size = max_size
@@ -123,6 +125,7 @@ class CommandQueue:
         self._max_retries = max_retries
         self._initial_retry_ms = initial_retry_ms
         self._max_retry_ms = max_retry_ms
+        self._retry_multiplier = retry_multiplier
         # Store ACK payloads for retrieval by wait_for_response
         self._completed_responses: dict[str, tuple[float, dict]] = {}
         self._response_ttl = 60.0  # Keep responses for 60 seconds
@@ -180,9 +183,9 @@ class CommandQueue:
         with self._lock:
             if self._current:
                 self._current.retry_count += 1
-                # Exponential backoff: 100ms, 200ms, 400ms, 800ms... capped
+                # Multiplicative backoff: initial * multiplier^(retry-1), capped
                 delay_ms = min(
-                    self._initial_retry_ms * (2 ** (self._current.retry_count - 1)),
+                    self._initial_retry_ms * (self._retry_multiplier ** (self._current.retry_count - 1)),
                     self._max_retry_ms,
                 )
                 self._current.next_retry_time = time.time() + (delay_ms / 1000)
@@ -742,6 +745,7 @@ def run_gateway(config: dict, verbose_logging: bool = False) -> None:
         max_retries=command_config.get("max_retries", 10),
         initial_retry_ms=command_config.get("initial_retry_ms", 100),
         max_retry_ms=command_config.get("max_retry_ms", 5000),
+        retry_multiplier=command_config.get("retry_multiplier", 1.1),
     )
 
     # Start command server if enabled
