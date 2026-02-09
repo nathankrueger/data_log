@@ -104,5 +104,6 @@ else
 
     curl -s -X POST "http://$GATEWAY_HOST:$GATEWAY_PORT/command" \
         -H "Content-Type: application/json" \
-        -d "$JSON_BODY"
+        -d "$JSON_BODY" \
+        --max-time 5
 fi
