@@ -33,6 +33,7 @@ import argparse
 import inspect
 import json
 import logging
+import random
 import sys
 import threading
 import time
@@ -97,6 +98,7 @@ class CommandReceiver(threading.Thread):
         receive_timeout: float = 0.5,
         n2g_freq: float = 915.0,
         g2n_freq: float = 915.5,
+        broadcast_ack_jitter_sec: float = 0.5,
     ):
         """
         Initialize the command receiver.
@@ -109,6 +111,7 @@ class CommandReceiver(threading.Thread):
             receive_timeout: Timeout for each receive attempt (default 0.5s)
             n2g_freq: Node-to-Gateway frequency for sensor broadcasts and ACKs
             g2n_freq: Gateway-to-Node frequency for receiving commands
+            broadcast_ack_jitter_sec: Max random delay before ACKing broadcast commands
         """
         super().__init__(daemon=True, name="CommandReceiver")
         self._radio = radio
@@ -118,7 +121,11 @@ class CommandReceiver(threading.Thread):
         self._receive_timeout = receive_timeout
         self._n2g_freq = n2g_freq
         self._g2n_freq = g2n_freq
+        self._broadcast_ack_jitter_sec = broadcast_ack_jitter_sec
         self._running = False
+        # Single-slot dedup (matches AB01 pattern)
+        self._last_command_id: str = ""
+        self._last_ack_packet: bytes | None = None
 
     def run(self) -> None:
         """Run the receive loop."""
@@ -147,12 +154,24 @@ class CommandReceiver(threading.Thread):
         """Signal the thread to stop."""
         self._running = False
 
+    def _send_ack(self, ack_packet: bytes, add_jitter: bool = False) -> bool:
+        """Send an ACK packet, optionally applying jitter to stagger responses."""
+        if add_jitter and self._broadcast_ack_jitter_sec > 0:
+            jitter = random.uniform(0, self._broadcast_ack_jitter_sec)
+            logger.debug(f"Discovery ACK jitter: {jitter * 1000:.0f}ms")
+            time.sleep(jitter)
+        with self._radio_lock:
+            return self._radio.send(ack_packet)
+
     def _process_packet(self, packet: bytes) -> None:
         """Parse and dispatch a received command packet, send ACK.
 
         Follows the AB01 earlyAck pattern:
         - early_ack=True: Send ACK before dispatching handler
         - early_ack=False: Dispatch handler first, send ACK after with response payload
+
+        Dedup: If the same command_id is received again (retransmission),
+        resend the cached ACK but skip handler re-execution (matches AB01).
         """
         cmd = parse_command_packet(packet)
         if cmd is None:
@@ -165,17 +184,30 @@ class CommandReceiver(threading.Thread):
 
         target = cmd.node_id if cmd.node_id else "broadcast"
         command_id = cmd.get_command_id()
-        logger.info(f"Received command '{cmd.command}' for {target} (id: {command_id})")
+        is_duplicate = command_id == self._last_command_id
 
-        # Look up handler to check early_ack flag
+        # Look up handler to check early_ack and ack_jitter flags
         handler = self._registry.lookup(cmd.command, cmd.node_id)
         use_early_ack = handler is None or handler.early_ack
+        add_jitter = handler is not None and handler.ack_jitter
+
+        if is_duplicate:
+            logger.info(
+                f"Duplicate command '{cmd.command}' for {target} "
+                f"(id: {command_id}), resending cached ACK"
+            )
+            if self._last_ack_packet is not None:
+                self._send_ack(self._last_ack_packet, add_jitter)
+            return
+
+        logger.info(f"Received command '{cmd.command}' for {target} (id: {command_id})")
 
         # For early_ack handlers, send ACK before dispatch
         if use_early_ack:
             ack_packet = build_ack_packet(command_id, self._node_id)
-            with self._radio_lock:
-                success = self._radio.send(ack_packet)
+            self._last_command_id = command_id
+            self._last_ack_packet = ack_packet
+            success = self._send_ack(ack_packet, add_jitter)
             if success:
                 logger.debug(f"Sent early ACK for '{cmd.command}' (id: {command_id})")
             else:
@@ -193,8 +225,9 @@ class CommandReceiver(threading.Thread):
             ack_packet = build_ack_packet(
                 command_id, self._node_id, payload=response
             )
-            with self._radio_lock:
-                success = self._radio.send(ack_packet)
+            self._last_command_id = command_id
+            self._last_ack_packet = ack_packet
+            success = self._send_ack(ack_packet, add_jitter)
             if success:
                 logger.debug(
                     f"Sent ACK+payload for '{cmd.command}' (id: {command_id})"
@@ -537,8 +570,12 @@ def main():
         logger.info(f"[HANDLER] Echo: {data}")
         return {"r": data}
 
+    def handle_discover(cmd: str, args: list[str]) -> None:
+        logger.info(f"[HANDLER] Received discover command with args: {args}")
+
     command_registry.register("ping", handle_ping, CommandScope.BROADCAST, early_ack=True)
     command_registry.register("ping", handle_private_ping, CommandScope.PRIVATE, early_ack=True)
+    command_registry.register("discover", handle_discover, CommandScope.BROADCAST, early_ack=True, ack_jitter=True)
     command_registry.register("echo", handle_echo, CommandScope.PRIVATE, early_ack=False)
 
     # Create radio lock for half-duplex coordination
@@ -559,6 +596,7 @@ def main():
         # Start command receiver if enabled
         if command_receiver_enabled and radio_lock is not None:
             receive_timeout = command_config.get("receive_timeout", 0.1)
+            jitter_ms = command_config.get("broadcast_ack_jitter_ms", 500)
             command_receiver = CommandReceiver(
                 radio=radio,
                 radio_lock=radio_lock,
@@ -567,6 +605,7 @@ def main():
                 receive_timeout=receive_timeout,
                 n2g_freq=n2g_freq,
                 g2n_freq=g2n_freq,
+                broadcast_ack_jitter_sec=jitter_ms / 1000.0,
             )
             command_receiver.start()
             logger.info("Command receiver enabled")

@@ -714,8 +714,8 @@ class LoRaTransceiver(threading.Thread):
             delay_ms = float(request.initial_retry_ms)
 
             for attempt in range(request.retries):
-                # Build and send broadcast ping on G2N
-                packet, command_id = build_command_packet("ping", [], "")
+                # Build and send broadcast discover on G2N
+                packet, command_id = build_command_packet("discover", [], "")
                 cmd_logger.debug("FREQ to=G2N freq=%.1fMHz", self._g2n_freq)
                 self._radio.set_frequency(self._g2n_freq)
                 success = self._radio.send(packet)

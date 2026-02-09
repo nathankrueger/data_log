@@ -229,6 +229,10 @@ Development happens on a separate machine (not the Pi Zero 2W targets). The SSH/
 - Files must be transferred to the Pi Zero 2W for testing
 - The user will run tests manually on the target device
 
+### HTCC AB01 Parity
+
+When modifying node-side behavior (e.g., `node_broadcast.py`, `CommandReceiver`, command handlers), ask the user if equivalent changes should be made to the HTCC AB01 codebase at `../htcc_ab01_datalog/data_log/data_log.ino`.
+
 ### Publishing to Target Hardware
 
 Use the `/publish` skill to deploy code to Pi Zero 2W devices (commit, push, run `./publish.sh`).

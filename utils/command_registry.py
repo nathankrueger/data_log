@@ -36,6 +36,7 @@ class HandlerEntry:
     callback: CommandCallback
     scope: CommandScope
     early_ack: bool
+    ack_jitter: bool
 
 
 class CommandRegistry:
@@ -80,6 +81,7 @@ class CommandRegistry:
         callback: CommandCallback,
         scope: CommandScope = CommandScope.ANY,
         early_ack: bool = True,
+        ack_jitter: bool = False,
     ) -> None:
         """
         Register a callback for a command.
@@ -92,14 +94,17 @@ class CommandRegistry:
             callback: Function to call when command is received
             scope: When to invoke: BROADCAST, PRIVATE, or ANY
             early_ack: True = ACK before handler, False = ACK after handler with response
+            ack_jitter: True = add random delay before sending ACK (for discovery)
         """
         if command not in self._handlers:
             self._handlers[command] = []
-        entry = HandlerEntry(callback=callback, scope=scope, early_ack=early_ack)
+        entry = HandlerEntry(
+            callback=callback, scope=scope, early_ack=early_ack, ack_jitter=ack_jitter
+        )
         self._handlers[command].append(entry)
         logger.debug(
             f"Registered handler for '{command}' "
-            f"(scope={scope.value}, early_ack={early_ack})"
+            f"(scope={scope.value}, early_ack={early_ack}, ack_jitter={ack_jitter})"
         )
 
     def unregister(self, command: str, callback: CommandCallback) -> bool:
