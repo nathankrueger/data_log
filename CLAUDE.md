@@ -77,14 +77,20 @@ Dashboard --HTTP POST--> Gateway --LoRa--> Node
 **Key files:**
 - `utils/protocol.py` - `build_command_packet()`, `parse_command_packet()`, `build_ack_packet()`, `parse_ack_packet()`
 - `utils/command_server.py` - HTTP server (POST /command)
-- `utils/command_registry.py` - `CommandRegistry`, `CommandScope`
+- `utils/command_registry.py` - `CommandRegistry`, `CommandScope`, `HandlerEntry`
 - `gateway_server.py` - `CommandQueue`, `LoRaTransceiver`
 - `node_broadcast.py` - `CommandReceiver`
 
 **Packet types:**
 - Command: `{"t":"cmd", "n":"node_id", "cmd":"ping", "a":[], "ts":1699999999, "c":"crc32"}`
 - ACK: `{"t":"ack", "id":"1699999999_a1b2", "n":"node_id", "c":"crc32"}`
+- ACK with payload: `{"t":"ack", "id":"...", "n":"node_id", "p":{...}, "c":"crc32"}`
 - Command ID format: `{timestamp}_{first 4 chars of CRC}`
+
+**earlyAck pattern (matches HTCC AB01):**
+- `early_ack=True` (default): ACK sent before handler runs (fire-and-forget commands like ping, blink)
+- `early_ack=False`: Handler runs first, ACK sent after with response payload (echo, params)
+- `CommandRegistry.lookup()` checks earlyAck flag, `CommandReceiver._process_packet()` uses it
 
 #### LoRa Timing Parameters (Critical for Tuning)
 
@@ -93,7 +99,7 @@ The RFM9x is **half-duplex** - it cannot transmit and receive simultaneously. Th
 **Gateway side (`gateway_config.json` → `command_server`):**
 | Parameter | Default | Description |
 |-----------|---------|-------------|
-| `initial_retry_ms` | 300 | Wait time before first retry if no ACK |
+| `initial_retry_ms` | 500 | Wait time before first retry if no ACK |
 | `max_retry_ms` | 5000 | Maximum retry delay (backoff cap) |
 | `max_retries` | 10 | Give up after this many attempts |
 

@@ -508,17 +508,19 @@ class TestCommandRegistry:
             called.append((cmd, args))
 
         registry.register("test_cmd", handler)
-        result = registry.dispatch("test_cmd", ["arg1"], "node_001")
+        handled, response = registry.dispatch("test_cmd", ["arg1"], "node_001")
 
-        assert result is True
+        assert handled is True
+        assert response is None
         assert called == [("test_cmd", ["arg1"])]
 
     def test_dispatch_unknown_command(self):
         """Dispatching unknown command should return False."""
         registry = CommandRegistry("node_001")
-        result = registry.dispatch("unknown", [], "node_001")
+        handled, response = registry.dispatch("unknown", [], "node_001")
 
-        assert result is False
+        assert handled is False
+        assert response is None
 
     def test_scope_broadcast_only(self):
         """BROADCAST scope should only respond to broadcasts."""
@@ -585,8 +587,9 @@ class TestCommandRegistry:
         registry.register("cmd", handler, CommandScope.ANY)
 
         # Should be ignored - targeted to different node
-        result = registry.dispatch("cmd", [], "node_002")
-        assert result is False
+        handled, response = registry.dispatch("cmd", [], "node_002")
+        assert handled is False
+        assert response is None
         assert len(called) == 0
 
     def test_multiple_handlers_same_command(self):
@@ -621,8 +624,8 @@ class TestCommandRegistry:
         registry.register("cmd", good_handler)
 
         # Should still return True since good_handler ran
-        result = registry.dispatch("cmd", [], "node_001")
-        assert result is True
+        handled, _ = registry.dispatch("cmd", [], "node_001")
+        assert handled is True
         assert called == ["good"]
 
     def test_unregister(self):
@@ -636,9 +639,40 @@ class TestCommandRegistry:
         registry.register("cmd", handler)
         registry.unregister("cmd", handler)
 
-        result = registry.dispatch("cmd", [], "node_001")
-        assert result is False
+        handled, response = registry.dispatch("cmd", [], "node_001")
+        assert handled is False
+        assert response is None
         assert len(called) == 0
+
+    def test_dispatch_returns_handler_response(self):
+        """Dispatch should return the first non-None response from handlers."""
+        registry = CommandRegistry("node_001")
+
+        def echo_handler(cmd: str, args: list[str]) -> dict | None:
+            return {"data": args[0]} if args else None
+
+        registry.register("echo", echo_handler, CommandScope.PRIVATE)
+        handled, response = registry.dispatch("echo", ["hello"], "node_001")
+
+        assert handled is True
+        assert response == {"data": "hello"}
+
+    def test_dispatch_returns_first_response(self):
+        """When multiple handlers return responses, first non-None wins."""
+        registry = CommandRegistry("node_001")
+
+        def handler1(cmd: str, args: list[str]) -> dict | None:
+            return {"from": "handler1"}
+
+        def handler2(cmd: str, args: list[str]) -> dict | None:
+            return {"from": "handler2"}
+
+        registry.register("cmd", handler1)
+        registry.register("cmd", handler2)
+        handled, response = registry.dispatch("cmd", [], "node_001")
+
+        assert handled is True
+        assert response == {"from": "handler1"}
 
     def test_get_registered_commands(self):
         """Should return list of registered commands."""
@@ -650,6 +684,115 @@ class TestCommandRegistry:
 
         commands = registry.get_registered_commands()
         assert sorted(commands) == ["cmd1", "cmd2"]
+
+
+class TestEarlyAck:
+    """Tests for earlyAck pattern in CommandRegistry."""
+
+    def test_default_early_ack_is_true(self):
+        """Default early_ack should be True."""
+        registry = CommandRegistry("node_001")
+
+        def handler(cmd: str, args: list[str]):
+            pass
+
+        registry.register("cmd", handler)
+        entry = registry.lookup("cmd", "node_001")
+        assert entry is not None
+        assert entry.early_ack is True
+
+    def test_early_ack_false(self):
+        """early_ack=False should be preserved."""
+        registry = CommandRegistry("node_001")
+
+        def handler(cmd: str, args: list[str]) -> dict | None:
+            return {"data": "response"}
+
+        registry.register("echo", handler, CommandScope.PRIVATE, early_ack=False)
+        entry = registry.lookup("echo", "node_001")
+        assert entry is not None
+        assert entry.early_ack is False
+
+    def test_lookup_returns_matching_handler(self):
+        """lookup should return the first matching handler."""
+        registry = CommandRegistry("node_001")
+
+        def handler(cmd: str, args: list[str]):
+            pass
+
+        registry.register("ping", handler, CommandScope.ANY, early_ack=True)
+        entry = registry.lookup("ping", "node_001")
+        assert entry is not None
+        assert entry.early_ack is True
+
+    def test_lookup_respects_scope(self):
+        """lookup should respect scope filtering."""
+        registry = CommandRegistry("node_001")
+
+        def handler(cmd: str, args: list[str]):
+            pass
+
+        registry.register("cmd", handler, CommandScope.PRIVATE)
+
+        # Should match for private
+        assert registry.lookup("cmd", "node_001") is not None
+
+        # Should NOT match for broadcast
+        assert registry.lookup("cmd", "") is None
+
+    def test_lookup_returns_none_for_unknown(self):
+        """lookup should return None for unknown commands."""
+        registry = CommandRegistry("node_001")
+        assert registry.lookup("unknown", "node_001") is None
+
+    def test_lookup_returns_none_for_other_nodes(self):
+        """lookup should return None for commands targeted to other nodes."""
+        registry = CommandRegistry("node_001")
+
+        def handler(cmd: str, args: list[str]):
+            pass
+
+        registry.register("cmd", handler, CommandScope.ANY)
+        assert registry.lookup("cmd", "node_002") is None
+
+    def test_mixed_early_ack_handlers(self):
+        """Registry should support both early and late ack handlers."""
+        registry = CommandRegistry("node_001")
+
+        def ping_handler(cmd: str, args: list[str]):
+            pass
+
+        def echo_handler(cmd: str, args: list[str]) -> dict | None:
+            return {"data": args[0]} if args else None
+
+        registry.register("ping", ping_handler, CommandScope.ANY, early_ack=True)
+        registry.register("echo", echo_handler, CommandScope.PRIVATE, early_ack=False)
+
+        ping_entry = registry.lookup("ping", "node_001")
+        assert ping_entry is not None
+        assert ping_entry.early_ack is True
+
+        echo_entry = registry.lookup("echo", "node_001")
+        assert echo_entry is not None
+        assert echo_entry.early_ack is False
+
+    def test_late_ack_dispatch_returns_response(self):
+        """late-ack handler dispatch should return response payload."""
+        registry = CommandRegistry("node_001")
+
+        def echo_handler(cmd: str, args: list[str]) -> dict | None:
+            return {"data": args[0]} if args else None
+
+        registry.register("echo", echo_handler, CommandScope.PRIVATE, early_ack=False)
+
+        # Verify it's a late-ack handler
+        entry = registry.lookup("echo", "node_001")
+        assert entry.early_ack is False
+
+        # Dispatch should return the response
+        handled, response = registry.dispatch("echo", ["hello"], "node_001")
+        assert handled is True
+        assert response == {"data": "hello"}
 
 
 # =============================================================================
@@ -684,6 +827,22 @@ class TestBuildAckPacket:
 
         assert packet1 != packet2
 
+    def test_builds_packet_with_payload(self):
+        """Should include payload in ACK packet when provided."""
+        payload = {"data": "hello"}
+        packet = build_ack_packet("1699999999_a1b2", "node_001", payload=payload)
+        data = json.loads(packet.decode("utf-8"))
+
+        assert data["p"] == {"data": "hello"}
+        assert verify_crc(data, crc_key="c")
+
+    def test_builds_packet_without_payload(self):
+        """Should not include 'p' field when payload is None."""
+        packet = build_ack_packet("1699999999_a1b2", "node_001")
+        data = json.loads(packet.decode("utf-8"))
+
+        assert "p" not in data
+
 
 class TestParseAckPacket:
     """Tests for parse_ack_packet function."""
@@ -699,6 +858,20 @@ class TestParseAckPacket:
         assert isinstance(result, AckPacket)
         assert result.command_id == command_id
         assert result.node_id == node_id
+        assert result.payload is None
+
+    def test_roundtrip_with_payload(self):
+        """Build then parse should preserve payload."""
+        command_id = "1699999999_a1b2"
+        node_id = "node_001"
+        payload = {"data": "echo_test_123"}
+        packet = build_ack_packet(command_id, node_id, payload=payload)
+        result = parse_ack_packet(packet)
+
+        assert result is not None
+        assert result.command_id == command_id
+        assert result.node_id == node_id
+        assert result.payload == {"data": "echo_test_123"}
 
     def test_parse_invalid_json(self):
         """Invalid JSON should return None."""

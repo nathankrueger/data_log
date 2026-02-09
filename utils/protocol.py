@@ -381,7 +381,9 @@ def parse_command_packet(data: bytes) -> CommandPacket | None:
 # =============================================================================
 
 
-def build_ack_packet(command_id: str, node_id: str) -> bytes:
+def build_ack_packet(
+    command_id: str, node_id: str, payload: dict | None = None
+) -> bytes:
     """
     Build an ACK packet for a received command.
 
@@ -389,11 +391,13 @@ def build_ack_packet(command_id: str, node_id: str) -> bytes:
         t = "ack" (message type)
         id = command_id (timestamp_crcprefix)
         n = node_id sending the ACK
+        p = optional response payload dict
         c = CRC
 
     Args:
         command_id: ID of the command being acknowledged
         node_id: ID of the node sending the ACK
+        payload: Optional response data to include in ACK
 
     Returns:
         UTF-8 encoded JSON packet ready to transmit
@@ -403,6 +407,8 @@ def build_ack_packet(command_id: str, node_id: str) -> bytes:
         "id": command_id,
         "n": node_id,
     }
+    if payload is not None:
+        message["p"] = payload
     message["c"] = calculate_crc32(message)
     return json.dumps(message, separators=(",", ":")).encode("utf-8")
 

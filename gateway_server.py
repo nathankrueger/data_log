@@ -62,6 +62,7 @@ from utils.protocol import (
     make_sensor_id,
     parse_ack_packet,
     parse_lora_packet,
+    verify_crc,
 )
 
 # Configure logging
@@ -107,7 +108,7 @@ class CommandQueue:
         self,
         max_size: int = 128,
         max_retries: int = 10,
-        initial_retry_ms: int = 300,
+        initial_retry_ms: int = 500,
         max_retry_ms: int = 5000,
         retry_multiplier: float = 1.5,
     ):
@@ -278,7 +279,10 @@ class CommandQueue:
                 in_queue = any(p.command_id == command_id for p in self._queue)
                 if not is_current and not in_queue:
                     # Command completed but no response stored
-                    logger.info(f"Command {command_id} completed without response")
+                    logger.info(
+                        f"Command {command_id} completed without response "
+                        f"after {poll_count} polls ({time.time() - (deadline - timeout):.1f}s)"
+                    )
                     return None
             poll_count += 1
             time.sleep(0.1)
@@ -640,9 +644,28 @@ class LoRaTransceiver(threading.Thread):
         receive_time = time.time()
         rssi = self._radio.get_last_rssi()
 
+        # Diagnostic: log raw packet when a command is pending
+        if self._command_queue.has_current():
+            try:
+                raw_json = json.loads(packet.decode("utf-8"))
+                has_p = "p" in raw_json
+                pkt_type = raw_json.get("t", "?")
+                logger.info(
+                    f"[ACK_DIAG] Raw packet while cmd pending: type={pkt_type} "
+                    f"has_payload={has_p} len={len(packet)} rssi={rssi}"
+                )
+                if pkt_type == "ack":
+                    logger.info(f"[ACK_DIAG] ACK content: {packet.decode('utf-8').strip()}")
+            except Exception:
+                pass
+
         # First, check if it's an ACK packet
         ack = parse_ack_packet(packet)
         if ack:
+            logger.info(
+                f"[ACK_DIAG] Parsed ACK: id={ack.command_id} node={ack.node_id} "
+                f"payload={ack.payload!r}"
+            )
             retired = self._command_queue.ack_received(ack.command_id, payload=ack.payload)
             if retired:
                 rtt_ms = (
@@ -652,8 +675,9 @@ class LoRaTransceiver(threading.Thread):
                 )
                 logger.info(f"ACK received from '{ack.node_id}' (RSSI: {rssi} dB)")
                 cmd_logger.debug(
-                    "ACK_MATCH id=%s node=%s rssi=%s rtt_ms=%.0f attempts=%d",
+                    "ACK_MATCH id=%s node=%s rssi=%s rtt_ms=%.0f attempts=%d payload=%s",
                     ack.command_id, ack.node_id, rssi, rtt_ms, retired.retry_count,
+                    ack.payload,
                 )
             else:
                 logger.debug(f"Unexpected ACK from '{ack.node_id}': {ack.command_id}")
@@ -662,6 +686,19 @@ class LoRaTransceiver(threading.Thread):
                     ack.command_id, ack.node_id, rssi,
                 )
             return
+
+        # Diagnostic: if packet looks like ACK but failed parse, log why
+        if self._command_queue.has_current():
+            try:
+                raw = json.loads(packet.decode("utf-8"))
+                if raw.get("t") == "ack":
+                    crc_ok = verify_crc(raw, crc_key="c")
+                    logger.warning(
+                        f"[ACK_DIAG] ACK failed parse! crc_ok={crc_ok} "
+                        f"keys={sorted(raw.keys())} raw={packet.decode('utf-8').strip()}"
+                    )
+            except Exception:
+                pass
 
         # Otherwise, process as sensor data
         result = parse_lora_packet(packet)
@@ -894,7 +931,7 @@ def run_gateway(config: dict, verbose_logging: bool = False, cmd_debug: bool = F
     command_queue = CommandQueue(
         max_size=command_config.get("max_queue_size", 128),
         max_retries=command_config.get("max_retries", 10),
-        initial_retry_ms=command_config.get("initial_retry_ms", 100),
+        initial_retry_ms=command_config.get("initial_retry_ms", 500),
         max_retry_ms=command_config.get("max_retry_ms", 5000),
         retry_multiplier=command_config.get("retry_multiplier", 1.5),
     )

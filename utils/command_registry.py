@@ -3,9 +3,14 @@ Command registry for node-side command handling.
 
 Provides a registry pattern for mapping command names to callbacks,
 with scope filtering to distinguish between broadcast and targeted commands.
+
+Follows the HTCC AB01 earlyAck pattern:
+- early_ack=True (default): ACK is sent before the handler runs
+- early_ack=False: Handler runs first, ACK is sent after with optional response payload
 """
 
 import logging
+from dataclasses import dataclass
 from enum import Enum
 from typing import Callable
 
@@ -20,32 +25,43 @@ class CommandScope(Enum):
     ANY = "any"  # Respond to both broadcast and targeted commands
 
 
-# Callback signature: (command_name, args) -> None
-CommandCallback = Callable[[str, list[str]], None]
+# Callback signature: (command_name, args) -> optional response payload
+CommandCallback = Callable[[str, list[str]], dict | None]
+
+
+@dataclass
+class HandlerEntry:
+    """A registered command handler with its configuration."""
+
+    callback: CommandCallback
+    scope: CommandScope
+    early_ack: bool
 
 
 class CommandRegistry:
     """
-    Registry for command handlers with scope filtering.
+    Registry for command handlers with scope filtering and earlyAck support.
 
-    Handlers are registered with a command name and scope. When a command
-    is dispatched, only handlers matching both the command name and scope
-    criteria are invoked.
+    Handlers are registered with a command name, scope, and early_ack flag.
+
+    - early_ack=True: ACK sent before handler (for fire-and-forget commands)
+    - early_ack=False: Handler runs first, ACK sent after with response payload
+      (for commands that return data like echo, params)
 
     Example:
         registry = CommandRegistry("node_001")
 
-        def handle_reboot(cmd: str, args: list[str]):
-            os.system("sudo reboot")
+        def handle_ping(cmd: str, args: list[str]):
+            print("pong")
 
-        # Only respond to targeted reboot commands
-        registry.register("reboot", handle_reboot, CommandScope.PRIVATE)
+        def handle_echo(cmd: str, args: list[str]) -> dict | None:
+            return {"data": args[0]} if args else None
 
-        # This will invoke the callback (targeted to this node)
-        registry.dispatch("reboot", [], "node_001")
+        # ACK before handler (default)
+        registry.register("ping", handle_ping, CommandScope.ANY, early_ack=True)
 
-        # This will NOT invoke the callback (broadcast)
-        registry.dispatch("reboot", [], "")
+        # Handler before ACK (returns data in ACK payload)
+        registry.register("echo", handle_echo, CommandScope.PRIVATE, early_ack=False)
     """
 
     def __init__(self, node_id: str):
@@ -56,13 +72,14 @@ class CommandRegistry:
             node_id: This node's identifier for matching targeted commands.
         """
         self.node_id = node_id
-        self._handlers: dict[str, list[tuple[CommandCallback, CommandScope]]] = {}
+        self._handlers: dict[str, list[HandlerEntry]] = {}
 
     def register(
         self,
         command: str,
         callback: CommandCallback,
         scope: CommandScope = CommandScope.ANY,
+        early_ack: bool = True,
     ) -> None:
         """
         Register a callback for a command.
@@ -74,11 +91,16 @@ class CommandRegistry:
             command: Command name to handle (e.g., "reboot", "set_interval")
             callback: Function to call when command is received
             scope: When to invoke: BROADCAST, PRIVATE, or ANY
+            early_ack: True = ACK before handler, False = ACK after handler with response
         """
         if command not in self._handlers:
             self._handlers[command] = []
-        self._handlers[command].append((callback, scope))
-        logger.debug(f"Registered handler for '{command}' with scope {scope.value}")
+        entry = HandlerEntry(callback=callback, scope=scope, early_ack=early_ack)
+        self._handlers[command].append(entry)
+        logger.debug(
+            f"Registered handler for '{command}' "
+            f"(scope={scope.value}, early_ack={early_ack})"
+        )
 
     def unregister(self, command: str, callback: CommandCallback) -> bool:
         """
@@ -96,7 +118,7 @@ class CommandRegistry:
 
         original_len = len(self._handlers[command])
         self._handlers[command] = [
-            (cb, scope) for cb, scope in self._handlers[command] if cb != callback
+            entry for entry in self._handlers[command] if entry.callback != callback
         ]
 
         if not self._handlers[command]:
@@ -104,7 +126,48 @@ class CommandRegistry:
 
         return len(self._handlers.get(command, [])) < original_len
 
-    def dispatch(self, command: str, args: list[str], target_node_id: str) -> bool:
+    def lookup(
+        self, command: str, target_node_id: str
+    ) -> HandlerEntry | None:
+        """
+        Look up the first matching handler for a command.
+
+        Used by CommandReceiver to check the early_ack flag before deciding
+        whether to send ACK before or after dispatch.
+
+        Args:
+            command: Command name
+            target_node_id: Target node from packet ("" for broadcast)
+
+        Returns:
+            First matching HandlerEntry, or None if no match
+        """
+        if command not in self._handlers:
+            return None
+
+        is_broadcast = target_node_id == ""
+        is_for_me = target_node_id == self.node_id
+
+        if not is_broadcast and not is_for_me:
+            return None
+
+        for entry in self._handlers[command]:
+            should_match = False
+            if entry.scope == CommandScope.ANY:
+                should_match = True
+            elif entry.scope == CommandScope.BROADCAST and is_broadcast:
+                should_match = True
+            elif entry.scope == CommandScope.PRIVATE and is_for_me:
+                should_match = True
+
+            if should_match:
+                return entry
+
+        return None
+
+    def dispatch(
+        self, command: str, args: list[str], target_node_id: str
+    ) -> tuple[bool, dict | None]:
         """
         Dispatch a command to registered handlers.
 
@@ -123,11 +186,13 @@ class CommandRegistry:
             target_node_id: Target node from packet ("" for broadcast)
 
         Returns:
-            True if at least one handler was invoked, False otherwise
+            Tuple of (handled, response_payload):
+            - handled: True if at least one handler was invoked
+            - response_payload: First non-None response from a handler, for ACK payload
         """
         if command not in self._handlers:
             logger.debug(f"No handlers registered for command '{command}'")
-            return False
+            return False, None
 
         is_broadcast = target_node_id == ""
         is_for_me = target_node_id == self.node_id
@@ -137,31 +202,34 @@ class CommandRegistry:
             logger.debug(
                 f"Ignoring command '{command}' targeted to '{target_node_id}'"
             )
-            return False
+            return False, None
 
         handled = False
-        for callback, scope in self._handlers[command]:
+        response: dict | None = None
+        for entry in self._handlers[command]:
             should_invoke = False
 
-            if scope == CommandScope.ANY:
+            if entry.scope == CommandScope.ANY:
                 should_invoke = True
-            elif scope == CommandScope.BROADCAST and is_broadcast:
+            elif entry.scope == CommandScope.BROADCAST and is_broadcast:
                 should_invoke = True
-            elif scope == CommandScope.PRIVATE and is_for_me:
+            elif entry.scope == CommandScope.PRIVATE and is_for_me:
                 should_invoke = True
 
             if should_invoke:
                 try:
-                    callback(command, args)
+                    result = entry.callback(command, args)
                     handled = True
+                    if response is None and result is not None:
+                        response = result
                     logger.debug(
                         f"Executed handler for '{command}' "
-                        f"(scope={scope.value}, broadcast={is_broadcast})"
+                        f"(scope={entry.scope.value}, broadcast={is_broadcast})"
                     )
                 except Exception as e:
                     logger.error(f"Handler for '{command}' raised exception: {e}")
 
-        return handled
+        return handled, response
 
     def get_registered_commands(self) -> list[str]:
         """Return list of all registered command names."""

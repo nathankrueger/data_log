@@ -137,7 +137,12 @@ class CommandReceiver(threading.Thread):
         self._running = False
 
     def _process_packet(self, packet: bytes) -> None:
-        """Parse and dispatch a received command packet, send ACK."""
+        """Parse and dispatch a received command packet, send ACK.
+
+        Follows the AB01 earlyAck pattern:
+        - early_ack=True: Send ACK before dispatching handler
+        - early_ack=False: Dispatch handler first, send ACK after with response payload
+        """
         cmd = parse_command_packet(packet)
         if cmd is None:
             # Not a valid command packet (might be a sensor packet from another node)
@@ -148,22 +153,43 @@ class CommandReceiver(threading.Thread):
             return  # Not for us (targeted to another node)
 
         target = cmd.node_id if cmd.node_id else "broadcast"
-        logger.info(f"Received command '{cmd.command}' for {target}")
-
-        # Send ACK immediately before dispatching
         command_id = cmd.get_command_id()
-        ack_packet = build_ack_packet(command_id, self._node_id)
-        with self._radio_lock:
-            success = self._radio.send(ack_packet)
-        if success:
-            logger.debug(f"Sent ACK for command '{cmd.command}' (id: {command_id})")
-        else:
-            logger.warning(f"Failed to send ACK for command '{cmd.command}'")
+        logger.info(f"Received command '{cmd.command}' for {target} (id: {command_id})")
+
+        # Look up handler to check early_ack flag
+        handler = self._registry.lookup(cmd.command, cmd.node_id)
+        use_early_ack = handler is None or handler.early_ack
+
+        # For early_ack handlers, send ACK before dispatch
+        if use_early_ack:
+            ack_packet = build_ack_packet(command_id, self._node_id)
+            with self._radio_lock:
+                success = self._radio.send(ack_packet)
+            if success:
+                logger.debug(f"Sent early ACK for '{cmd.command}' (id: {command_id})")
+            else:
+                logger.warning(f"Failed to send early ACK for '{cmd.command}'")
 
         # Dispatch to handlers
-        handled = self._registry.dispatch(cmd.command, cmd.args, cmd.node_id)
+        handled, response = self._registry.dispatch(
+            cmd.command, cmd.args, cmd.node_id
+        )
         if not handled:
             logger.debug(f"No handler for command '{cmd.command}'")
+
+        # For late-ack handlers, send ACK after dispatch with response payload
+        if not use_early_ack:
+            ack_packet = build_ack_packet(
+                command_id, self._node_id, payload=response
+            )
+            with self._radio_lock:
+                success = self._radio.send(ack_packet)
+            if success:
+                logger.debug(
+                    f"Sent ACK+payload for '{cmd.command}' (id: {command_id})"
+                )
+            else:
+                logger.warning(f"Failed to send ACK for '{cmd.command}'")
 
 
 def load_config(config_path: str) -> dict:
@@ -493,8 +519,14 @@ def main():
     def handle_private_ping(cmd: str, args: list[str]) -> None:
         logger.info(f"[HANDLER] Received private ping command with args: {args}")
 
-    command_registry.register("ping", handle_ping, CommandScope.BROADCAST)
-    command_registry.register("ping", handle_private_ping, CommandScope.PRIVATE)
+    def handle_echo(cmd: str, args: list[str]) -> dict | None:
+        data = args[0] if args else ""
+        logger.info(f"[HANDLER] Echo: {data}")
+        return {"data": data}
+
+    command_registry.register("ping", handle_ping, CommandScope.BROADCAST, early_ack=True)
+    command_registry.register("ping", handle_private_ping, CommandScope.PRIVATE, early_ack=True)
+    command_registry.register("echo", handle_echo, CommandScope.PRIVATE, early_ack=False)
 
     # Create radio lock for half-duplex coordination
     radio_lock: threading.Lock | None = None
