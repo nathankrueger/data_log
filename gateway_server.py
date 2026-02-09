@@ -108,7 +108,7 @@ class CommandQueue:
         max_retries: int = 10,
         initial_retry_ms: int = 300,
         max_retry_ms: int = 5000,
-        retry_multiplier: float = 1.1,
+        retry_multiplier: float = 1.5,
     ):
         """
         Initialize the command queue.
@@ -118,7 +118,7 @@ class CommandQueue:
             max_retries: Maximum retry attempts before giving up
             initial_retry_ms: Initial retry delay in milliseconds
             max_retry_ms: Maximum retry delay (backoff cap)
-            retry_multiplier: Backoff multiplier per retry (default 2.0)
+            retry_multiplier: Backoff multiplier per retry (default 1.5)
         """
         self._queue: deque[PendingCommand] = deque()
         self._max_size = max_size
@@ -128,6 +128,8 @@ class CommandQueue:
         self._initial_retry_ms = initial_retry_ms
         self._max_retry_ms = max_retry_ms
         self._retry_multiplier = retry_multiplier
+        self._completed_responses: dict[str, tuple[float, dict]] = {}
+        self._response_ttl = 60.0  # seconds to keep completed responses
 
     def add(self, cmd: str, args: list[str], node_id: str) -> str | None:
         """
@@ -200,7 +202,7 @@ class CommandQueue:
                     self._current.cmd, self._current.retry_count, int(delay_ms),
                 )
 
-    def ack_received(self, command_id: str) -> PendingCommand | None:
+    def ack_received(self, command_id: str, payload: dict | None = None) -> PendingCommand | None:
         """
         Handle an ACK - retire the command if it matches.
 
@@ -544,7 +546,7 @@ class LoRaTransceiver(threading.Thread):
         # First, check if it's an ACK packet
         ack = parse_ack_packet(packet)
         if ack:
-            retired = self._command_queue.ack_received(ack.command_id)
+            retired = self._command_queue.ack_received(ack.command_id, payload=ack.payload)
             if retired:
                 rtt_ms = (
                     (time.time() - retired.first_sent_time) * 1000
@@ -796,7 +798,7 @@ def run_gateway(config: dict, verbose_logging: bool = False, cmd_debug: bool = F
         max_retries=command_config.get("max_retries", 10),
         initial_retry_ms=command_config.get("initial_retry_ms", 100),
         max_retry_ms=command_config.get("max_retry_ms", 5000),
-        retry_multiplier=command_config.get("retry_multiplier", 2.0),
+        retry_multiplier=command_config.get("retry_multiplier", 1.5),
     )
 
     # Start command server if enabled
