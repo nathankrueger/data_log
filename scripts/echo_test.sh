@@ -5,6 +5,8 @@
 # Runs the echo command in a loop at a configurable rate and collects
 # success/failure statistics.
 #
+# Requires: 'jq' (sudo apt install jq)
+#
 # Usage: echo_test.sh -n <node_id> [-i <interval>] [-c <count>] [-g <gateway>] [-p <port>]
 #
 # Options:
@@ -113,8 +115,9 @@ while true; do
     TIMESTAMP=$(date '+%H:%M:%S')
 
     if [ "$HTTP_CODE" = "200" ]; then
-        # Extract echoed data from response JSON (expects {"data":"..."} or similar)
-        ECHOED_DATA=$(echo "$RESPONSE" | jq -r '.data // .echo // .payload // empty' 2>/dev/null)
+        # Extract echoed data from response JSON
+        # Handles raw string ("value") or object ({"data":"value"})
+        ECHOED_DATA=$(echo "$RESPONSE" | jq -r 'if type == "object" then (.data // .echo // .payload // .) else . end' 2>/dev/null)
 
         if [ "$ECHOED_DATA" = "$SEND_DATA" ]; then
             SUCCESS=$((SUCCESS + 1))
