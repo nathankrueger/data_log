@@ -172,7 +172,7 @@ class CommandHandler(BaseHTTPRequestHandler):
         disc_config = getattr(self.server, "discovery_config", {})
 
         retries = int(
-            query.get("retries", [disc_config.get("discovery_retries", 10)])[0]
+            query.get("retries", [disc_config.get("discovery_retries", 30)])[0]
         )
 
         # Import at runtime to avoid circular import
@@ -198,12 +198,21 @@ class CommandHandler(BaseHTTPRequestHandler):
             }).encode("utf-8"))
             return
 
+        # Compute expected discovery duration from retry parameters
+        expected_ms = 0.0
+        delay = float(request.initial_retry_ms)
+        for _ in range(retries):
+            expected_ms += delay
+            delay = min(delay * request.retry_multiplier, float(request.max_retry_ms))
+        wait_timeout = (expected_ms / 1000.0) + 10.0  # add buffer
+
         logger.info(
-            f"Discovery requested ({retries} broadcasts), waiting for completion..."
+            f"Discovery requested ({retries} broadcasts, "
+            f"timeout={wait_timeout:.0f}s), waiting for completion..."
         )
 
-        # Block until discovery completes (generous timeout)
-        completed = request.done.wait(timeout=30.0)
+        # Block until discovery completes
+        completed = request.done.wait(timeout=wait_timeout)
 
         if not completed:
             self.send_response(504)

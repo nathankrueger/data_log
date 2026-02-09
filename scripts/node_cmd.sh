@@ -97,7 +97,7 @@ if [ "$DISCOVER" = true ]; then
     fi
 
     STDERR_FILE=$(mktemp)
-    RESPONSE=$(curl -sS --max-time 30 -w "\n%{http_code}" "$URL" 2>"$STDERR_FILE")
+    RESPONSE=$(curl -sS --max-time 180 -w "\n%{http_code}" "$URL" 2>"$STDERR_FILE")
     CURL_EXIT=$?
     STDERR=$(cat "$STDERR_FILE")
     rm -f "$STDERR_FILE"

@@ -1050,7 +1050,7 @@ def run_gateway(config: dict, verbose_logging: bool = False, cmd_debug: bool = F
 
     # Build discovery config from command_server section
     discovery_config = {
-        "discovery_retries": command_config.get("discovery_retries", 10),
+        "discovery_retries": command_config.get("discovery_retries", 30),
         "initial_retry_ms": command_config.get("initial_retry_ms", 500),
         "max_retry_ms": command_config.get("max_retry_ms", 5000),
         "retry_multiplier": command_config.get("retry_multiplier", 1.5),
