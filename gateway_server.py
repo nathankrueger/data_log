@@ -70,6 +70,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+cmd_logger = logging.getLogger("cmd_debug")
 
 
 # =============================================================================
@@ -89,6 +90,7 @@ class PendingCommand:
     next_retry_time: float
     retry_count: int = 0
     max_retries: int = 10
+    first_sent_time: float = 0.0
 
 
 class CommandQueue:
@@ -116,7 +118,7 @@ class CommandQueue:
             max_retries: Maximum retry attempts before giving up
             initial_retry_ms: Initial retry delay in milliseconds
             max_retry_ms: Maximum retry delay (backoff cap)
-            retry_multiplier: Multiplier applied to delay after each retry (default 1.1)
+            retry_multiplier: Backoff multiplier per retry (default 2.0)
         """
         self._queue: deque[PendingCommand] = deque()
         self._max_size = max_size
@@ -126,9 +128,6 @@ class CommandQueue:
         self._initial_retry_ms = initial_retry_ms
         self._max_retry_ms = max_retry_ms
         self._retry_multiplier = retry_multiplier
-        # Store ACK payloads for retrieval by wait_for_response
-        self._completed_responses: dict[str, tuple[float, dict]] = {}
-        self._response_ttl = 60.0  # Keep responses for 60 seconds
 
     def add(self, cmd: str, args: list[str], node_id: str) -> str | None:
         """
@@ -158,6 +157,10 @@ class CommandQueue:
             if len(self._queue) >= self._max_size:
                 return None
             self._queue.append(pending)
+        cmd_logger.debug(
+            "CMD_QUEUED cmd=%s target=%s id=%s",
+            cmd, node_id or "broadcast", command_id,
+        )
         return command_id
 
     def get_next_to_send(self) -> PendingCommand | None:
@@ -183,14 +186,21 @@ class CommandQueue:
         with self._lock:
             if self._current:
                 self._current.retry_count += 1
-                # Multiplicative backoff: initial * multiplier^(retry-1), capped
+                if self._current.retry_count == 1:
+                    self._current.first_sent_time = time.time()
+                # Exponential backoff with configurable multiplier, capped
                 delay_ms = min(
-                    self._initial_retry_ms * (self._retry_multiplier ** (self._current.retry_count - 1)),
+                    self._initial_retry_ms
+                    * (self._retry_multiplier ** (self._current.retry_count - 1)),
                     self._max_retry_ms,
                 )
                 self._current.next_retry_time = time.time() + (delay_ms / 1000)
+                cmd_logger.debug(
+                    "CMD_RETRY cmd=%s attempt=%d next_in=%dms",
+                    self._current.cmd, self._current.retry_count, int(delay_ms),
+                )
 
-    def ack_received(self, command_id: str, payload: dict | None = None) -> bool:
+    def ack_received(self, command_id: str) -> PendingCommand | None:
         """
         Handle an ACK - retire the command if it matches.
 
@@ -199,20 +209,21 @@ class CommandQueue:
             payload: Optional response payload from node
 
         Returns:
-            True if the ACK matched the current command
+            The retired PendingCommand if matched, None otherwise
         """
         with self._lock:
             if self._current and self._current.command_id == command_id:
+                retired = self._current
                 logger.info(
-                    f"Command '{self._current.cmd}' ACK'd after "
-                    f"{self._current.retry_count} attempt(s)"
+                    f"Command '{retired.cmd}' ACK'd after "
+                    f"{retired.retry_count} attempt(s)"
                 )
                 # Store response payload for retrieval
                 if payload is not None:
                     self._completed_responses[command_id] = (time.time(), payload)
                 self._current = None
-                return True
-        return False
+                return retired
+        return None
 
     def check_expired(self) -> PendingCommand | None:
         """
@@ -486,22 +497,33 @@ class LoRaTransceiver(threading.Thread):
                 f"Command '{expired.cmd}' to {target} expired after "
                 f"{expired.max_retries} retries"
             )
+            cmd_logger.debug(
+                "CMD_EXPIRED cmd=%s target=%s retries=%d",
+                expired.cmd, target, expired.max_retries,
+            )
 
         # Get next command to send (if retry timer elapsed)
         pending = self._command_queue.get_next_to_send()
         if pending:
             try:
                 # Switch to G2N channel for command transmission
+                cmd_logger.debug("FREQ to=G2N freq=%.1fMHz", self._g2n_freq)
                 self._radio.set_frequency(self._g2n_freq)
                 success = self._radio.send(pending.packet)
                 # Switch back to N2G to receive ACK
                 self._radio.set_frequency(self._n2g_freq)
+                cmd_logger.debug("FREQ to=N2G freq=%.1fMHz", self._n2g_freq)
 
                 target = pending.node_id or "broadcast"
                 if success:
                     logger.debug(
                         f"Sent '{pending.cmd}' to {target} on G2N "
                         f"(attempt {pending.retry_count + 1})"
+                    )
+                    cmd_logger.debug(
+                        "CMD_TX cmd=%s target=%s attempt=%d/%d bytes=%d",
+                        pending.cmd, target, pending.retry_count + 1,
+                        pending.max_retries, len(pending.packet),
                     )
                 else:
                     logger.warning(f"Radio send failed for '{pending.cmd}' to {target}")
@@ -522,15 +544,24 @@ class LoRaTransceiver(threading.Thread):
         # First, check if it's an ACK packet
         ack = parse_ack_packet(packet)
         if ack:
-            if self._command_queue.ack_received(ack.command_id, ack.payload):
-                if ack.payload:
-                    logger.info(
-                        f"ACK with payload from '{ack.node_id}' (RSSI: {rssi} dB)"
-                    )
-                else:
-                    logger.info(f"ACK received from '{ack.node_id}' (RSSI: {rssi} dB)")
+            retired = self._command_queue.ack_received(ack.command_id)
+            if retired:
+                rtt_ms = (
+                    (time.time() - retired.first_sent_time) * 1000
+                    if retired.first_sent_time
+                    else 0
+                )
+                logger.info(f"ACK received from '{ack.node_id}' (RSSI: {rssi} dB)")
+                cmd_logger.debug(
+                    "ACK_MATCH id=%s node=%s rssi=%s rtt_ms=%.0f attempts=%d",
+                    ack.command_id, ack.node_id, rssi, rtt_ms, retired.retry_count,
+                )
             else:
                 logger.debug(f"Unexpected ACK from '{ack.node_id}': {ack.command_id}")
+                cmd_logger.debug(
+                    "ACK_STALE id=%s node=%s rssi=%s",
+                    ack.command_id, ack.node_id, rssi,
+                )
             return
 
         # Otherwise, process as sensor data
@@ -702,10 +733,24 @@ def load_config(config_path: str) -> dict:
         return json.load(f)
 
 
-def run_gateway(config: dict, verbose_logging: bool = False) -> None:
+def run_gateway(config: dict, verbose_logging: bool = False, cmd_debug: bool = False) -> None:
     """Run the gateway."""
     if verbose_logging:
         logger.info("Verbose logging enabled")
+
+    if cmd_debug:
+        # Focused CMD/ACK logger with millisecond timestamps
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s.%(msecs)03d [CMD] %(message)s", datefmt="%H:%M:%S"
+            )
+        )
+        cmd_logger.addHandler(handler)
+        cmd_logger.setLevel(logging.DEBUG)
+        # Suppress sensor/HTTP noise on the main logger
+        logging.getLogger(__name__).setLevel(logging.WARNING)
+        cmd_logger.debug("CMD debug mode active")
 
     node_id = config.get("node_id", "gateway")
     dashboard_url = config.get("dashboard_url")
@@ -751,7 +796,7 @@ def run_gateway(config: dict, verbose_logging: bool = False) -> None:
         max_retries=command_config.get("max_retries", 10),
         initial_retry_ms=command_config.get("initial_retry_ms", 100),
         max_retry_ms=command_config.get("max_retry_ms", 5000),
-        retry_multiplier=command_config.get("retry_multiplier", 1.1),
+        retry_multiplier=command_config.get("retry_multiplier", 2.0),
     )
 
     # Start command server if enabled
@@ -917,6 +962,11 @@ def main():
         action="store_true",
         help="Enable verbose logging (full error messages, no truncation)",
     )
+    parser.add_argument(
+        "--cmd-debug",
+        action="store_true",
+        help="CMD/ACK focused logging: suppress sensor data, show command lifecycle",
+    )
     args = parser.parse_args()
 
     # Load configuration
@@ -927,7 +977,7 @@ def main():
         sys.exit(1)
 
     # Run gateway
-    run_gateway(config, verbose_logging=args.verbose_logging)
+    run_gateway(config, verbose_logging=args.verbose_logging, cmd_debug=args.cmd_debug)
 
 
 if __name__ == "__main__":
