@@ -96,13 +96,19 @@ class CommandHandler(BaseHTTPRequestHandler):
         """
         Handle GET requests for commands that return responses.
 
-        Pattern: GET /{cmd}/{node_id}?a=arg1&a=arg2
-
-        Queues the command, waits for ACK with payload, returns payload.
-        The payload content is opaque to the gateway.
+        Patterns:
+          GET /discover[?retries=N]       - Discover all reachable nodes
+          GET /{cmd}/{node_id}?a=arg1     - Send command, wait for response
         """
         parsed = urlparse(self.path)
-        parts = parsed.path.strip("/").split("/")
+        path = parsed.path.strip("/")
+
+        # Handle /discover endpoint
+        if path == "discover":
+            self._handle_discover(parsed)
+            return
+
+        parts = path.split("/")
 
         if len(parts) != 2:
             self.send_error(400, "Expected: /{cmd}/{node_id}")
@@ -148,6 +154,86 @@ class CommandHandler(BaseHTTPRequestHandler):
                 "message": f"No response from node '{node_id}' within 10 seconds",
             }).encode("utf-8"))
 
+    def _handle_discover(self, parsed) -> None:
+        """Handle GET /discover — discover all reachable nodes via broadcast ping."""
+        transceiver = getattr(self.server, "transceiver", None)
+        if transceiver is None:
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "error": "unavailable",
+                "message": "LoRa transceiver not running",
+            }).encode("utf-8"))
+            return
+
+        # Parse optional query params
+        query = parse_qs(parsed.query)
+        disc_config = getattr(self.server, "discovery_config", {})
+
+        retries = int(
+            query.get("retries", [disc_config.get("discovery_retries", 10)])[0]
+        )
+
+        # Import at runtime to avoid circular import
+        from gateway_server import DiscoveryRequest
+
+        request = DiscoveryRequest(
+            retries=retries,
+            initial_retry_ms=disc_config.get("initial_retry_ms", 500),
+            max_retry_ms=disc_config.get("max_retry_ms", 5000),
+            retry_multiplier=disc_config.get("retry_multiplier", 1.5),
+            done=threading.Event(),
+        )
+
+        # Submit to transceiver
+        accepted = transceiver.request_discovery(request)
+        if not accepted:
+            self.send_response(409)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "error": "conflict",
+                "message": "Discovery already in progress",
+            }).encode("utf-8"))
+            return
+
+        logger.info(
+            f"Discovery requested ({retries} broadcasts), waiting for completion..."
+        )
+
+        # Block until discovery completes (generous timeout)
+        completed = request.done.wait(timeout=30.0)
+
+        if not completed:
+            self.send_response(504)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "error": "timeout",
+                "message": "Discovery did not complete in time",
+            }).encode("utf-8"))
+            return
+
+        if request.error:
+            self.send_response(500)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "error": "discovery_error",
+                "message": request.error,
+            }).encode("utf-8"))
+            return
+
+        # Success
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({
+            "nodes": request.nodes,
+            "count": len(request.nodes),
+        }).encode("utf-8"))
+
     def log_message(self, format: str, *args) -> None:
         """Suppress default HTTP logging, use our logger instead."""
         pass
@@ -169,23 +255,39 @@ class CommandServer(threading.Thread):
         # Commands are sent with retry until ACK received
     """
 
-    def __init__(self, port: int, command_queue: "CommandQueue"):
+    def __init__(
+        self,
+        port: int,
+        command_queue: "CommandQueue",
+        discovery_config: dict | None = None,
+    ):
         """
         Initialize the command server.
 
         Args:
             port: TCP port to listen on
             command_queue: CommandQueue for reliable command delivery
+            discovery_config: Config for node discovery (retries, backoff params)
         """
         super().__init__(daemon=True, name="CommandServer")
         self.port = port
         self.command_queue = command_queue
+        self.discovery_config = discovery_config or {}
+        self.transceiver = None  # Set later via set_transceiver()
         self._server: HTTPServer | None = None
+
+    def set_transceiver(self, transceiver) -> None:
+        """Set the transceiver reference for discovery support."""
+        self.transceiver = transceiver
+        if self._server:
+            self._server.transceiver = transceiver  # type: ignore
 
     def run(self) -> None:
         """Run the HTTP server (called by Thread.start())."""
         self._server = HTTPServer(("0.0.0.0", self.port), CommandHandler)
         self._server.command_queue = self.command_queue  # type: ignore
+        self._server.discovery_config = self.discovery_config  # type: ignore
+        self._server.transceiver = self.transceiver  # type: ignore
         logger.info(f"Command server listening on port {self.port}")
 
         try:

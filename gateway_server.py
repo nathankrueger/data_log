@@ -94,6 +94,19 @@ class PendingCommand:
     first_sent_time: float = 0.0
 
 
+@dataclass
+class DiscoveryRequest:
+    """Request for node discovery, coordinated between HTTP and transceiver threads."""
+
+    retries: int
+    initial_retry_ms: int
+    max_retry_ms: int
+    retry_multiplier: float
+    done: threading.Event
+    nodes: list[str] = field(default_factory=list)
+    error: str | None = None
+
+
 class CommandQueue:
     """
     Serial command queue with ACK-based retirement.
@@ -590,6 +603,16 @@ class LoRaTransceiver(threading.Thread):
         self._verbose_logging = verbose_logging
         self._n2g_freq = n2g_freq  # Node to Gateway: sensors + ACKs
         self._g2n_freq = g2n_freq  # Gateway to Node: commands
+        self._discovery_request: DiscoveryRequest | None = None
+        self._discovery_lock = threading.Lock()
+
+    def request_discovery(self, request: DiscoveryRequest) -> bool:
+        """Submit a discovery request. Returns False if one is already in progress."""
+        with self._discovery_lock:
+            if self._discovery_request is not None:
+                return False
+            self._discovery_request = request
+            return True
 
     def set_flash_enabled(self, enabled: bool) -> None:
         """Enable or disable LED flash on receive."""
@@ -602,6 +625,17 @@ class LoRaTransceiver(threading.Thread):
 
         while self._running:
             try:
+                # Check for discovery request (takes priority)
+                discovery = None
+                with self._discovery_lock:
+                    discovery = self._discovery_request
+
+                if discovery is not None:
+                    self._execute_discovery(discovery)
+                    with self._discovery_lock:
+                        self._discovery_request = None
+                    continue
+
                 # Receive with short timeout to allow command transmission
                 packet = self._radio.receive(timeout=0.1)
                 if packet is not None:
@@ -665,6 +699,89 @@ class LoRaTransceiver(threading.Thread):
                     self._radio.set_frequency(self._n2g_freq)
                 except Exception:
                     pass
+
+    def _execute_discovery(self, request: DiscoveryRequest) -> None:
+        """
+        Execute discovery loop: broadcast ping, collect ACKs, repeat with backoff.
+
+        Runs inside the transceiver thread. Normal command processing is paused.
+        Sensor data packets received during listen windows are still processed.
+        """
+        discovered_nodes: set[str] = set()
+        logger.info(f"Starting node discovery ({request.retries} broadcasts)")
+
+        try:
+            delay_ms = float(request.initial_retry_ms)
+
+            for attempt in range(request.retries):
+                # Build and send broadcast ping on G2N
+                packet, command_id = build_command_packet("ping", [], "")
+                cmd_logger.debug("FREQ to=G2N freq=%.1fMHz", self._g2n_freq)
+                self._radio.set_frequency(self._g2n_freq)
+                success = self._radio.send(packet)
+                self._radio.set_frequency(self._n2g_freq)
+                cmd_logger.debug("FREQ to=N2G freq=%.1fMHz", self._n2g_freq)
+
+                if not success:
+                    logger.warning(f"Discovery broadcast {attempt + 1} send failed")
+
+                logger.info(
+                    f"Discovery broadcast {attempt + 1}/{request.retries} sent "
+                    f"(listening for {delay_ms:.0f}ms)"
+                )
+
+                # Listen for ACKs during the backoff window
+                listen_deadline = time.time() + (delay_ms / 1000.0)
+                while time.time() < listen_deadline:
+                    remaining = listen_deadline - time.time()
+                    timeout = min(0.1, max(0.01, remaining))
+                    raw = self._radio.receive(timeout=timeout)
+
+                    if raw is None:
+                        continue
+
+                    # Try parsing as ACK
+                    ack = parse_ack_packet(raw)
+                    if ack:
+                        # Forward to command queue in case it's for a queued command
+                        self._command_queue.ack_received(
+                            ack.command_id, payload=ack.payload
+                        )
+                        # Record the node for discovery
+                        if ack.node_id not in discovered_nodes:
+                            discovered_nodes.add(ack.node_id)
+                            logger.info(
+                                f"Discovery: found node '{ack.node_id}' "
+                                f"(total: {len(discovered_nodes)})"
+                            )
+                        continue
+
+                    # Not an ACK — process as sensor data
+                    self._process_received_packet(raw)
+
+                # Backoff for next iteration
+                delay_ms = min(
+                    delay_ms * request.retry_multiplier,
+                    float(request.max_retry_ms),
+                )
+
+            request.nodes = sorted(discovered_nodes)
+            logger.info(
+                f"Discovery complete: {len(discovered_nodes)} node(s) found: "
+                f"{request.nodes}"
+            )
+
+        except Exception as e:
+            logger.error(f"Discovery error: {e}")
+            request.error = str(e)
+            # Ensure we return to N2G on error
+            try:
+                self._radio.set_frequency(self._n2g_freq)
+            except Exception:
+                pass
+
+        finally:
+            request.done.set()
 
     def _process_received_packet(self, packet: bytes) -> None:
         """Validate CRC, parse JSON, forward to collector or handle ACK."""
@@ -931,12 +1048,24 @@ def run_gateway(config: dict, verbose_logging: bool = False, cmd_debug: bool = F
         retry_multiplier=command_config.get("retry_multiplier", 1.5),
     )
 
+    # Build discovery config from command_server section
+    discovery_config = {
+        "discovery_retries": command_config.get("discovery_retries", 10),
+        "initial_retry_ms": command_config.get("initial_retry_ms", 500),
+        "max_retry_ms": command_config.get("max_retry_ms", 5000),
+        "retry_multiplier": command_config.get("retry_multiplier", 1.5),
+    }
+
     # Start command server if enabled
     command_server = None
 
     if command_config.get("enabled", False):
         port = command_config.get("port", 5001)
-        command_server = CommandServer(port=port, command_queue=command_queue)
+        command_server = CommandServer(
+            port=port,
+            command_queue=command_queue,
+            discovery_config=discovery_config,
+        )
         command_server.start()
         logger.info(f"Command server listening on port {port}")
 
@@ -975,6 +1104,9 @@ def run_gateway(config: dict, verbose_logging: bool = False, cmd_debug: bool = F
             logger.info(
                 f"LoRa transceiver enabled: N2G={n2g_freq} MHz, G2N={g2n_freq} MHz"
             )
+            # Wire transceiver to command server for discovery support
+            if command_server:
+                command_server.set_transceiver(lora_transceiver)
         except Exception as e:
             logger.error(f"Failed to initialize LoRa: {e}")
             logger.info("Continuing without LoRa transceiver")

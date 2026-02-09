@@ -3,11 +3,13 @@
 # Generic command sender for LoRa nodes via gateway HTTP API.
 #
 # Usage: node_cmd.sh -n <node_id> -c <command> [-a <arg>]... [-w] [-g <gateway>] [-p <port>]
+#        node_cmd.sh -d [-a <retries>] [-g <gateway>] [-p <port>]
 #
 # Options:
 #   -n <node_id>  Target node ID (required for -w, optional for broadcast)
-#   -c <command>  Command name (required)
-#   -a <arg>      Command argument (can be repeated)
+#   -c <command>  Command name (required unless -d)
+#   -a <arg>      Command argument (can be repeated; for -d: retry count)
+#   -d            Discover all reachable nodes
 #   -w            Wait for response (uses GET endpoint with 10s timeout)
 #   -g <gateway>  Gateway host (default: $GATEWAY_HOST or localhost)
 #   -p <port>     Gateway port (default: $GATEWAY_PORT or 5001)
@@ -18,6 +20,8 @@
 #   node_cmd.sh -c ping                             # Broadcast ping to all nodes
 #   node_cmd.sh -n patio -c echo -a "hello" -w      # Echo with response wait
 #   node_cmd.sh -n patio -c set_interval -a 30      # Set broadcast interval
+#   node_cmd.sh -d                                   # Discover all reachable nodes
+#   node_cmd.sh -d -a 5                              # Discover with 5 retries
 
 usage() {
     head -n 18 "$0" | tail -n 17 | sed 's/^# //' | sed 's/^#//'
@@ -28,10 +32,11 @@ NODE_ID=""
 COMMAND=""
 ARGS=()
 WAIT=false
+DISCOVER=false
 OPT_HOST=""
 OPT_PORT=""
 
-while getopts "n:c:a:wg:p:h" opt; do
+while getopts "n:c:a:dwg:p:h" opt; do
     case $opt in
         n)
             NODE_ID="$OPTARG"
@@ -41,6 +46,9 @@ while getopts "n:c:a:wg:p:h" opt; do
             ;;
         a)
             ARGS+=("$OPTARG")
+            ;;
+        d)
+            DISCOVER=true
             ;;
         w)
             WAIT=true
@@ -60,9 +68,14 @@ while getopts "n:c:a:wg:p:h" opt; do
     esac
 done
 
-# Command is required
-if [ -z "$COMMAND" ]; then
-    echo "Error: -c <command> is required"
+# Must specify either -c or -d
+if [ -z "$COMMAND" ] && [ "$DISCOVER" = false ]; then
+    echo "Error: -c <command> or -d is required"
+    usage
+fi
+
+if [ -n "$COMMAND" ] && [ "$DISCOVER" = true ]; then
+    echo "Error: -c and -d are mutually exclusive"
     usage
 fi
 
@@ -76,7 +89,34 @@ fi
 GATEWAY_HOST=${OPT_HOST:-${GATEWAY_HOST:-localhost}}
 GATEWAY_PORT=${OPT_PORT:-${GATEWAY_PORT:-5001}}
 
-if [ "$WAIT" = true ]; then
+if [ "$DISCOVER" = true ]; then
+    # GET /discover[?retries=N]
+    URL="http://$GATEWAY_HOST:$GATEWAY_PORT/discover"
+    if [ ${#ARGS[@]} -gt 0 ]; then
+        URL="$URL?retries=${ARGS[0]}"
+    fi
+
+    STDERR_FILE=$(mktemp)
+    RESPONSE=$(curl -sS --max-time 30 -w "\n%{http_code}" "$URL" 2>"$STDERR_FILE")
+    CURL_EXIT=$?
+    STDERR=$(cat "$STDERR_FILE")
+    rm -f "$STDERR_FILE"
+
+    if [ $CURL_EXIT -ne 0 ]; then
+        echo "Error: $STDERR" >&2
+        exit 1
+    fi
+
+    HTTP_CODE=$(echo "$RESPONSE" | tail -n 1)
+    BODY=$(echo "$RESPONSE" | sed '$d')
+
+    if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+        echo "$BODY"
+    else
+        echo "Error: HTTP $HTTP_CODE - $BODY" >&2
+        exit 1
+    fi
+elif [ "$WAIT" = true ]; then
     # GET endpoint: /{cmd}/{node_id}?a=arg1&a=arg2
     URL="http://$GATEWAY_HOST:$GATEWAY_PORT/$COMMAND/$NODE_ID"
 
