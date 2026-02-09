@@ -21,6 +21,7 @@ from utils.protocol import (
     verify_crc,
 )
 from utils.command_registry import CommandRegistry, CommandScope
+from gateway_server import CommandQueue
 
 
 def make_reading(name: str, units: str, value: float, sensor_class: str) -> SensorReading:
@@ -945,3 +946,135 @@ class TestCommandIdMatching:
 
         # At minimum the CRC prefix should differ
         assert id1 != id2
+
+
+# =============================================================================
+# CommandQueue Tests
+# =============================================================================
+
+
+class TestCommandQueue:
+    """Tests for CommandQueue add/send/ack lifecycle."""
+
+    def test_add_returns_command_id(self):
+        """add() should return a command ID string."""
+        q = CommandQueue(max_size=10)
+        cid = q.add("ping", [], "node_001")
+        assert cid is not None
+        assert isinstance(cid, str)
+
+    def test_add_rejects_when_full(self):
+        """add() should return None when queue is full."""
+        q = CommandQueue(max_size=2)
+        assert q.add("cmd1", [], "n1") is not None
+        assert q.add("cmd2", [], "n2") is not None
+        assert q.add("cmd3", [], "n3") is None
+
+    def test_get_next_to_send_promotes_from_queue(self):
+        """get_next_to_send() should promote first queued command to current."""
+        q = CommandQueue(max_size=10)
+        cid = q.add("ping", [], "node_001")
+        pending = q.get_next_to_send()
+        assert pending is not None
+        assert pending.command_id == cid
+
+    def test_serial_queue_blocks_next_command(self):
+        """Second command should not be sent while first is current."""
+        q = CommandQueue(max_size=10)
+        cid1 = q.add("cmd1", [], "n1")
+        cid2 = q.add("cmd2", [], "n2")
+
+        p1 = q.get_next_to_send()
+        assert p1.command_id == cid1
+        q.mark_sent()
+
+        # Next get should still return cmd1 (waiting for ACK / retry)
+        p_again = q.get_next_to_send()
+        # It should be None since retry timer hasn't elapsed
+        assert p_again is None or p_again.command_id == cid1
+
+    def test_ack_retires_current(self):
+        """ack_received() should retire the current command."""
+        q = CommandQueue(max_size=10)
+        cid = q.add("ping", [], "node_001")
+        q.get_next_to_send()
+        q.mark_sent()
+
+        retired = q.ack_received(cid)
+        assert retired is not None
+        assert retired.command_id == cid
+        assert not q.has_current()
+
+    def test_ack_with_payload_stores_response(self):
+        """ack_received() with payload should store it for wait_for_response."""
+        q = CommandQueue(max_size=10)
+        cid = q.add("echo", ["hello"], "node_001")
+        q.get_next_to_send()
+        q.mark_sent()
+
+        q.ack_received(cid, payload={"data": "hello"})
+        response = q.wait_for_response(cid, timeout=1.0)
+        assert response == {"data": "hello"}
+
+
+class TestCommandQueueCancel:
+    """Tests for CommandQueue.cancel() method."""
+
+    def test_cancel_current_command(self):
+        """cancel() should remove the current command."""
+        q = CommandQueue(max_size=10)
+        cid = q.add("echo", ["hello"], "node_001")
+        q.get_next_to_send()  # Promote to current
+        q.mark_sent()
+
+        assert q.has_current()
+        assert q.cancel(cid) is True
+        assert not q.has_current()
+
+    def test_cancel_queued_command(self):
+        """cancel() should remove a command waiting in the queue."""
+        q = CommandQueue(max_size=10)
+        cid1 = q.add("cmd1", [], "n1")
+        cid2 = q.add("cmd2", [], "n2")
+
+        q.get_next_to_send()  # cmd1 becomes current
+        # cmd2 is still in the queue
+        assert q.pending_count() == 1
+
+        assert q.cancel(cid2) is True
+        assert q.pending_count() == 0
+
+    def test_cancel_nonexistent_returns_false(self):
+        """cancel() should return False for unknown command ID."""
+        q = CommandQueue(max_size=10)
+        assert q.cancel("nonexistent_id") is False
+
+    def test_cancel_unblocks_next_command(self):
+        """After cancelling current, next command should become sendable."""
+        q = CommandQueue(max_size=10)
+        cid1 = q.add("cmd1", [], "n1")
+        cid2 = q.add("cmd2", [], "n2")
+
+        q.get_next_to_send()  # cmd1 becomes current
+        q.mark_sent()
+
+        # Cancel cmd1 - should unblock cmd2
+        q.cancel(cid1)
+        p2 = q.get_next_to_send()
+        assert p2 is not None
+        assert p2.command_id == cid2
+
+    def test_cancel_empty_queue_returns_false(self):
+        """cancel() on empty queue should return False."""
+        q = CommandQueue(max_size=10)
+        assert q.cancel("any_id") is False
+
+    def test_cancel_already_acked_returns_false(self):
+        """cancel() on a command already ACK'd should return False."""
+        q = CommandQueue(max_size=10)
+        cid = q.add("ping", [], "n1")
+        q.get_next_to_send()
+        q.mark_sent()
+
+        q.ack_received(cid)
+        assert q.cancel(cid) is False

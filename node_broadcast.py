@@ -95,6 +95,8 @@ class CommandReceiver(threading.Thread):
         node_id: str,
         registry: CommandRegistry,
         receive_timeout: float = 0.5,
+        n2g_freq: float = 915.0,
+        g2n_freq: float = 915.5,
     ):
         """
         Initialize the command receiver.
@@ -104,7 +106,9 @@ class CommandReceiver(threading.Thread):
             radio_lock: Lock shared with broadcast loop for half-duplex coordination
             node_id: This node's ID for command filtering
             registry: Command registry for dispatching received commands
-            receive_timeout: Timeout for each receive attempt (default 0.1s)
+            receive_timeout: Timeout for each receive attempt (default 0.5s)
+            n2g_freq: Node-to-Gateway frequency for sensor broadcasts and ACKs
+            g2n_freq: Gateway-to-Node frequency for receiving commands
         """
         super().__init__(daemon=True, name="CommandReceiver")
         self._radio = radio
@@ -112,18 +116,25 @@ class CommandReceiver(threading.Thread):
         self._node_id = node_id
         self._registry = registry
         self._receive_timeout = receive_timeout
+        self._n2g_freq = n2g_freq
+        self._g2n_freq = g2n_freq
         self._running = False
 
     def run(self) -> None:
         """Run the receive loop."""
         self._running = True
-        logger.info("Command receiver started")
+        logger.info(
+            f"Command receiver started (G2N={self._g2n_freq} MHz, "
+            f"N2G={self._n2g_freq} MHz)"
+        )
 
         while self._running:
             try:
-                # Acquire lock for receive operation
+                # Switch to G2N to listen for commands, then back to N2G
                 with self._radio_lock:
+                    self._radio.set_frequency(self._g2n_freq)
                     packet = self._radio.receive(timeout=self._receive_timeout)
+                    self._radio.set_frequency(self._n2g_freq)
 
                 if packet is not None:
                     self._process_packet(packet)
@@ -447,10 +458,12 @@ def main():
         logger.error("No sensors could be initialized")
         sys.exit(1)
 
-    # Initialize radio
+    # Initialize radio with dual-channel support
     lora_config = config.get("lora", {})
+    n2g_freq = lora_config.get("n2g_frequency_mhz", 915.0)
+    g2n_freq = lora_config.get("g2n_frequency_mhz", 915.5)
     radio = RFM9xRadio(
-        frequency_mhz=lora_config.get("frequency_mhz", 915.0),
+        frequency_mhz=n2g_freq,  # Start on N2G (sensor broadcasts + ACKs)
         tx_power=lora_config.get("tx_power", 23),
         cs_pin=lora_config.get("cs_pin", 24),
         reset_pin=lora_config.get("reset_pin", 25),
@@ -552,6 +565,8 @@ def main():
                 node_id=node_id,
                 registry=command_registry,
                 receive_timeout=receive_timeout,
+                n2g_freq=n2g_freq,
+                g2n_freq=g2n_freq,
             )
             command_receiver.start()
             logger.info("Command receiver enabled")

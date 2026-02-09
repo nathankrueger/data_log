@@ -136,6 +136,8 @@ class CommandHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps(response).encode("utf-8"))
         else:
+            # Cancel the command so it doesn't block subsequent commands
+            self.server.command_queue.cancel(command_id)  # type: ignore
             self.send_response(504)
             self.send_header("Content-Type", "application/json")
             self.end_headers()

@@ -252,6 +252,33 @@ class CommandQueue:
         with self._lock:
             return self._current is not None
 
+    def cancel(self, command_id: str) -> bool:
+        """
+        Cancel a pending command, removing it from current or queue.
+
+        Used by wait-mode handlers to prevent a timed-out command from
+        blocking subsequent commands in the serial queue.
+
+        Args:
+            command_id: ID of the command to cancel
+
+        Returns:
+            True if the command was found and cancelled
+        """
+        with self._lock:
+            if self._current and self._current.command_id == command_id:
+                logger.info(f"Cancelled current command {command_id}")
+                self._current = None
+                return True
+            original_len = len(self._queue)
+            self._queue = deque(
+                p for p in self._queue if p.command_id != command_id
+            )
+            if len(self._queue) < original_len:
+                logger.info(f"Cancelled queued command {command_id}")
+                return True
+        return False
+
     def wait_for_response(self, command_id: str, timeout: float = 10.0) -> dict | None:
         """
         Wait for a command to complete and return its response payload.
