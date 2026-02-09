@@ -29,6 +29,7 @@ import argparse
 import json
 import logging
 import inspect
+import queue
 import signal
 import sys
 import threading
@@ -301,6 +302,14 @@ class CommandQueue:
 # =============================================================================
 
 
+@dataclass
+class PendingPost:
+    """A batch of readings waiting to be posted to the dashboard."""
+
+    datapoints: list[dict]
+    node_id: str
+
+
 class DashboardClient:
     """HTTP client for posting sensor data to the Pi5 dashboard."""
 
@@ -371,18 +380,89 @@ class DashboardClient:
 class SensorDataCollector:
     """
     Collects sensor readings from LoRa and local sources, posts to dashboard.
+
+    Uses a background thread to POST readings asynchronously, preventing
+    HTTP latency from blocking the LoRa transceiver thread.
     """
 
-    def __init__(self, gateway_id: str, dashboard_client: DashboardClient):
+    def __init__(
+        self,
+        gateway_id: str,
+        dashboard_client: DashboardClient,
+        max_queue_size: int = 100,
+    ):
+        """
+        Initialize the collector with async posting.
+
+        Args:
+            gateway_id: Gateway identifier
+            dashboard_client: Client for posting to dashboard
+            max_queue_size: Maximum pending posts before dropping oldest
+        """
         self._gateway_id = gateway_id
         self._dashboard_client = dashboard_client
-        self._lock = threading.Lock()
-        # Buffer readings for batch posting
-        self._pending_readings: list[dict] = []
+        self._max_queue_size = max_queue_size
+        self._post_queue: queue.Queue[PendingPost | None] = queue.Queue(
+            maxsize=max_queue_size
+        )
+        self._running = False
+        self._poster_thread: threading.Thread | None = None
 
-    def add_readings(self, node_id: str, readings: list[SensorReading], is_local: bool = False) -> None:
+    def start(self) -> None:
+        """Start the background poster thread."""
+        if self._running:
+            return
+        self._running = True
+        self._poster_thread = threading.Thread(
+            target=self._poster_loop, daemon=True, name="DashboardPoster"
+        )
+        self._poster_thread.start()
+        logger.info("Dashboard poster thread started")
+
+    def stop(self) -> None:
+        """Stop the background poster thread gracefully."""
+        if not self._running:
+            return
+        self._running = False
+        # Send sentinel to unblock the queue
+        try:
+            self._post_queue.put_nowait(None)
+        except queue.Full:
+            pass
+        if self._poster_thread and self._poster_thread.is_alive():
+            self._poster_thread.join(timeout=2.0)
+        logger.info("Dashboard poster thread stopped")
+
+    def _poster_loop(self) -> None:
+        """Background loop that posts readings to the dashboard."""
+        while self._running:
+            try:
+                pending = self._post_queue.get(timeout=1.0)
+                if pending is None:
+                    # Sentinel received, exit
+                    break
+                self._do_post(pending)
+            except queue.Empty:
+                continue
+            except Exception as e:
+                logger.error(f"Dashboard poster error: {e}")
+
+    def _do_post(self, pending: PendingPost) -> None:
+        """Actually post readings to dashboard (runs in poster thread)."""
+        success = self._dashboard_client.post_readings(pending.datapoints)
+        if success:
+            logger.info(f"Posted {len(pending.datapoints)} readings from '{pending.node_id}'")
+        else:
+            logger.warning(f"Failed to post {len(pending.datapoints)} readings from '{pending.node_id}'")
+
+    def add_readings(
+        self, node_id: str, readings: list[SensorReading], is_local: bool = False
+    ) -> None:
         """
-        Add sensor readings to the pending buffer and post to dashboard.
+        Queue sensor readings for async posting to dashboard.
+
+        This method returns immediately - actual posting happens in background.
+        If the queue is full, the oldest pending post is dropped.
 
         Args:
             node_id: ID of the node that produced the readings
@@ -408,13 +488,30 @@ class SensorDataCollector:
                 "tags": [node_id, reading.sensor_class.lower(), "local" if is_local else "lora"],
             })
 
-        # Post immediately
-        if datapoints:
-            success = self._dashboard_client.post_readings(datapoints)
-            if success:
-                logger.info(f"Posted {len(datapoints)} readings from '{node_id}'")
-            else:
-                logger.warning(f"Failed to post {len(datapoints)} readings from '{node_id}'")
+        if not datapoints:
+            return
+
+        pending = PendingPost(datapoints=datapoints, node_id=node_id)
+
+        # Try to enqueue; if full, drop oldest and retry
+        try:
+            self._post_queue.put_nowait(pending)
+        except queue.Full:
+            try:
+                # Drop oldest
+                dropped = self._post_queue.get_nowait()
+                if dropped:
+                    logger.warning(
+                        f"Dashboard queue full, dropped {len(dropped.datapoints)} "
+                        f"readings from '{dropped.node_id}'"
+                    )
+                self._post_queue.put_nowait(pending)
+            except queue.Empty:
+                # Race condition - queue was drained, retry
+                try:
+                    self._post_queue.put_nowait(pending)
+                except queue.Full:
+                    logger.error("Dashboard queue still full after drop, losing readings")
 
     @property
     def gateway_id(self) -> str:
@@ -768,6 +865,7 @@ def run_gateway(config: dict, verbose_logging: bool = False, cmd_debug: bool = F
     # Create dashboard client and collector
     dashboard_client = DashboardClient(dashboard_url, node_id)
     collector = SensorDataCollector(node_id, dashboard_client)
+    collector.start()
 
     logger.info(f"Gateway '{node_id}' posting to {dashboard_url}")
 
@@ -935,6 +1033,7 @@ def run_gateway(config: dict, verbose_logging: bool = False, cmd_debug: bool = F
             command_server.stop()
         if local_reader:
             local_reader.stop()
+        collector.stop()
         if screen_manager:
             screen_manager.close()
         if display_advance_button:
