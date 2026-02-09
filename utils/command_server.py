@@ -131,10 +131,12 @@ class CommandHandler(BaseHTTPRequestHandler):
         )
 
         if response is not None:
+            # Non-empty dict = payload from node; empty dict = ACK with no payload
+            result = response if response else {"status": "acked"}
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
-            self.wfile.write(json.dumps(response).encode("utf-8"))
+            self.wfile.write(json.dumps(result).encode("utf-8"))
         else:
             # Cancel the command so it doesn't block subsequent commands
             self.server.command_queue.cancel(command_id)  # type: ignore

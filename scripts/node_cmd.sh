@@ -106,8 +106,16 @@ if [ "$WAIT" = true ]; then
         exit 1
     fi
 
-    # Output response (includes HTTP code on last line for caller to parse)
-    echo "$RESPONSE"
+    # Parse response body and HTTP code
+    HTTP_CODE=$(echo "$RESPONSE" | tail -n 1)
+    BODY=$(echo "$RESPONSE" | sed '$d')
+
+    if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+        echo "$BODY"
+    else
+        echo "Error: HTTP $HTTP_CODE - $BODY" >&2
+        exit 1
+    fi
 else
     # POST endpoint: /command with JSON body
     # Build args JSON array - split comma-separated values

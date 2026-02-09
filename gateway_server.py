@@ -221,9 +221,10 @@ class CommandQueue:
                     f"Command '{retired.cmd}' ACK'd after "
                     f"{retired.retry_count} attempt(s)"
                 )
-                # Store response payload for retrieval
-                if payload is not None:
-                    self._completed_responses[command_id] = (time.time(), payload)
+                # Store response for retrieval (empty dict for no-payload ACKs)
+                self._completed_responses[command_id] = (
+                    time.time(), payload if payload is not None else {}
+                )
                 self._current = None
                 return retired
         return None
