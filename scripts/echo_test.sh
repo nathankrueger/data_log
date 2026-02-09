@@ -105,19 +105,16 @@ while true; do
     # Generate unique data: millisecond timestamp
     SEND_DATA=$(date '+%s%3N')
 
-    # Run echo command and capture output + HTTP status
-    OUTPUT=$("$SCRIPT_DIR/node_cmd.sh" -n "$NODE_ID" -c echo -a "$SEND_DATA" -w -g "$GATEWAY_HOST" -p "$GATEWAY_PORT" 2>&1)
-
-    # Last line is HTTP status code
-    HTTP_CODE=$(echo "$OUTPUT" | tail -n 1)
-    RESPONSE=$(echo "$OUTPUT" | sed '$d')
+    # Run echo command - node_cmd.sh -w prints JSON body on success (exit 0),
+    # or prints error to stderr and exits non-zero on failure
+    RESPONSE=$("$SCRIPT_DIR/node_cmd.sh" -n "$NODE_ID" -c echo -a "$SEND_DATA" -w -g "$GATEWAY_HOST" -p "$GATEWAY_PORT" 2>&1)
+    CMD_EXIT=$?
 
     TIMESTAMP=$(date '+%H:%M:%S')
 
-    if [ "$HTTP_CODE" = "200" ]; then
+    if [ $CMD_EXIT -eq 0 ]; then
         # Extract echoed data from response JSON
-        # Handles raw string ("value") or object ({"data":"value"})
-        ECHOED_DATA=$(echo "$RESPONSE" | jq -r 'if type == "object" then (.data // .echo // .payload // .) else . end' 2>/dev/null)
+        ECHOED_DATA=$(echo "$RESPONSE" | jq -r '.data // .echo // .payload // .' 2>/dev/null)
 
         if [ "$ECHOED_DATA" = "$SEND_DATA" ]; then
             SUCCESS=$((SUCCESS + 1))
@@ -128,7 +125,7 @@ while true; do
         fi
     else
         FAIL=$((FAIL + 1))
-        echo "[$TIMESTAMP] #$ITERATION: FAIL (HTTP $HTTP_CODE) - $RESPONSE"
+        echo "[$TIMESTAMP] #$ITERATION: FAIL - $RESPONSE"
     fi
 
     # Check if we've reached the count limit
