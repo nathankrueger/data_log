@@ -535,7 +535,7 @@ def main():
     def handle_echo(cmd: str, args: list[str]) -> dict | None:
         data = args[0] if args else ""
         logger.info(f"[HANDLER] Echo: {data}")
-        return {"data": data}
+        return {"r": data}
 
     command_registry.register("ping", handle_ping, CommandScope.BROADCAST, early_ack=True)
     command_registry.register("ping", handle_private_ping, CommandScope.PRIVATE, early_ack=True)
