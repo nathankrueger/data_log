@@ -62,7 +62,6 @@ from utils.protocol import (
     make_sensor_id,
     parse_ack_packet,
     parse_lora_packet,
-    verify_crc,
 )
 
 # Configure logging
@@ -644,28 +643,9 @@ class LoRaTransceiver(threading.Thread):
         receive_time = time.time()
         rssi = self._radio.get_last_rssi()
 
-        # Diagnostic: log raw packet when a command is pending
-        if self._command_queue.has_current():
-            try:
-                raw_json = json.loads(packet.decode("utf-8"))
-                has_p = "p" in raw_json
-                pkt_type = raw_json.get("t", "?")
-                logger.info(
-                    f"[ACK_DIAG] Raw packet while cmd pending: type={pkt_type} "
-                    f"has_payload={has_p} len={len(packet)} rssi={rssi}"
-                )
-                if pkt_type == "ack":
-                    logger.info(f"[ACK_DIAG] ACK content: {packet.decode('utf-8').strip()}")
-            except Exception:
-                pass
-
         # First, check if it's an ACK packet
         ack = parse_ack_packet(packet)
         if ack:
-            logger.info(
-                f"[ACK_DIAG] Parsed ACK: id={ack.command_id} node={ack.node_id} "
-                f"payload={ack.payload!r}"
-            )
             retired = self._command_queue.ack_received(ack.command_id, payload=ack.payload)
             if retired:
                 rtt_ms = (
@@ -686,19 +666,6 @@ class LoRaTransceiver(threading.Thread):
                     ack.command_id, ack.node_id, rssi,
                 )
             return
-
-        # Diagnostic: if packet looks like ACK but failed parse, log why
-        if self._command_queue.has_current():
-            try:
-                raw = json.loads(packet.decode("utf-8"))
-                if raw.get("t") == "ack":
-                    crc_ok = verify_crc(raw, crc_key="c")
-                    logger.warning(
-                        f"[ACK_DIAG] ACK failed parse! crc_ok={crc_ok} "
-                        f"keys={sorted(raw.keys())} raw={packet.decode('utf-8').strip()}"
-                    )
-            except Exception:
-                pass
 
         # Otherwise, process as sensor data
         result = parse_lora_packet(packet)
