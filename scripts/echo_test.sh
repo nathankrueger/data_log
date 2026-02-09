@@ -114,7 +114,7 @@ while true; do
 
     if [ $CMD_EXIT -eq 0 ]; then
         # Extract echoed data from response JSON
-        ECHOED_DATA=$(echo "$RESPONSE" | jq -r '.data // .echo // .payload // .' 2>/dev/null)
+        ECHOED_DATA=$(echo "$RESPONSE" | jq -r '.r // .data // .echo // .payload' 2>/dev/null)
 
         if [ "$ECHOED_DATA" = "$SEND_DATA" ]; then
             SUCCESS=$((SUCCESS + 1))
