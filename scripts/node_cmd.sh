@@ -80,21 +80,45 @@ if [ "$WAIT" = true ]; then
     # GET endpoint: /{cmd}/{node_id}?a=arg1&a=arg2
     URL="http://$GATEWAY_HOST:$GATEWAY_PORT/$COMMAND/$NODE_ID"
 
-    # Build query string for args
+    # Build query string for args - split comma-separated values
     QUERY=""
-    for arg in "${ARGS[@]}"; do
-        if [ -z "$QUERY" ]; then
-            QUERY="?a=$(printf '%s' "$arg" | jq -sRr @uri)"
-        else
-            QUERY="$QUERY&a=$(printf '%s' "$arg" | jq -sRr @uri)"
-        fi
-    done
+    if [ ${#ARGS[@]} -gt 0 ]; then
+        ALL_ARGS=$(IFS=,; echo "${ARGS[*]}")
+        IFS=',' read -ra ARG_ARRAY <<< "$ALL_ARGS"
+        for arg in "${ARG_ARRAY[@]}"; do
+            if [ -z "$QUERY" ]; then
+                QUERY="?a=$(printf '%s' "$arg" | jq -sRr @uri)"
+            else
+                QUERY="$QUERY&a=$(printf '%s' "$arg" | jq -sRr @uri)"
+            fi
+        done
+    fi
 
-    curl -s -w "\n%{http_code}" "$URL$QUERY"
+    # Capture stderr separately to get clean error messages
+    STDERR_FILE=$(mktemp)
+    RESPONSE=$(curl -sS --max-time 10 -w "\n%{http_code}" "$URL$QUERY" 2>"$STDERR_FILE")
+    CURL_EXIT=$?
+    STDERR=$(cat "$STDERR_FILE")
+    rm -f "$STDERR_FILE"
+
+    if [ $CURL_EXIT -ne 0 ]; then
+        echo "Error: $STDERR" >&2
+        exit 1
+    fi
+
+    # Output response (includes HTTP code on last line for caller to parse)
+    echo "$RESPONSE"
 else
     # POST endpoint: /command with JSON body
-    # Build args JSON array
-    ARGS_JSON=$(printf '%s\n' "${ARGS[@]}" | jq -R . | jq -s .)
+    # Build args JSON array - split comma-separated values
+    if [ ${#ARGS[@]} -gt 0 ]; then
+        # Join all -a args with commas, then split by comma
+        ALL_ARGS=$(IFS=,; echo "${ARGS[*]}")
+        IFS=',' read -ra ARG_ARRAY <<< "$ALL_ARGS"
+        ARGS_JSON=$(printf '%s\n' "${ARG_ARRAY[@]}" | jq -R . | jq -s .)
+    else
+        ARGS_JSON="[]"
+    fi
 
     JSON_BODY=$(jq -n \
         --arg cmd "$COMMAND" \
@@ -102,8 +126,30 @@ else
         --arg node_id "$NODE_ID" \
         '{cmd: $cmd, args: $args, node_id: $node_id}')
 
-    curl -s -X POST "http://$GATEWAY_HOST:$GATEWAY_PORT/command" \
+    # Capture stderr separately to get clean error messages
+    STDERR_FILE=$(mktemp)
+    RESPONSE=$(curl -sS -X POST "http://$GATEWAY_HOST:$GATEWAY_PORT/command" \
         -H "Content-Type: application/json" \
         -d "$JSON_BODY" \
-        --max-time 5
+        --max-time 5 \
+        -w "\n%{http_code}" 2>"$STDERR_FILE")
+    CURL_EXIT=$?
+    STDERR=$(cat "$STDERR_FILE")
+    rm -f "$STDERR_FILE"
+
+    if [ $CURL_EXIT -ne 0 ]; then
+        echo "Error: $STDERR" >&2
+        exit 1
+    fi
+
+    # Parse response body and HTTP code
+    HTTP_CODE=$(echo "$RESPONSE" | tail -n 1)
+    BODY=$(echo "$RESPONSE" | sed '$d')
+
+    if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+        echo "$BODY"
+    else
+        echo "Error: HTTP $HTTP_CODE - $BODY" >&2
+        exit 1
+    fi
 fi
