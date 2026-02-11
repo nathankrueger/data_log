@@ -1,51 +1,46 @@
 #!/bin/bash
-#
-# Gateway parameter getter/setter via HTTP API.
-#
-# Usage: gateway_cmd.sh [-l | -g <param> | -s <param> <value> | -r | -S] [-H <host>] [-p <port>]
-#
-# Options:
-#   -l            List all gateway parameters
-#   -g <param>    Get single parameter value
-#   -s <param>    Set/stage parameter (requires value argument)
-#   -r            Apply staged radio config (rcfg_radio, no persist)
-#   -S            Save all params to config file (savecfg)
-#   -H <host>     Gateway host (default: $GATEWAY_HOST or localhost)
-#   -p <port>     Gateway port (default: $GATEWAY_PORT or 5001)
-#   -h            Show this help
-#
-# Radio params (sf, bw, txpwr, n2g_freq, g2n_freq) use staged config:
-#   -s stages the value without applying to hardware
-#   -r applies staged radio params to hardware (no persist)
-#   -S persists ALL current params to config file
-#
-# Command_server params (max_retries, initial_retry_ms, etc.) apply immediately
-# but do NOT persist until -S is called.
-#
-# Parameters:
-#   sf                Spreading factor (7-12) [staged]
-#   bw                Bandwidth code (0=125kHz, 1=250kHz, 2=500kHz) [staged]
-#   txpwr             TX power in dBm (5-23) [staged]
-#   n2g_freq          Node-to-gateway frequency in MHz [staged]
-#   g2n_freq          Gateway-to-node frequency in MHz [staged]
-#   max_queue_size    Command queue size [immediate]
-#   max_retries       Max command retries [immediate]
-#   initial_retry_ms  Initial retry delay ms [immediate]
-#   retry_multiplier  Backoff multiplier [immediate]
-#   max_retry_ms      Max retry delay ms [immediate]
-#   discovery_retries Discovery retry count [immediate]
-#
-# Examples:
-#   gateway_cmd.sh -l                    # List all params
-#   gateway_cmd.sh -g sf                 # Get spreading factor
-#   gateway_cmd.sh -s sf 9               # Stage spreading factor to 9
-#   gateway_cmd.sh -r                    # Apply staged radio params (no persist)
-#   gateway_cmd.sh -S                    # Persist all params to config file
-#   gateway_cmd.sh -s max_retries 5      # Set max_retries (immediate, no persist)
-#   gateway_cmd.sh -r && gateway_cmd.sh -S  # Apply radio AND persist
 
 usage() {
-    head -n 42 "$0" | tail -n 41 | sed 's/^# //' | sed 's/^#//'
+    cat <<'EOF'
+Gateway parameter getter/setter via HTTP API.
+
+Usage: gateway_cmd.sh [-l | -G | -g <param> | -s <param> <value>] [-r] [-S] [-H <host>] [-p <port>]
+
+Options:
+  -l            List all gateway parameters (raw JSON)
+  -G            Get all gateway parameters (formatted)
+  -g <param>    Get single parameter value
+  -s <param>    Set/stage parameter (requires value argument)
+  -r            Apply staged radio config (rcfg_radio, no persist)
+  -S            Save all params to config file (savecfg)
+  -H <host>     Gateway host (default: $GATEWAY_HOST or localhost)
+  -p <port>     Gateway port (default: $GATEWAY_PORT or 5001)
+  -h            Show this help
+
+The -r and -S flags can be combined with each other and with other operations.
+Order of execution: get/set operation first, then -r, then -S.
+
+Radio params (sf, bw, txpwr, n2g_freq, g2n_freq) use staged config:
+  -s stages the value without applying to hardware
+  -r applies staged radio params to hardware (no persist)
+  -S persists ALL current params to config file
+
+Command_server params (max_retries, initial_retry_ms, etc.) apply immediately
+but do NOT persist until -S is called.
+
+Use -G to see available parameters.
+
+Examples:
+  gateway_cmd.sh -l                    # List all params (raw JSON)
+  gateway_cmd.sh -G                    # Get all params (formatted)
+  gateway_cmd.sh -g sf                 # Get spreading factor
+  gateway_cmd.sh -s sf 9               # Stage spreading factor to 9
+  gateway_cmd.sh -s sf 9 -r -S         # Stage SF, apply, and persist
+  gateway_cmd.sh -r                    # Apply staged radio params (no persist)
+  gateway_cmd.sh -S                    # Persist all params to config file
+  gateway_cmd.sh -r -S                 # Apply radio AND persist
+  gateway_cmd.sh -s max_retries 5      # Set max_retries (immediate, no persist)
+EOF
     exit 1
 }
 
@@ -54,11 +49,16 @@ PARAM=""
 VALUE=""
 OPT_HOST=""
 OPT_PORT=""
+DO_RCFG=0
+DO_SAVE=0
 
-while getopts "lg:s:rSH:p:h" opt; do
+while getopts "lGg:s:rSH:p:h" opt; do
     case $opt in
         l)
             MODE="list"
+            ;;
+        G)
+            MODE="getall"
             ;;
         g)
             MODE="get"
@@ -69,10 +69,10 @@ while getopts "lg:s:rSH:p:h" opt; do
             PARAM="$OPTARG"
             ;;
         r)
-            MODE="rcfg"
+            DO_RCFG=1
             ;;
         S)
-            MODE="savecfg"
+            DO_SAVE=1
             ;;
         H)
             OPT_HOST="$OPTARG"
@@ -92,9 +92,9 @@ done
 # Shift past options to get positional args (value for -s)
 shift $((OPTIND - 1))
 
-# Must specify a mode
-if [ -z "$MODE" ]; then
-    echo "Error: specify -l, -g <param>, -s <param> <value>, -r, or -S"
+# Must specify at least one action
+if [ -z "$MODE" ] && [ $DO_RCFG -eq 0 ] && [ $DO_SAVE -eq 0 ]; then
+    echo "Error: specify -l, -G, -g <param>, -s <param> <value>, -r, or -S"
     usage
 fi
 
@@ -151,9 +151,17 @@ do_curl() {
     fi
 }
 
+# Execute primary mode first (if any)
 case "$MODE" in
     list)
         do_curl GET "$BASE_URL/gateway/params"
+        ;;
+    getall)
+        # Get all params and format them nicely
+        RESULT=$(do_curl GET "$BASE_URL/gateway/params")
+        if [ $? -eq 0 ]; then
+            echo "$RESULT" | jq -r 'to_entries | .[] | "\(.key): \(.value)"'
+        fi
         ;;
     get)
         do_curl GET "$BASE_URL/gateway/param/$PARAM"
@@ -169,10 +177,14 @@ case "$MODE" in
         fi
         do_curl PUT "$BASE_URL/gateway/param/$PARAM" "$JSON_BODY"
         ;;
-    rcfg)
-        do_curl POST "$BASE_URL/gateway/rcfg_radio" "{}"
-        ;;
-    savecfg)
-        do_curl POST "$BASE_URL/gateway/savecfg" "{}"
-        ;;
 esac
+
+# Apply radio config if requested
+if [ $DO_RCFG -eq 1 ]; then
+    do_curl POST "$BASE_URL/gateway/rcfg_radio" "{}"
+fi
+
+# Save config if requested
+if [ $DO_SAVE -eq 1 ]; then
+    do_curl POST "$BASE_URL/gateway/savecfg" "{}"
+fi
