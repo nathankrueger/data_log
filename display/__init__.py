@@ -10,10 +10,10 @@ from .base import (
     OffPage,
     ScreenManager,
     ScreenPage,
-    SSD1306Display,
     _format_duration,
     _get_ip_address,
 )
+from .ssd1306 import SSD1306Display
 from .gateway import GatewayLocalSensors, LastPacketPage, SystemInfoPage
 from .node import ArducamOCRPage, NodeInfoPage, SensorValuesPage
 

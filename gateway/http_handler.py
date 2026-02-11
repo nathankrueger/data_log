@@ -186,6 +186,14 @@ class CommandHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         """Handle POST requests."""
+        if self.path == "/gateway/rcfg_radio":
+            self._handle_rcfg_radio()
+            return
+
+        if self.path == "/gateway/savecfg":
+            self._handle_savecfg()
+            return
+
         if self.path != "/command":
             self.send_error(404, "Not Found")
             return
@@ -519,6 +527,85 @@ class CommandHandler(BaseHTTPRequestHandler):
         self.end_headers()
         self.wfile.write(json.dumps({name: new_value}).encode("utf-8"))
 
+    def _handle_rcfg_radio(self) -> None:
+        """Handle POST /gateway/rcfg_radio - apply staged radio config (no persist)."""
+        gateway_state = getattr(self.server, "gateway_state", None)
+        if gateway_state is None or gateway_state.radio_state is None:
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "error": "unavailable",
+                "message": "Radio state not initialized",
+            }).encode("utf-8"))
+            return
+
+        radio_state = gateway_state.radio_state
+        applied = radio_state.apply_pending()
+
+        if not applied:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"r": "nothing"}).encode("utf-8"))
+            return
+
+        # NO persist here - savecfg handles persistence
+        logger.info(f"Gateway rcfg_radio applied: {', '.join(applied)}")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"r": ", ".join(applied)}).encode("utf-8"))
+
+    def _handle_savecfg(self) -> None:
+        """Handle POST /gateway/savecfg - persist ALL current params to config file."""
+        gateway_state = getattr(self.server, "gateway_state", None)
+        registry = getattr(self.server, "gateway_params", None)
+        if gateway_state is None or registry is None:
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "error": "unavailable",
+                "message": "Gateway state not initialized",
+            }).encode("utf-8"))
+            return
+
+        config_path = gateway_state.config_path
+        if not config_path:
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "error": "unavailable",
+                "message": "No config path configured",
+            }).encode("utf-8"))
+            return
+
+        # Build updates from current values of all writable params
+        updates = {}
+        for name, p in registry._params.items():
+            if p.config_key and p.setter is not None:  # writable params with config_key
+                val = p.getter()  # Current runtime value
+                # Convert for persistence
+                if name == "bw":
+                    val = BW_HZ_MAP.get(val, val)  # Store Hz, not code
+                updates[p.config_key] = val
+
+        if not updates:
+            self.send_response(200)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({"r": "unchanged"}).encode("utf-8"))
+            return
+
+        update_config_file(config_path, updates)
+        logger.info(f"Gateway savecfg: persisted {len(updates)} params")
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"r": "saved"}).encode("utf-8"))
+
     def log_message(self, format: str, *args) -> None:
         """Suppress default HTTP logging, use our logger instead."""
         pass
@@ -547,10 +634,6 @@ class CommandServer(threading.Thread):
         port: int,
         command_queue,
         discovery_config: dict | None = None,
-        radio: "Radio | None" = None,
-        config: dict | None = None,
-        config_path: str | None = None,
-        node_id: str = "",
     ):
         """
         Initialize the command server.
@@ -559,10 +642,6 @@ class CommandServer(threading.Thread):
             port: TCP port to listen on
             command_queue: CommandQueue for reliable command delivery
             discovery_config: Config for node discovery (retries, backoff params)
-            radio: Radio instance for gateway parameter access
-            config: Gateway configuration dict
-            config_path: Path to config file for persistence
-            node_id: Gateway node ID
         """
         super().__init__(daemon=True, name="CommandServer")
         self.port = port
@@ -571,15 +650,9 @@ class CommandServer(threading.Thread):
         self.transceiver = None  # Set later via set_transceiver()
         self._server: HTTPServer | None = None
 
-        # Gateway parameter registry
-        self.gateway_params: GatewayParamRegistry | None = None
-        if radio is not None and config is not None and config_path is not None:
-            self.gateway_params = GatewayParamRegistry(
-                radio=radio,
-                config=config,
-                config_path=config_path,
-                node_id=node_id,
-            )
+        # Set later via set_gateway_state()
+        self.gateway_state = None
+        self.gateway_params = None
 
     def set_transceiver(self, transceiver) -> None:
         """Set the transceiver reference for discovery support."""
@@ -587,21 +660,21 @@ class CommandServer(threading.Thread):
         if self._server:
             self._server.transceiver = transceiver  # type: ignore
 
-    def set_gateway_params(
-        self,
-        radio: "Radio",
-        config: dict,
-        config_path: str,
-        node_id: str,
-    ) -> None:
-        """Set up gateway parameter registry (call after radio is initialized)."""
-        self.gateway_params = GatewayParamRegistry(
-            radio=radio,
-            config=config,
-            config_path=config_path,
-            node_id=node_id,
-        )
+    def set_gateway_state(self, gateway_state) -> None:
+        """
+        Set up gateway state and parameter registry.
+
+        Call after radio and command_queue are initialized.
+        Uses RadioState for staged radio config.
+        """
+        from gateway.params import GatewayParamRegistry, build_gateway_params
+
+        self.gateway_state = gateway_state
+        params = build_gateway_params(gateway_state)
+        self.gateway_params = GatewayParamRegistry(params, gateway_state.config_path)
+
         if self._server:
+            self._server.gateway_state = gateway_state  # type: ignore
             self._server.gateway_params = self.gateway_params  # type: ignore
 
     def run(self) -> None:
@@ -610,7 +683,9 @@ class CommandServer(threading.Thread):
         self._server.command_queue = self.command_queue  # type: ignore
         self._server.discovery_config = self.discovery_config  # type: ignore
         self._server.transceiver = self.transceiver  # type: ignore
+        self._server.gateway_state = getattr(self, "gateway_state", None)  # type: ignore
         self._server.gateway_params = self.gateway_params  # type: ignore
+        self._server.config_path = getattr(self.gateway_state, "config_path", "") if self.gateway_state else ""  # type: ignore
         logger.info(f"Command server listening on port {self.port}")
 
         try:

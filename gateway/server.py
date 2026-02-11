@@ -44,6 +44,7 @@ from urllib.error import URLError, HTTPError
 from gpiozero import Button
 from utils.led import RgbLed
 from utils.gateway_state import GatewayState
+from utils.radio_state import RadioState
 from gateway.http_handler import CommandServer
 from display import (
     GatewayLocalSensors,
@@ -124,6 +125,7 @@ class CommandQueue:
         initial_retry_ms: int = 500,
         max_retry_ms: int = 5000,
         retry_multiplier: float = 1.5,
+        discovery_retries: int = 30,
     ):
         """
         Initialize the command queue.
@@ -134,6 +136,7 @@ class CommandQueue:
             initial_retry_ms: Initial retry delay in milliseconds
             max_retry_ms: Maximum retry delay (backoff cap)
             retry_multiplier: Backoff multiplier per retry (default 1.5)
+            discovery_retries: Retry count for discovery operations
         """
         self._queue: deque[PendingCommand] = deque()
         self._max_size = max_size
@@ -143,8 +146,59 @@ class CommandQueue:
         self._initial_retry_ms = initial_retry_ms
         self._max_retry_ms = max_retry_ms
         self._retry_multiplier = retry_multiplier
+        self._discovery_retries = discovery_retries
         self._completed_responses: dict[str, tuple[float, dict]] = {}
         self._response_ttl = 60.0  # seconds to keep completed responses
+
+    # ─── Runtime Parameter Properties ───────────────────────────────────────
+
+    @property
+    def max_size(self) -> int:
+        return self._max_size
+
+    @max_size.setter
+    def max_size(self, val: int) -> None:
+        self._max_size = val
+
+    @property
+    def max_retries(self) -> int:
+        return self._max_retries
+
+    @max_retries.setter
+    def max_retries(self, val: int) -> None:
+        self._max_retries = val
+
+    @property
+    def initial_retry_ms(self) -> int:
+        return self._initial_retry_ms
+
+    @initial_retry_ms.setter
+    def initial_retry_ms(self, val: int) -> None:
+        self._initial_retry_ms = val
+
+    @property
+    def max_retry_ms(self) -> int:
+        return self._max_retry_ms
+
+    @max_retry_ms.setter
+    def max_retry_ms(self, val: int) -> None:
+        self._max_retry_ms = val
+
+    @property
+    def retry_multiplier(self) -> float:
+        return self._retry_multiplier
+
+    @retry_multiplier.setter
+    def retry_multiplier(self, val: float) -> None:
+        self._retry_multiplier = val
+
+    @property
+    def discovery_retries(self) -> int:
+        return self._discovery_retries
+
+    @discovery_retries.setter
+    def discovery_retries(self, val: int) -> None:
+        self._discovery_retries = val
 
     def add(self, cmd: str, args: list[str], node_id: str) -> str | None:
         """
@@ -1013,8 +1067,10 @@ def run_gateway(
         logger.error("dashboard_url not configured")
         sys.exit(1)
 
-    # Create shared state for display
+    # Create shared state for gateway components
     gateway_state = GatewayState()
+    gateway_state.node_id = node_id
+    gateway_state.config_path = config_path
     gateway_state.dashboard_url = dashboard_url
 
     # Create dashboard client and collector
@@ -1052,7 +1108,9 @@ def run_gateway(
         initial_retry_ms=command_config.get("initial_retry_ms", 500),
         max_retry_ms=command_config.get("max_retry_ms", 5000),
         retry_multiplier=command_config.get("retry_multiplier", 1.5),
+        discovery_retries=command_config.get("discovery_retries", 30),
     )
+    gateway_state.command_queue = command_queue
 
     # Build discovery config from command_server section
     discovery_config = {
@@ -1093,6 +1151,15 @@ def run_gateway(
                 reset_pin=lora_config.get("reset_pin", 25),
             )
             radio.init()
+
+            # Create RadioState (shared class with nodes)
+            radio_state = RadioState(
+                radio=radio,
+                n2g_freq=n2g_freq,
+                g2n_freq=g2n_freq,
+            )
+            gateway_state.radio_state = radio_state
+
             lora_transceiver = LoRaTransceiver(
                 radio,
                 collector,
@@ -1110,15 +1177,10 @@ def run_gateway(
             logger.info(
                 f"LoRa transceiver enabled: N2G={n2g_freq} MHz, G2N={g2n_freq} MHz"
             )
-            # Wire transceiver and radio params to command server
+            # Wire transceiver and params to command server
             if command_server:
                 command_server.set_transceiver(lora_transceiver)
-                command_server.set_gateway_params(
-                    radio=radio,
-                    config=config,
-                    config_path=config_path,
-                    node_id=node_id,
-                )
+                command_server.set_gateway_state(gateway_state)
         except Exception as e:
             logger.error(f"Failed to initialize LoRa: {e}")
             logger.info("Continuing without LoRa transceiver")

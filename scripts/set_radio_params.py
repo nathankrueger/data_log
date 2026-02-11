@@ -87,6 +87,19 @@ def http_put_json(url: str, data: dict, timeout: float = 15.0) -> dict | None:
         return None
 
 
+def http_post_json(url: str, data: dict, timeout: float = 15.0) -> dict | None:
+    """Make HTTP POST request with JSON body and return JSON response."""
+    try:
+        body = json.dumps(data).encode("utf-8")
+        req = Request(url, data=body, method="POST")
+        req.add_header("Content-Type", "application/json")
+        with urlopen(req, timeout=timeout) as response:
+            return json.loads(response.read().decode("utf-8"))
+    except (HTTPError, URLError, json.JSONDecodeError) as e:
+        print(f"  Error: {e}")
+        return None
+
+
 def discover_nodes(gateway_url: str, retries: int = 30) -> list[str] | None:
     """Run discovery and return sorted node list, or None on failure."""
     url = f"{gateway_url}/discover?retries={retries}"
@@ -226,6 +239,18 @@ def get_gateway_param(gateway_url: str, param: str) -> int | None:
     if result and param in result:
         return result[param]
     return None
+
+
+def send_gateway_rcfg_radio(gateway_url: str) -> dict | None:
+    """Send rcfg_radio to apply staged radio params on gateway."""
+    url = f"{gateway_url}/gateway/rcfg_radio"
+    return http_post_json(url, {}, timeout=10.0)
+
+
+def send_gateway_savecfg(gateway_url: str) -> dict | None:
+    """Send savecfg to persist all current params on gateway."""
+    url = f"{gateway_url}/gateway/savecfg"
+    return http_post_json(url, {}, timeout=10.0)
 
 
 def format_param_change(param: str, before: int | None, after: int | None) -> str:
@@ -572,21 +597,53 @@ def main():
         print(f"\nUpdating gateway ({success_rate:.0%} > 50% threshold)...")
         gateway_success = True
 
+        # Stage all radio params first
+        print("  Staging params...")
         for param, value in params_to_set:
-            print(f"  {param}={value}: ", end="", flush=True)
+            print(f"    {param}={value}: ", end="", flush=True)
             if set_gateway_param(gateway_url, param, value):
-                # Verify
+                # Verify staged value
                 actual = get_gateway_param(gateway_url, param)
-                gateway_after[param] = actual
                 if actual == value:
-                    print("OK")
+                    print("staged")
                 else:
                     print(f"VERIFY FAILED (expected {value}, got {actual})")
                     gateway_success = False
             else:
-                gateway_after[param] = gateway_before.get(param)
                 print("FAILED")
                 gateway_success = False
+
+        # Apply staged params with rcfg_radio
+        if gateway_success:
+            print("  Applying (rcfg_radio)...", end=" ", flush=True)
+            result = send_gateway_rcfg_radio(gateway_url)
+            if result and "r" in result:
+                print(f"OK ({result['r']})")
+                # Read back values after apply
+                for param, _ in params_to_set:
+                    gateway_after[param] = get_gateway_param(gateway_url, param)
+            elif result and "error" in result:
+                print(f"FAILED ({result['error']})")
+                gateway_success = False
+            else:
+                print("FAILED (no response)")
+                gateway_success = False
+        else:
+            print("  Skipping rcfg_radio (staging failed)")
+
+        # Persist all params with savecfg
+        if gateway_success:
+            print("  Persisting (savecfg)...", end=" ", flush=True)
+            result = send_gateway_savecfg(gateway_url)
+            if result and "r" in result:
+                print(f"OK ({result['r']})")
+            elif result and "error" in result:
+                print(f"FAILED ({result['error']})")
+                # Don't mark as failed - radio is already applied
+                print("    Warning: radio applied but not persisted to config")
+            else:
+                print("FAILED (no response)")
+                print("    Warning: radio applied but not persisted to config")
 
         gateway_updated = gateway_success
     else:
