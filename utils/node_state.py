@@ -12,6 +12,8 @@ import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
+from utils.radio_state import RadioState
+
 if TYPE_CHECKING:
     from radio import RFM9xRadio
 
@@ -36,20 +38,52 @@ class NodeState:
 
     Required fields (must be provided at construction):
         node_id: This node's identifier string
-        radio: Radio instance for TX/RX operations
+        radio_state: RadioState encapsulating radio hardware and frequencies
+        config_path: Path to config file for persistence
 
     Optional fields (have defaults):
         start_time, broadcast_count, sensor_readings, ocr_result, ocr_in_progress
+
+    Backwards-compatible properties:
+        radio, n2g_freq, g2n_freq delegate to radio_state
     """
 
     node_id: str
-    radio: RFM9xRadio
+    radio_state: RadioState
+    config_path: str
     start_time: float = field(default_factory=time.time)
     broadcast_count: int = 0
     sensor_readings: list[SensorReadingInfo] = field(default_factory=list)
     ocr_result: str | None = None  # None = never run, str = result or "No result found"
     ocr_in_progress: bool = False
     _lock: threading.Lock = field(default_factory=threading.Lock)
+
+    # ─── Backwards-Compatible Properties ────────────────────────────────────
+
+    @property
+    def radio(self) -> RFM9xRadio:
+        """Get radio hardware instance (delegates to radio_state)."""
+        return self.radio_state.radio
+
+    @property
+    def n2g_freq(self) -> float:
+        """Get N2G frequency in MHz (delegates to radio_state)."""
+        return self.radio_state.n2g_freq
+
+    @n2g_freq.setter
+    def n2g_freq(self, value: float) -> None:
+        """Set N2G frequency in MHz (delegates to radio_state)."""
+        self.radio_state.n2g_freq = value
+
+    @property
+    def g2n_freq(self) -> float:
+        """Get G2N frequency in MHz (delegates to radio_state)."""
+        return self.radio_state.g2n_freq
+
+    @g2n_freq.setter
+    def g2n_freq(self, value: float) -> None:
+        """Set G2N frequency in MHz (delegates to radio_state)."""
+        self.radio_state.g2n_freq = value
 
     def update_sensor_readings(
         self, readings: list[tuple[str, float, str, str]]

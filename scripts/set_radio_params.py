@@ -1,6 +1,6 @@
 #!/usr/bin/env python3
 """
-Set radio parameters (SF, BW) for all discovered nodes and the gateway.
+Set radio parameters (SF, BW, frequencies) for all discovered nodes and the gateway.
 
 Performs reliable discovery validation before making changes, then updates
 all nodes before finally updating the gateway (to maintain communication).
@@ -13,12 +13,16 @@ Usage:
     set_radio_params.py --sf 9              # Change SF only
     set_radio_params.py --bw 1              # Change BW only (0=125kHz, 1=250kHz, 2=500kHz)
     set_radio_params.py --sf 9 --bw 1       # Change both
+    set_radio_params.py --n2gfreq 915.0     # Change N2G frequency (MHz)
+    set_radio_params.py --g2nfreq 915.5     # Change G2N frequency (MHz)
     set_radio_params.py --sf 9 --dry-run    # Show what would be changed
     set_radio_params.py --sf 9 --nodes node1,node2  # Update specific nodes (no discovery)
 
 Options:
     --sf N          Spreading factor (7-12)
     --bw N          Bandwidth code (0=125kHz, 1=250kHz, 2=500kHz)
+    --n2gfreq F     Node-to-Gateway frequency in MHz (902-928)
+    --g2nfreq F     Gateway-to-Node frequency in MHz (902-928)
     --nodes LIST    Comma-separated list of node IDs (skips discovery, uses echo to verify)
     --dry-run       Show what would be changed without making changes
     -g, --gateway   Gateway host (default: $GATEWAY_HOST or localhost)
@@ -44,6 +48,17 @@ from urllib.request import Request, urlopen
 
 # Bandwidth code to Hz mapping (matches node convention)
 BW_NAMES = {0: "125kHz", 1: "250kHz", 2: "500kHz"}
+
+
+def format_param_value(param: str, value: int) -> str:
+    """Format a parameter value for display."""
+    if param == "bw":
+        return f"{param}={value} ({BW_NAMES.get(value, '?')})"
+    elif param in ("n2gfreq", "g2nfreq"):
+        # Display in MHz for readability
+        return f"{param}={value / 1e6:.3f}MHz"
+    else:
+        return f"{param}={value}"
 
 # Node status types
 NodeStatus = Literal["PENDING", "SUCCESS", "PARTIAL", "FAILED"]
@@ -198,6 +213,12 @@ def set_gateway_param(gateway_url: str, param: str, value: int) -> bool:
     return False
 
 
+def send_rcfg_radio(gateway_url: str, node_id: str) -> dict | None:
+    """Send rcfg_radio command to apply staged params on a node."""
+    url = f"{gateway_url}/rcfg_radio/{node_id}"
+    return http_get(url, timeout=15.0)
+
+
 def get_gateway_param(gateway_url: str, param: str) -> int | None:
     """Get a gateway parameter. Returns value or None."""
     url = f"{gateway_url}/gateway/param/{param}"
@@ -209,15 +230,15 @@ def get_gateway_param(gateway_url: str, param: str) -> int | None:
 
 def format_param_change(param: str, before: int | None, after: int | None) -> str:
     """Format a parameter change for display."""
-    if before is None:
-        before_str = "?"
-    else:
-        before_str = str(before)
-    if after is None:
-        after_str = "?"
-    else:
-        after_str = str(after)
-    return f"{param}: {before_str}\u2192{after_str}"
+    # Format value based on param type
+    def fmt(v: int | None) -> str:
+        if v is None:
+            return "?"
+        if param in ("n2gfreq", "g2nfreq"):
+            return f"{v / 1e6:.3f}MHz"
+        return str(v)
+
+    return f"{param}: {fmt(before)}\u2192{fmt(after)}"
 
 
 def print_report(
@@ -236,8 +257,7 @@ def print_report(
 
     # Target parameters
     param_desc = ", ".join(
-        f"{p}={v}" + (f" ({BW_NAMES[v]})" if p == "bw" else "")
-        for p, v in params_to_set
+        format_param_value(p, v) for p, v in params_to_set
     )
     print(f"Target: {param_desc}")
     print(f"Discovery: {len(nodes)} nodes confirmed ({', '.join(nodes)})")
@@ -335,6 +355,12 @@ def main():
         "--bw", type=int, help="Bandwidth (0=125kHz, 1=250kHz, 2=500kHz)"
     )
     parser.add_argument(
+        "--n2gfreq", type=float, help="Node-to-Gateway frequency in MHz (902-928)"
+    )
+    parser.add_argument(
+        "--g2nfreq", type=float, help="Gateway-to-Node frequency in MHz (902-928)"
+    )
+    parser.add_argument(
         "--nodes", type=str,
         help="Comma-separated list of node IDs (skips discovery, uses echo to verify)"
     )
@@ -361,8 +387,8 @@ def main():
     args = parser.parse_args()
 
     # Validate arguments
-    if args.sf is None and args.bw is None:
-        parser.error("At least one of --sf or --bw is required")
+    if args.sf is None and args.bw is None and args.n2gfreq is None and args.g2nfreq is None:
+        parser.error("At least one of --sf, --bw, --n2gfreq, or --g2nfreq is required")
 
     if args.sf is not None and not (7 <= args.sf <= 12):
         parser.error("SF must be between 7 and 12")
@@ -370,18 +396,28 @@ def main():
     if args.bw is not None and not (0 <= args.bw <= 2):
         parser.error("BW must be 0 (125kHz), 1 (250kHz), or 2 (500kHz)")
 
+    if args.n2gfreq is not None and not (902.0 <= args.n2gfreq <= 928.0):
+        parser.error("N2G frequency must be between 902 and 928 MHz")
+
+    if args.g2nfreq is not None and not (902.0 <= args.g2nfreq <= 928.0):
+        parser.error("G2N frequency must be between 902 and 928 MHz")
+
     gateway_url = f"http://{args.gateway}:{args.port}"
 
     # Build list of params to change
+    # Note: frequencies are passed to user in MHz but sent to nodes as Hz
     params_to_set: list[tuple[str, int]] = []
     if args.sf is not None:
         params_to_set.append(("sf", args.sf))
     if args.bw is not None:
         params_to_set.append(("bw", args.bw))
+    if args.n2gfreq is not None:
+        params_to_set.append(("n2gfreq", int(args.n2gfreq * 1e6)))
+    if args.g2nfreq is not None:
+        params_to_set.append(("g2nfreq", int(args.g2nfreq * 1e6)))
 
     param_desc = ", ".join(
-        f"{p}={v}" + (f" ({BW_NAMES[v]})" if p == "bw" else "")
-        for p, v in params_to_set
+        format_param_value(p, v) for p, v in params_to_set
     )
     print(f"Setting radio parameters: {param_desc}")
     print(f"Gateway: {gateway_url}")
@@ -471,8 +507,8 @@ def main():
         print(f"  Gateway: {gw_changes}")
         sys.exit(0)
 
-    # Phase 3: Update all nodes (never abort early)
-    print(f"\nUpdating {len(nodes)} nodes...")
+    # Phase 3: Stage params on all nodes (setparam stores in pending, not applied)
+    print(f"\nStaging params on {len(nodes)} nodes...")
 
     for node in nodes:
         print(f"  {node}: ", end="", flush=True)
@@ -481,7 +517,7 @@ def main():
 
         for param, value in params_to_set:
             if set_node_param(gateway_url, node, param, value):
-                # Verify the change
+                # Verify the staged value
                 actual = get_node_param(gateway_url, node, param)
                 node_state[node]["after"][param] = actual
                 if actual == value:
@@ -492,18 +528,39 @@ def main():
                 node_state[node]["after"][param] = None
                 params_failed.append(param)
 
-        # Determine node status
+        # Track staging result (not final status yet)
         if len(params_succeeded) == len(params_to_set):
-            node_state[node]["status"] = "SUCCESS"
-            print("OK")
+            print("staged")
         elif len(params_succeeded) > 0:
+            print(f"partial ({', '.join(params_succeeded)} OK, {', '.join(params_failed)} failed)")
             node_state[node]["status"] = "PARTIAL"
-            print(f"PARTIAL ({', '.join(params_succeeded)} OK, {', '.join(params_failed)} failed)")
+        else:
+            print("FAILED")
+            node_state[node]["status"] = "FAILED"
+
+    # Phase 4: Apply staged params with rcfg_radio
+    print(f"\nApplying staged params (rcfg_radio)...")
+
+    for node in nodes:
+        # Skip nodes that already failed during staging
+        if node_state[node]["status"] == "FAILED":
+            print(f"  {node}: SKIPPED (staging failed)")
+            continue
+
+        print(f"  {node}: ", end="", flush=True)
+        result = send_rcfg_radio(gateway_url, node)
+
+        if result and "r" in result:
+            node_state[node]["status"] = "SUCCESS"
+            print(f"OK ({result['r']})")
+        elif result and "e" in result:
+            node_state[node]["status"] = "FAILED"
+            print(f"FAILED ({result['e']})")
         else:
             node_state[node]["status"] = "FAILED"
-            print("FAILED")
+            print("FAILED (no response)")
 
-    # Phase 4: Gateway decision (majority rule)
+    # Phase 6: Gateway decision (majority rule)
     success_count = sum(1 for n in node_state.values() if n["status"] == "SUCCESS")
     success_rate = success_count / len(nodes)
     gateway_updated = False
@@ -537,7 +594,7 @@ def main():
         print("  Keeping gateway on original settings to maintain connectivity")
         gateway_after = gateway_before.copy()
 
-    # Phase 5: Detailed report
+    # Phase 7: Detailed report
     print_report(
         params_to_set,
         nodes,

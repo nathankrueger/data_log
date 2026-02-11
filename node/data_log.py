@@ -15,12 +15,16 @@ Configuration is loaded from config/node_config.json:
     ],
     "default_sensor_interval_sec": 30,
     "lora": {
-        "frequency_mhz": 915.0,
-        "tx_power": 23,
-        "cs_pin": 24,
-        "reset_pin": 25
+        "n2g_frequency_hz": 915000000,
+        "g2n_frequency_hz": 915500000,
+        "spreading_factor": 7,
+        "bandwidth": 0,
+        "tx_power": 23
     }
 }
+
+Radio parameters (sf, bw, txpwr, n2gfreq, g2nfreq) can be changed at runtime
+via setparam command and persisted with savecfg.
 
 Each sensor can have its own "interval_sec". If not specified, falls back
 to the global "default_sensor_interval_sec" (default: 30s).
@@ -53,6 +57,14 @@ from utils.protocol import (
     parse_command_packet,
 )
 from utils.node_state import NodeState
+from utils.radio_state import RadioState
+
+# Hardware pin constants (RFM9x radio on Pi Zero 2W)
+LORA_CS_PIN = 24
+LORA_RESET_PIN = 25
+
+# Bandwidth encoding: matches AB01 convention (0/1/2 -> Hz)
+BW_HZ_MAP = {0: 125000, 1: 250000, 2: 500000}
 
 # Configure logging
 logging.basicConfig(
@@ -91,6 +103,8 @@ class CommandReceiver(threading.Thread):
     Runs continuously, acquiring radio_lock for short receive windows.
     This ensures commands are received promptly even while the main
     broadcast loop is sleeping between broadcasts.
+
+    Reads frequencies dynamically from RadioState to see updates from rcfg_radio.
     """
 
     def __init__(
@@ -100,8 +114,7 @@ class CommandReceiver(threading.Thread):
         node_id: str,
         registry: CommandRegistry,
         receive_timeout: float = 0.5,
-        n2g_freq: float = 915.0,
-        g2n_freq: float = 915.5,
+        radio_state: RadioState | None = None,
         broadcast_ack_jitter_sec: float = 0.5,
     ):
         """
@@ -113,8 +126,7 @@ class CommandReceiver(threading.Thread):
             node_id: This node's ID for command filtering
             registry: Command registry for dispatching received commands
             receive_timeout: Timeout for each receive attempt (default 0.5s)
-            n2g_freq: Node-to-Gateway frequency for sensor broadcasts and ACKs
-            g2n_freq: Gateway-to-Node frequency for receiving commands
+            radio_state: RadioState for dynamic frequency reading (sees rcfg_radio updates)
             broadcast_ack_jitter_sec: Max random delay before ACKing broadcast commands
         """
         super().__init__(daemon=True, name="CommandReceiver")
@@ -123,29 +135,44 @@ class CommandReceiver(threading.Thread):
         self._node_id = node_id
         self._registry = registry
         self._receive_timeout = receive_timeout
-        self._n2g_freq = n2g_freq
-        self._g2n_freq = g2n_freq
+        self._radio_state = radio_state
         self._broadcast_ack_jitter_sec = broadcast_ack_jitter_sec
         self._running = False
         # Single-slot dedup (matches AB01 pattern)
         self._last_command_id: str = ""
         self._last_ack_packet: bytes | None = None
 
+    def _get_n2g_freq(self) -> float:
+        """Get current N2G frequency (from RadioState if available)."""
+        if self._radio_state:
+            return self._radio_state.n2g_freq
+        return 915.0  # Fallback
+
+    def _get_g2n_freq(self) -> float:
+        """Get current G2N frequency (from RadioState if available)."""
+        if self._radio_state:
+            return self._radio_state.g2n_freq
+        return 915.5  # Fallback
+
     def run(self) -> None:
         """Run the receive loop."""
         self._running = True
         logger.info(
-            f"Command receiver started (G2N={self._g2n_freq} MHz, "
-            f"N2G={self._n2g_freq} MHz)"
+            f"Command receiver started (G2N={self._get_g2n_freq()} MHz, "
+            f"N2G={self._get_n2g_freq()} MHz)"
         )
 
         while self._running:
             try:
+                # Read frequencies fresh each iteration (catches rcfg_radio updates)
+                g2n_freq = self._get_g2n_freq()
+                n2g_freq = self._get_n2g_freq()
+
                 # Switch to G2N to listen for commands, then back to N2G
                 with self._radio_lock:
-                    self._radio.set_frequency(self._g2n_freq)
+                    self._radio.set_frequency(g2n_freq)
                     packet = self._radio.receive(timeout=self._receive_timeout)
-                    self._radio.set_frequency(self._n2g_freq)
+                    self._radio.set_frequency(n2g_freq)
 
                 if packet is not None:
                     self._process_packet(packet)
@@ -497,17 +524,46 @@ def main():
 
     # Initialize radio with dual-channel support
     lora_config = config.get("lora", {})
-    n2g_freq = lora_config.get("n2g_frequency_mhz", 915.0)
-    g2n_freq = lora_config.get("g2n_frequency_mhz", 915.5)
+
+    # Load frequencies - try Hz keys first, fall back to MHz for backwards compat
+    if "n2g_frequency_hz" in lora_config:
+        n2g_freq = lora_config["n2g_frequency_hz"] / 1e6  # Hz to MHz
+    else:
+        n2g_freq = lora_config.get("n2g_frequency_mhz", 915.0)
+
+    if "g2n_frequency_hz" in lora_config:
+        g2n_freq = lora_config["g2n_frequency_hz"] / 1e6  # Hz to MHz
+    else:
+        g2n_freq = lora_config.get("g2n_frequency_mhz", 915.5)
+
+    tx_power = lora_config.get("tx_power", 23)
+    spreading_factor = lora_config.get("spreading_factor", 7)
+    bandwidth_code = lora_config.get("bandwidth", 0)
+    bandwidth_hz = BW_HZ_MAP.get(bandwidth_code, 125000)
+
     radio = RFM9xRadio(
         frequency_mhz=n2g_freq,  # Start on N2G (sensor broadcasts + ACKs)
-        tx_power=lora_config.get("tx_power", 23),
-        cs_pin=lora_config.get("cs_pin", 24),
-        reset_pin=lora_config.get("reset_pin", 25),
+        tx_power=tx_power,
+        cs_pin=LORA_CS_PIN,
+        reset_pin=LORA_RESET_PIN,
+    )
+    # Apply SF/BW from config (radio.init() will use these)
+    radio.spreading_factor = spreading_factor
+    radio.signal_bandwidth = bandwidth_hz
+
+    # Create RadioState (encapsulates radio hardware and frequencies)
+    radio_state = RadioState(
+        radio=radio,
+        n2g_freq=n2g_freq,
+        g2n_freq=g2n_freq,
     )
 
     # Create node state (shared state container for all components)
-    node_state = NodeState(node_id=node_id, radio=radio)
+    node_state = NodeState(
+        node_id=node_id,
+        radio_state=radio_state,
+        config_path=args.config,
+    )
 
     # Initialize display if configured
     screen_manager = None
@@ -588,8 +644,7 @@ def main():
                 node_id=node_id,
                 registry=command_registry,
                 receive_timeout=receive_timeout,
-                n2g_freq=n2g_freq,
-                g2n_freq=g2n_freq,
+                radio_state=radio_state,
                 broadcast_ack_jitter_sec=jitter_ms / 1000.0,
             )
             command_receiver.start()
