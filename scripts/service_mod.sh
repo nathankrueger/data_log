@@ -20,12 +20,12 @@ OPTIONS:
     -h, --help                      Show this help message
 
 EXAMPLES:
-    $(basename "$0") --install gateway_server.service
-    $(basename "$0") --uninstall data_log.service
-    $(basename "$0") --restart gateway_server
+    $(basename "$0") --install gateway
+    $(basename "$0") --uninstall data_log
+    $(basename "$0") --restart gateway
     $(basename "$0") --list
-    $(basename "$0") --follow gateway_server
-    $(basename "$0") --logs gateway_server
+    $(basename "$0") --follow node
+    $(basename "$0") --logs gateway
 
 EOF
 }
@@ -75,13 +75,7 @@ list_services() {
 }
 
 install_service() {
-    local service_name="$1"
-    
-    # Add .service extension if not provided
-    if [[ ! "$service_name" =~ \.service$ ]]; then
-        service_name="${service_name}.service"
-    fi
-    
+    local service_name="${1}.service"
     local service_file="$SERVICES_DIR/$service_name"
     
     if [ ! -f "$service_file" ]; then
@@ -125,12 +119,7 @@ install_service() {
 }
 
 uninstall_service() {
-    local service_name="$1"
-
-    # Add .service extension if not provided
-    if [[ ! "$service_name" =~ \.service$ ]]; then
-        service_name="${service_name}.service"
-    fi
+    local service_name="${1}.service"
 
     if [ ! -f "/etc/systemd/system/$service_name" ]; then
         echo "Error: Service not installed: $service_name"
@@ -170,12 +159,7 @@ uninstall_service() {
 }
 
 restart_service() {
-    local service_name="$1"
-
-    # Add .service extension if not provided
-    if [[ ! "$service_name" =~ \.service$ ]]; then
-        service_name="${service_name}.service"
-    fi
+    local service_name="${1}.service"
 
     if [ ! -f "/etc/systemd/system/$service_name" ]; then
         echo "Error: Service not installed: $service_name"
@@ -195,12 +179,7 @@ restart_service() {
 }
 
 follow_logs() {
-    local service_name="$1"
-
-    # Add .service extension if not provided
-    if [[ ! "$service_name" =~ \.service$ ]]; then
-        service_name="${service_name}.service"
-    fi
+    local service_name="${1}.service"
 
     echo "Following logs for $service_name (Ctrl+C to stop)..."
     echo ""
@@ -208,12 +187,7 @@ follow_logs() {
 }
 
 show_logs() {
-    local service_name="$1"
-
-    # Add .service extension if not provided
-    if [[ ! "$service_name" =~ \.service$ ]]; then
-        service_name="${service_name}.service"
-    fi
+    local service_name="${1}.service"
 
     echo "Logs for $service_name since last boot:"
     echo ""

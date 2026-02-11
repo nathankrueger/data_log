@@ -32,9 +32,9 @@ pytest tests/ -v               # Verbose test output
 ./scripts/launch_gateway_server.sh [config_file]
 
 # Systemd service management
-./scripts/service_mod.sh --install node_broadcast
+./scripts/service_mod.sh --install node
 ./scripts/service_mod.sh --list
-./scripts/service_mod.sh --follow gateway_server
+./scripts/service_mod.sh --follow gateway
 ```
 
 ## Project Structure

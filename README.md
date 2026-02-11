@@ -107,16 +107,16 @@ The gateway can flash an RGB LED when LoRa messages are received. Configure in `
 
 Toggle at runtime without restarting:
 ```bash
-sudo systemctl kill --signal=SIGUSR1 gateway_server.service  # Enable
-sudo systemctl kill --signal=SIGUSR2 gateway_server.service  # Disable
+sudo systemctl kill --signal=SIGUSR1 gateway.service  # Enable
+sudo systemctl kill --signal=SIGUSR2 gateway.service  # Disable
 ```
 
 ## Systemd Services
 
 The `services/` folder contains systemd service files for running components on boot:
 
-- `gateway_server.service` - Gateway that receives LoRa data and posts to dashboard
-- `node_broadcast.service` - Node broadcaster that sends sensor readings via LoRa
+- `gateway.service` - Gateway that receives LoRa data and posts to dashboard
+- `node.service` - Node broadcaster that sends sensor readings via LoRa
 - `data_log.service` - CSV logger service
 - `radio_transmit.service` - Radio temperature sender
 
@@ -131,13 +131,13 @@ Use the `service_mod.sh` script to easily manage services:
 
 **Install a service:**
 ```bash
-./service_mod.sh --install gateway_server
-./service_mod.sh --install node_broadcast
+./service_mod.sh --install gateway
+./service_mod.sh --install node
 ```
 
 **Uninstall a service:**
 ```bash
-./service_mod.sh --uninstall gateway_server
+./service_mod.sh --uninstall gateway
 ```
 
 **Get help:**
