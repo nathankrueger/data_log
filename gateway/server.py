@@ -22,7 +22,8 @@ Configuration is loaded from config/gateway_config.json:
 }
 
 Usage:
-    python3 gateway_server.py [config_file]
+    python3 -m gateway.server [config_file]
+    python3 gateway/server.py [config_file]
 """
 
 import argparse
@@ -43,7 +44,7 @@ from urllib.error import URLError, HTTPError
 from gpiozero import Button
 from utils.led import RgbLed
 from utils.gateway_state import GatewayState
-from utils.command_server import CommandServer
+from gateway.http_handler import CommandServer
 from display import (
     GatewayLocalSensors,
     LastPacketPage,
@@ -981,7 +982,12 @@ def load_config(config_path: str) -> dict:
         return json.load(f)
 
 
-def run_gateway(config: dict, verbose_logging: bool = False, cmd_debug: bool = False) -> None:
+def run_gateway(
+    config: dict,
+    config_path: str,
+    verbose_logging: bool = False,
+    cmd_debug: bool = False,
+) -> None:
     """Run the gateway."""
     if verbose_logging:
         logger.info("Verbose logging enabled")
@@ -1104,9 +1110,15 @@ def run_gateway(config: dict, verbose_logging: bool = False, cmd_debug: bool = F
             logger.info(
                 f"LoRa transceiver enabled: N2G={n2g_freq} MHz, G2N={g2n_freq} MHz"
             )
-            # Wire transceiver to command server for discovery support
+            # Wire transceiver and radio params to command server
             if command_server:
                 command_server.set_transceiver(lora_transceiver)
+                command_server.set_gateway_params(
+                    radio=radio,
+                    config=config,
+                    config_path=config_path,
+                    node_id=node_id,
+                )
         except Exception as e:
             logger.error(f"Failed to initialize LoRa: {e}")
             logger.info("Continuing without LoRa transceiver")
@@ -1242,7 +1254,12 @@ def main():
         sys.exit(1)
 
     # Run gateway
-    run_gateway(config, verbose_logging=args.verbose_logging, cmd_debug=args.cmd_debug)
+    run_gateway(
+        config,
+        config_path=args.config,
+        verbose_logging=args.verbose_logging,
+        cmd_debug=args.cmd_debug,
+    )
 
 
 if __name__ == "__main__":

@@ -5,4 +5,4 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 source "$PROJECT_DIR/.venv/bin/activate"
-exec python "$PROJECT_DIR/gateway_server.py" "$@"
+exec python "$PROJECT_DIR/gateway/server.py" "$@"

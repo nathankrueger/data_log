@@ -26,7 +26,8 @@ Each sensor can have its own "interval_sec". If not specified, falls back
 to the global "default_sensor_interval_sec" (default: 30s).
 
 Usage:
-    python3 node_broadcast.py [config_file]
+    python3 -m node.data_log [config_file]
+    python3 node/data_log.py [config_file]
 """
 
 import argparse

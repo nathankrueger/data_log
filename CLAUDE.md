@@ -37,6 +37,28 @@ pytest tests/ -v               # Verbose test output
 ./scripts/service_mod.sh --follow gateway_server
 ```
 
+## Project Structure
+
+```
+data_log/
+├── gateway/                 # Indoor gateway package
+│   ├── server.py           # Main gateway logic, LoRaTransceiver
+│   └── http_handler.py     # HTTP server, gateway param endpoints
+├── node/                    # Outdoor node package
+│   └── data_log.py         # Sensor broadcasting, CommandReceiver
+├── utils/                   # Shared utilities
+│   ├── protocol.py         # LoRa packet encoding/decoding
+│   ├── command_registry.py # Command handler registration
+│   └── config_persistence.py # Atomic config file updates
+├── radio/                   # Radio hardware abstraction
+├── sensors/                 # Sensor hardware abstraction
+├── display/                 # OLED display pages
+├── scripts/                 # Shell scripts and tools
+│   ├── set_radio_params.sh # Change SF/BW across all nodes + gateway
+│   └── ...
+└── config/                  # JSON configuration files
+```
+
 ## Architecture
 
 ### Abstract Base Classes
@@ -76,10 +98,10 @@ Dashboard --HTTP POST--> Gateway --LoRa--> Node
 
 **Key files:**
 - `utils/protocol.py` - `build_command_packet()`, `parse_command_packet()`, `build_ack_packet()`, `parse_ack_packet()`
-- `utils/command_server.py` - HTTP server (POST /command)
+- `gateway/http_handler.py` - HTTP server (POST /command, gateway param endpoints)
 - `utils/command_registry.py` - `CommandRegistry`, `CommandScope`, `HandlerEntry`
-- `gateway_server.py` - `CommandQueue`, `LoRaTransceiver`
-- `node_broadcast.py` - `CommandReceiver`
+- `gateway/server.py` - `CommandQueue`, `LoRaTransceiver`
+- `node/data_log.py` - `CommandReceiver`
 
 **Packet types:**
 - Command: `{"t":"cmd", "n":"node_id", "cmd":"ping", "a":[], "ts":1699999999, "c":"crc32"}`
@@ -147,7 +169,46 @@ CommandReceiver thread:
 
 The `radio_lock` ensures half-duplex safety. If broadcast loop is transmitting, CommandReceiver waits.
 
-### Signal Handling (gateway_server.py)
+### Gateway Parameter Endpoints
+
+The gateway exposes HTTP endpoints for runtime parameter tuning:
+
+| Method | Endpoint | Description |
+|--------|----------|-------------|
+| GET | `/gateway/params` | Get all gateway radio parameters |
+| GET | `/gateway/param/{name}` | Get single parameter value |
+| PUT | `/gateway/param/{name}` | Set parameter (JSON body: `{"value": X}`) |
+
+**Available parameters:**
+| Name | Type | Range | Writable |
+|------|------|-------|----------|
+| `sf` | int | 7-12 | Yes |
+| `bw` | int | 0-2 (125/250/500 kHz) | Yes |
+| `txpwr` | int | 5-23 dBm | Yes |
+| `nodeid` | str | - | No |
+| `n2g_freq` | float | MHz | No (restart required) |
+| `g2n_freq` | float | MHz | No (restart required) |
+
+Changes are persisted to `gateway_config.json` atomically.
+
+### Coordinated Radio Parameter Changes
+
+Use `scripts/set_radio_params.sh` to change SF/BW across all nodes and gateway:
+
+```bash
+./scripts/set_radio_params.sh --sf 9              # Change SF only
+./scripts/set_radio_params.sh --bw 1              # BW: 0=125kHz, 1=250kHz, 2=500kHz
+./scripts/set_radio_params.sh --sf 9 --bw 1       # Change both
+./scripts/set_radio_params.sh --sf 9 --force      # Continue if some nodes fail
+./scripts/set_radio_params.sh --sf 9 --dry-run    # Show what would change
+```
+
+The script:
+1. Runs discovery 3 times to validate consistent node list
+2. Updates each node via `setparam` command (aborts on failure unless `--force`)
+3. Updates gateway LAST (to maintain communication during transition)
+
+### Signal Handling (gateway/server.py)
 - `SIGUSR1` - Enable LED flash-on-receive
 - `SIGUSR2` - Disable LED flash-on-receive and turn off display
 
@@ -202,14 +263,14 @@ Both switch pins are optional - the system works without any buttons configured.
 
 **New Radio:** Create class in `radio/` extending `Radio`, export in `radio/__init__.py`
 
-**New Display Page:** Create class in `utils/display.py` extending `ScreenPage`, implement `get_lines() -> list[str | None]`, add instance to `pages` list in `gateway_server.py`
+**New Display Page:** Create class in `display/` extending `ScreenPage`, implement `get_lines() -> list[str | None]`, add instance to `pages` list in `gateway/server.py`
 
 ### Display System Architecture
 
 ```
 utils/gateway_state.py    - GatewayState, LastPacketInfo (shared runtime state)
 utils/display.py          - Display ABC, SSD1306Display, ScreenPage ABC, ScreenManager
-gateway_server.py         - Creates display, pages, ScreenManager, and GPIO buttons
+gateway/server.py         - Creates display, pages, ScreenManager, and GPIO buttons
 ```
 
 - `Display` ABC abstracts hardware (width, height, line_height, show, hide, clear, render_lines)
@@ -218,7 +279,7 @@ gateway_server.py         - Creates display, pages, ScreenManager, and GPIO butt
 - `ScreenPage` ABC defines `get_lines() -> list[str | None]` (any number of lines)
 - If all lines are `None`, screen turns off
 - `ScreenManager` handles display refresh (500ms), page cycling, and line scrolling
-- GPIO buttons are set up externally in gateway_server.py using `advance_page()` and `scroll_page()`
+- GPIO buttons are set up externally in gateway/server.py using `advance_page()` and `scroll_page()`
 - Built-in pages: `OffPage`, `SystemInfoPage`, `LastPacketPage`, `GatewayLocalSensors`
 
 ## Development Workflow
@@ -231,7 +292,7 @@ Development happens on a separate machine (not the Pi Zero 2W targets). The SSH/
 
 ### HTCC AB01 Parity
 
-When modifying node-side behavior (e.g., `node_broadcast.py`, `CommandReceiver`, command handlers), ask the user if equivalent changes should be made to the HTCC AB01 codebase at `../htcc_ab01_datalog/data_log/data_log.ino`.
+When modifying node-side behavior (e.g., `node/data_log.py`, `CommandReceiver`, command handlers), ask the user if equivalent changes should be made to the HTCC AB01 codebase at `../htcc_ab01_datalog/data_log/data_log.ino`.
 
 ### Publishing to Target Hardware
 

@@ -21,7 +21,7 @@ from utils.protocol import (
     verify_crc,
 )
 from utils.command_registry import CommandRegistry, CommandScope
-from gateway_server import CommandQueue
+from gateway.server import CommandQueue
 
 
 def make_reading(name: str, units: str, value: float, sensor_class: str) -> SensorReading:
