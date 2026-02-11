@@ -122,6 +122,39 @@ class RFM9xRadio(Radio):
         """Get the configured transmit power."""
         return self._tx_power
 
+    @tx_power.setter
+    def tx_power(self, value: int) -> None:
+        """Set the transmit power (5-23 dBm)."""
+        self._tx_power = value
+        if self._rfm9x is not None:
+            self._rfm9x.tx_power = value
+
+    @property
+    def spreading_factor(self) -> int:
+        """Get the current spreading factor."""
+        if self._rfm9x is not None:
+            return self._rfm9x.spreading_factor
+        return 7  # default
+
+    @spreading_factor.setter
+    def spreading_factor(self, value: int) -> None:
+        """Set the spreading factor (7-12)."""
+        if self._rfm9x is not None:
+            self._rfm9x.spreading_factor = value
+
+    @property
+    def signal_bandwidth(self) -> int:
+        """Get the current signal bandwidth in Hz."""
+        if self._rfm9x is not None:
+            return self._rfm9x.signal_bandwidth
+        return 125000  # default
+
+    @signal_bandwidth.setter
+    def signal_bandwidth(self, value: int) -> None:
+        """Set the signal bandwidth in Hz (125000, 250000, or 500000)."""
+        if self._rfm9x is not None:
+            self._rfm9x.signal_bandwidth = value
+
 
 # RSSI to brightness mapping utilities
 RSSI_MAX = -50   # Strong signal
