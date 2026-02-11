@@ -40,12 +40,12 @@ import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Callable
 
 import sensors as sensors_module
 from radio import RFM9xRadio
 from sensors import Sensor
-from utils.command_registry import CommandRegistry, CommandScope
+from node.command import commands_init
+from utils.command_registry import CommandRegistry
 from utils.protocol import (
     SensorReading,
     build_ack_packet,
@@ -77,111 +77,6 @@ class SensorEntry:
         return type(self.sensor).__name__
 
 
-# =============================================================================
-# Parameter Registry
-# =============================================================================
-
-# Bandwidth encoding: matches AB01 convention (0/1/2 → Hz)
-BW_HZ_MAP = {0: 125000, 1: 250000, 2: 500000}
-BW_CODE_MAP = {v: k for k, v in BW_HZ_MAP.items()}
-
-# Max payload size for paginated responses (conservative ACK budget)
-MAX_RESPONSE_PAYLOAD = 170
-
-
-@dataclass
-class ParamDef:
-    """Definition of a runtime-tunable parameter."""
-
-    name: str
-    getter: Callable[[], int | float | str]
-    setter: Callable[[str], None] | None = None  # None = read-only
-    min_val: int | float | None = None
-    max_val: int | float | None = None
-    value_type: type = int  # int, float, str
-
-
-def build_param_handlers(
-    params: list[ParamDef], registry: CommandRegistry
-) -> None:
-    """Register getparam/setparam/getparams/getcmds command handlers."""
-    param_by_name = {p.name: p for p in params}
-
-    def handle_getparam(cmd: str, args: list[str]) -> dict:
-        if not args:
-            return {"e": "missing param name"}
-        name = args[0]
-        p = param_by_name.get(name)
-        if p is None:
-            return {"e": "unknown param"}
-        return {name: p.getter()}
-
-    def handle_setparam(cmd: str, args: list[str]) -> dict:
-        if len(args) < 2:
-            return {"e": "usage: name value"}
-        name, val_str = args[0], args[1]
-        p = param_by_name.get(name)
-        if p is None:
-            return {"e": "unknown param"}
-        if p.setter is None:
-            return {"e": f"read-only: {name}"}
-        # Parse value
-        try:
-            if p.value_type is int:
-                val = int(val_str)
-            elif p.value_type is float:
-                val = float(val_str)
-            else:
-                val = val_str
-        except ValueError:
-            return {"e": f"invalid value: {val_str}"}
-        # Range check
-        if p.min_val is not None and val < p.min_val:
-            return {"e": f"range: {p.min_val}..{p.max_val}"}
-        if p.max_val is not None and val > p.max_val:
-            return {"e": f"range: {p.min_val}..{p.max_val}"}
-        p.setter(val_str)
-        return {name: p.getter()}
-
-    def handle_getparams(cmd: str, args: list[str]) -> dict:
-        offset = int(args[0]) if args else 0
-        sorted_params = sorted(params, key=lambda p: p.name)
-        result: dict = {}
-        more = 0
-        for p in sorted_params[offset:]:
-            test = dict(result)
-            test[p.name] = p.getter()
-            encoded = json.dumps({"m": 0, "p": test}, separators=(",", ":"))
-            if len(encoded) > MAX_RESPONSE_PAYLOAD and result:
-                more = 1
-                break
-            result[p.name] = p.getter()
-        return {"m": more, "p": result}
-
-    def handle_getcmds(cmd: str, args: list[str]) -> dict:
-        offset = int(args[0]) if args else 0
-        all_cmds = sorted(registry.get_registered_commands())
-        result: list[str] = []
-        more = 0
-        for cmd_name in all_cmds[offset:]:
-            test = result + [cmd_name]
-            encoded = json.dumps({"c": test, "m": 0}, separators=(",", ":"))
-            if len(encoded) > MAX_RESPONSE_PAYLOAD and result:
-                more = 1
-                break
-            result.append(cmd_name)
-        return {"c": result, "m": more}
-
-    registry.register("getparam", handle_getparam, CommandScope.ANY, early_ack=False)
-    registry.register(
-        "setparam", handle_setparam, CommandScope.PRIVATE, early_ack=False
-    )
-    registry.register(
-        "getparams", handle_getparams, CommandScope.ANY, early_ack=False
-    )
-    registry.register(
-        "getcmds", handle_getcmds, CommandScope.ANY, early_ack=False
-    )
 
 
 # =============================================================================
@@ -611,8 +506,8 @@ def main():
         reset_pin=lora_config.get("reset_pin", 25),
     )
 
-    # Create node state for display
-    node_state = NodeState()
+    # Create node state (shared state container for all components)
+    node_state = NodeState(node_id=node_id, radio=radio)
 
     # Initialize display if configured
     screen_manager = None
@@ -666,53 +561,7 @@ def main():
 
     # Create command registry and register handlers
     command_registry = CommandRegistry(node_id)
-
-    # Register built-in command handlers
-    def handle_ping(cmd: str, args: list[str]) -> None:
-        logger.info(f"[HANDLER] Received broadcast ping command with args: {args}")
-
-    def handle_private_ping(cmd: str, args: list[str]) -> None:
-        logger.info(f"[HANDLER] Received private ping command with args: {args}")
-
-    def handle_echo(cmd: str, args: list[str]) -> dict | None:
-        data = args[0] if args else ""
-        logger.info(f"[HANDLER] Echo: {data}")
-        return {"r": data}
-
-    def handle_discover(cmd: str, args: list[str]) -> None:
-        logger.info(f"[HANDLER] Received discover command with args: {args}")
-
-    command_registry.register("ping", handle_ping, CommandScope.BROADCAST, early_ack=True)
-    command_registry.register("ping", handle_private_ping, CommandScope.PRIVATE, early_ack=True)
-    command_registry.register("discover", handle_discover, CommandScope.BROADCAST, early_ack=True, ack_jitter=True)
-    command_registry.register("echo", handle_echo, CommandScope.PRIVATE, early_ack=False)
-
-    # Parameter registry — alpha-sorted by name, matching AB01 convention
-    param_table = [
-        ParamDef(
-            "bw",
-            getter=lambda: BW_CODE_MAP.get(radio.signal_bandwidth, 0),
-            setter=lambda v: setattr(radio, "signal_bandwidth", BW_HZ_MAP[int(v)]),
-            min_val=0,
-            max_val=2,
-        ),
-        ParamDef("nodeid", getter=lambda: node_id, value_type=str),
-        ParamDef(
-            "sf",
-            getter=lambda: radio.spreading_factor,
-            setter=lambda v: setattr(radio, "spreading_factor", int(v)),
-            min_val=7,
-            max_val=12,
-        ),
-        ParamDef(
-            "txpwr",
-            getter=lambda: radio.tx_power,
-            setter=lambda v: setattr(radio, "tx_power", int(v)),
-            min_val=5,
-            max_val=23,
-        ),
-    ]
-    build_param_handlers(param_table, command_registry)
+    commands_init(command_registry, node_state)
 
     # Create radio lock for half-duplex coordination
     radio_lock: threading.Lock | None = None

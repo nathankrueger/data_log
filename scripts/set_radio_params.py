@@ -14,10 +14,12 @@ Usage:
     set_radio_params.py --bw 1              # Change BW only (0=125kHz, 1=250kHz, 2=500kHz)
     set_radio_params.py --sf 9 --bw 1       # Change both
     set_radio_params.py --sf 9 --dry-run    # Show what would be changed
+    set_radio_params.py --sf 9 --nodes node1,node2  # Update specific nodes (no discovery)
 
 Options:
     --sf N          Spreading factor (7-12)
     --bw N          Bandwidth code (0=125kHz, 1=250kHz, 2=500kHz)
+    --nodes LIST    Comma-separated list of node IDs (skips discovery, uses echo to verify)
     --dry-run       Show what would be changed without making changes
     -g, --gateway   Gateway host (default: $GATEWAY_HOST or localhost)
     -p, --port      Gateway port (default: $GATEWAY_PORT or 5001)
@@ -77,6 +79,41 @@ def discover_nodes(gateway_url: str, retries: int = 30) -> list[str] | None:
     if result and "nodes" in result:
         return sorted(result["nodes"])
     return None
+
+
+def echo_node(gateway_url: str, node_id: str) -> bool:
+    """Send echo command to a node and verify response. Returns True on success."""
+    # Generate unique data to verify echo
+    echo_data = str(int(time.time() * 1000))
+    url = f"{gateway_url}/echo/{node_id}?a={echo_data}"
+    result = http_get(url, timeout=15.0)
+    if result:
+        # Check if echoed data matches (response may have 'r', 'data', 'echo', or 'payload' key)
+        echoed = result.get("r") or result.get("data") or result.get("echo") or result.get("payload")
+        return echoed == echo_data
+    return False
+
+
+def verify_nodes_with_echo(gateway_url: str, nodes: list[str]) -> tuple[list[str], list[str]]:
+    """
+    Verify all nodes respond to echo command.
+
+    Returns (responding_nodes, failed_nodes).
+    """
+    responding = []
+    failed = []
+
+    print(f"Verifying {len(nodes)} nodes respond to echo...")
+    for node in nodes:
+        print(f"  {node}: ", end="", flush=True)
+        if echo_node(gateway_url, node):
+            print("OK")
+            responding.append(node)
+        else:
+            print("FAILED")
+            failed.append(node)
+
+    return responding, failed
 
 
 def validate_discovery(
@@ -298,6 +335,10 @@ def main():
         "--bw", type=int, help="Bandwidth (0=125kHz, 1=250kHz, 2=500kHz)"
     )
     parser.add_argument(
+        "--nodes", type=str,
+        help="Comma-separated list of node IDs (skips discovery, uses echo to verify)"
+    )
+    parser.add_argument(
         "--dry-run", action="store_true", help="Show what would be changed"
     )
     parser.add_argument(
@@ -346,20 +387,41 @@ def main():
     print(f"Gateway: {gateway_url}")
     print()
 
-    # Phase 1: Validate discovery
-    nodes = validate_discovery(
-        gateway_url,
-        iterations=3,
-        interval=args.interval,
-        retries=args.retries,
-    )
-    if nodes is None:
-        print("\nAborted: Discovery validation failed")
-        sys.exit(3)
+    # Phase 1: Get node list (either from --nodes or discovery)
+    if args.nodes:
+        # Parse comma-separated node list
+        nodes = sorted([n.strip() for n in args.nodes.split(",") if n.strip()])
+        if not nodes:
+            print("Error: --nodes list is empty")
+            sys.exit(3)
 
-    if not nodes:
-        print("\nNo nodes discovered. Nothing to do.")
-        sys.exit(0)
+        print(f"Using specified nodes: {', '.join(nodes)}")
+        print()
+
+        # Verify all nodes respond to echo
+        _, failed = verify_nodes_with_echo(gateway_url, nodes)
+
+        if failed:
+            print(f"\nAborted: {len(failed)} node(s) failed to respond to echo: {', '.join(failed)}")
+            print("All nodes must respond before updating parameters.")
+            sys.exit(3)
+
+        print(f"\nAll {len(nodes)} nodes verified")
+    else:
+        # Use discovery validation
+        nodes = validate_discovery(
+            gateway_url,
+            iterations=3,
+            interval=args.interval,
+            retries=args.retries,
+        )
+        if nodes is None:
+            print("\nAborted: Discovery validation failed")
+            sys.exit(3)
+
+        if not nodes:
+            print("\nNo nodes discovered. Nothing to do.")
+            sys.exit(0)
 
     # Initialize node state tracking
     node_state: dict[str, dict] = {}

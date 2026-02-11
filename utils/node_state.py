@@ -2,12 +2,18 @@
 Shared runtime state for the sensor node.
 
 This module provides thread-safe state classes that can be shared
-between node components (broadcast loop, display, OCR, etc.).
+between node components (broadcast loop, display, OCR, commands, etc.).
 """
+
+from __future__ import annotations
 
 import threading
 import time
 from dataclasses import dataclass, field
+from typing import TYPE_CHECKING
+
+if TYPE_CHECKING:
+    from radio import RFM9xRadio
 
 
 @dataclass
@@ -26,9 +32,18 @@ class NodeState:
     Shared runtime state for the sensor node.
 
     Thread-safe container for state that multiple components need to access,
-    such as the display pages and broadcast loop.
+    such as the display pages, broadcast loop, and command handlers.
+
+    Required fields (must be provided at construction):
+        node_id: This node's identifier string
+        radio: Radio instance for TX/RX operations
+
+    Optional fields (have defaults):
+        start_time, broadcast_count, sensor_readings, ocr_result, ocr_in_progress
     """
 
+    node_id: str
+    radio: RFM9xRadio
     start_time: float = field(default_factory=time.time)
     broadcast_count: int = 0
     sensor_readings: list[SensorReadingInfo] = field(default_factory=list)
