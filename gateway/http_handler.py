@@ -21,6 +21,7 @@ from urllib.parse import parse_qs, urlparse
 from utils.config_persistence import update_config_file
 
 logger = logging.getLogger(__name__)
+cmd_logger = logging.getLogger("cmd_debug")
 
 # Retry count for fire-and-forget commands (no_wait=1)
 # Used for rcfg_radio where ACK is unreliable after radio params change
@@ -154,9 +155,17 @@ class CommandHandler(BaseHTTPRequestHandler):
         # Check for fire-and-forget mode (no_wait=1)
         # Used for rcfg_radio where ACK is unreliable after radio params change
         no_wait = query.get("no_wait", ["0"])[0] == "1"
+        cmd_logger.debug(
+            "HTTP_GET cmd=%s node=%s query=%s no_wait=%s",
+            cmd, node_id, query, no_wait
+        )
 
         if no_wait:
             # Fire-and-forget: use reduced retries, return immediately
+            cmd_logger.debug(
+                "QUEUE_ADD cmd=%s node=%s max_retries=%d (no_wait)",
+                cmd, node_id, NO_WAIT_MAX_RETRIES
+            )
             command_id = self.server.command_queue.add(  # type: ignore
                 cmd, args, node_id, max_retries=NO_WAIT_MAX_RETRIES
             )
