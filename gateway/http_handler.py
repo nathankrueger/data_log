@@ -19,6 +19,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
 from utils.config_persistence import update_config_file
+from utils.radio_state import BW_HZ_MAP
 
 logger = logging.getLogger(__name__)
 cmd_logger = logging.getLogger("cmd_debug")
