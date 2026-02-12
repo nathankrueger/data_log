@@ -119,6 +119,20 @@ def _handle_rcfg_radio(radio_state: RadioState, _cmd: str, args: list[str]) -> d
         return {"e": str(e)}
 
 
+def _handle_rssi(radio_state: RadioState, _cmd: str, args: list[str]) -> dict:
+    """
+    Handle rssi command - returns RSSI of the received command packet.
+
+    Uses early_ack=false so the RSSI measurement is for the command packet itself.
+    Returns {"r": rssi_value} in dBm.
+    """
+    rssi = radio_state.radio.get_last_rssi()
+    if rssi is None:
+        rssi = 0
+    logger.info(f"[HANDLER] RSSI: {rssi} dBm")
+    return {"r": rssi}
+
+
 # =============================================================================
 # Init Function
 # =============================================================================
@@ -212,6 +226,7 @@ def commands_init(registry: CommandRegistry, state: NodeState) -> None:
         "getparams",
         "ping",
         "rcfg_radio",
+        "rssi",
         "savecfg",
         "setparam",
     ])
@@ -237,6 +252,8 @@ def commands_init(registry: CommandRegistry, state: NodeState) -> None:
         ("getparams", partial(_handle_getparams, params, radio_state), CommandScope.ANY, False, False),
         # rcfg_radio - apply staged radio params; early_ack so ACK sent before apply
         ("rcfg_radio", partial(_handle_rcfg_radio, radio_state), CommandScope.PRIVATE, True, False),
+        # rssi - return RSSI of the command packet; late_ack to include RSSI in response
+        ("rssi", partial(_handle_rssi, radio_state), CommandScope.ANY, False, False),
         # savecfg - persist params to config file
         ("savecfg", partial(_handle_savecfg, params, config_path), CommandScope.PRIVATE, False, False),
         # setparam - late_ack to get error response; staged params applied by rcfg_radio
