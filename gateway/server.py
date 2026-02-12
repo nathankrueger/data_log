@@ -703,8 +703,13 @@ class LoRaTransceiver(threading.Thread):
                     continue
 
                 # Receive with short timeout to allow command transmission
+                rx_start = time.time()
                 packet = self._radio.receive(timeout=0.1)
+                rx_ms = (time.time() - rx_start) * 1000
                 if packet is not None:
+                    cmd_logger.debug(
+                        "RX_PACKET len=%d after=%.0fms", len(packet), rx_ms
+                    )
                     self._process_received_packet(packet)
 
                 # Check for pending commands to transmit
@@ -737,12 +742,17 @@ class LoRaTransceiver(threading.Thread):
         if pending:
             try:
                 # Switch to G2N channel for command transmission
+                tx_start = time.time()
                 cmd_logger.debug("FREQ to=G2N freq=%.1fMHz", self._g2n_freq)
                 self._radio.set_frequency(self._g2n_freq)
                 success = self._radio.send(pending.packet)
+                tx_ms = (time.time() - tx_start) * 1000
                 # Switch back to N2G to receive ACK
                 self._radio.set_frequency(self._n2g_freq)
-                cmd_logger.debug("FREQ to=N2G freq=%.1fMHz", self._n2g_freq)
+                cmd_logger.debug(
+                    "FREQ to=N2G freq=%.1fMHz (TX took %.0fms)",
+                    self._n2g_freq, tx_ms,
+                )
 
                 target = pending.node_id or "broadcast"
                 if success:
@@ -751,13 +761,17 @@ class LoRaTransceiver(threading.Thread):
                         f"(attempt {pending.retry_count + 1})"
                     )
                     cmd_logger.debug(
-                        "CMD_TX cmd=%s target=%s attempt=%d/%d bytes=%d",
+                        "CMD_TX cmd=%s target=%s attempt=%d/%d bytes=%d tx_ms=%.0f",
                         pending.cmd, target, pending.retry_count + 1,
-                        pending.max_retries, len(pending.packet),
+                        pending.max_retries, len(pending.packet), tx_ms,
                     )
                 else:
                     logger.warning(f"Radio send failed for '{pending.cmd}' to {target}")
                 self._command_queue.mark_sent()
+                cmd_logger.debug(
+                    "CMD_MARK_SENT next_retry_in=%.0fms",
+                    (pending.next_retry_time - time.time()) * 1000,
+                )
             except Exception as e:
                 logger.error(f"Error sending command: {e}")
                 # Ensure we're back on N2G even on error
@@ -871,10 +885,14 @@ class LoRaTransceiver(threading.Thread):
                     ack.payload,
                 )
             else:
+                # Log current command state for debugging
+                with self._command_queue._lock:
+                    current = self._command_queue._current
+                    current_id = current.command_id if current else "none"
                 logger.debug(f"Unexpected ACK from '{ack.node_id}': {ack.command_id}")
                 cmd_logger.debug(
-                    "ACK_STALE id=%s node=%s rssi=%s",
-                    ack.command_id, ack.node_id, rssi,
+                    "ACK_STALE id=%s node=%s rssi=%s current_cmd=%s",
+                    ack.command_id, ack.node_id, rssi, current_id,
                 )
             return
 

@@ -5,6 +5,10 @@ Set radio parameters (SF, BW, frequencies) for all discovered nodes and the gate
 Performs reliable discovery validation before making changes, then updates
 all nodes before finally updating the gateway (to maintain communication).
 
+Uses echo-as-ACK verification: After sending rcfg_radio and switching the gateway
+to new params, echo commands verify connectivity on the NEW channel. If some nodes
+fail, the gateway temporarily reverts to retry rcfg_radio (up to --rcfg-retries times).
+
 Uses majority rule: If >50% of nodes succeed, the gateway is updated.
 If <=50% succeed, the gateway is NOT updated to preserve connectivity
 with the majority of nodes.
@@ -17,18 +21,22 @@ Usage:
     set_radio_params.py --g2nfreq 915.5     # Change G2N frequency (MHz)
     set_radio_params.py --sf 9 --dry-run    # Show what would be changed
     set_radio_params.py --sf 9 --nodes node1,node2  # Update specific nodes (no discovery)
+    set_radio_params.py --sf 9 --no-verify  # Skip echo verification (not recommended)
+    set_radio_params.py --sf 9 --rcfg-retries 5  # More retry attempts
 
 Options:
-    --sf N          Spreading factor (7-12)
-    --bw N          Bandwidth code (0=125kHz, 1=250kHz, 2=500kHz)
-    --n2gfreq F     Node-to-Gateway frequency in MHz (902-928)
-    --g2nfreq F     Gateway-to-Node frequency in MHz (902-928)
-    --nodes LIST    Comma-separated list of node IDs (skips discovery, uses echo to verify)
-    --dry-run       Show what would be changed without making changes
-    -g, --gateway   Gateway host (default: $GATEWAY_HOST or localhost)
-    -p, --port      Gateway port (default: $GATEWAY_PORT or 5001)
-    -r, --retries   Discovery retries per round (default: 30)
-    -i, --interval  Seconds between discovery rounds (default: 5)
+    --sf N            Spreading factor (7-12)
+    --bw N            Bandwidth code (0=125kHz, 1=250kHz, 2=500kHz)
+    --n2gfreq F       Node-to-Gateway frequency in MHz (902-928)
+    --g2nfreq F       Gateway-to-Node frequency in MHz (902-928)
+    --nodes LIST      Comma-separated list of node IDs (skips discovery, uses echo to verify)
+    --dry-run         Show what would be changed without making changes
+    --no-verify       Skip echo verification after rcfg_radio (not recommended)
+    --rcfg-retries N  Max retries for rcfg_radio (default: 3)
+    -g, --gateway     Gateway host (default: $GATEWAY_HOST or localhost)
+    -p, --port        Gateway port (default: $GATEWAY_PORT or 5001)
+    -r, --retries     Discovery retries per round (default: 30)
+    -i, --interval    Seconds between discovery rounds (default: 5)
 
 Exit codes:
     0 - All nodes succeeded, gateway updated (SUCCESS)
@@ -409,6 +417,14 @@ def main():
     parser.add_argument(
         "-i", "--interval", type=float, default=5.0, help="Seconds between discovery rounds"
     )
+    parser.add_argument(
+        "--no-verify", action="store_true",
+        help="Skip echo verification after rcfg_radio (not recommended)"
+    )
+    parser.add_argument(
+        "--rcfg-retries", type=int, default=3,
+        help="Max retries for rcfg_radio (switch gateway back, resend, switch forward)"
+    )
     args = parser.parse_args()
 
     # Validate arguments
@@ -563,33 +579,90 @@ def main():
             print("FAILED")
             node_state[node]["status"] = "FAILED"
 
-    # Phase 4: Apply staged params with rcfg_radio
-    print(f"\nApplying staged params (rcfg_radio)...")
+    # Phase 4: Apply rcfg_radio with echo-as-ACK verification
+    # Uses echo on the NEW channel as implicit confirmation that rcfg_radio worked.
+    # If some nodes fail, temporarily switch gateway back to retry.
 
-    for node in nodes:
-        # Skip nodes that already failed during staging
-        if node_state[node]["status"] == "FAILED":
-            print(f"  {node}: SKIPPED (staging failed)")
-            continue
+    # Track which nodes need rcfg_radio (exclude staging failures)
+    nodes_needing_rcfg = [n for n in nodes if node_state[n]["status"] != "FAILED"]
+    max_attempts = args.rcfg_retries + 1  # +1 for initial attempt
 
-        print(f"  {node}: ", end="", flush=True)
-        result = send_rcfg_radio(gateway_url, node)
+    print(f"\nApplying radio config changes (max {max_attempts} attempts)...")
 
+    for attempt in range(1, max_attempts + 1):
+        if not nodes_needing_rcfg:
+            break
+
+        print(f"\n--- Attempt {attempt}/{max_attempts} ---")
+
+        # Step A: Send rcfg_radio to nodes (fire-and-forget, ACK often lost)
+        print(f"Sending rcfg_radio to {len(nodes_needing_rcfg)} node(s)...")
+        for node in nodes_needing_rcfg:
+            print(f"  {node}: ", end="", flush=True)
+            send_rcfg_radio(gateway_url, node)  # Ignore response - ACK often lost
+            print("sent")
+
+        # Step B: Switch gateway to new params
+        print("\nSwitching gateway to new params...")
+        for param, value in params_to_set:
+            print(f"  {param}={value}: ", end="", flush=True)
+            if set_gateway_param(gateway_url, param, value):
+                print("staged")
+            else:
+                print("FAILED")
+        result = send_gateway_rcfg_radio(gateway_url)
         if result and "r" in result:
-            node_state[node]["status"] = "SUCCESS"
-            print(f"OK ({result['r']})")
-        elif result and result.get("status") == "acked":
-            # early_ack=True: ACK received but no payload (config applied)
-            node_state[node]["status"] = "SUCCESS"
-            print("OK (acked)")
-        elif result and "e" in result:
-            node_state[node]["status"] = "FAILED"
-            print(f"FAILED ({result['e']})")
+            print(f"  rcfg_radio: OK ({result['r']})")
         else:
-            node_state[node]["status"] = "FAILED"
-            print("FAILED (no response)")
+            print(f"  rcfg_radio: applied")
 
-    # Phase 6: Gateway decision (majority rule)
+        # Step C: Echo test on new channel (skip if --no-verify)
+        if args.no_verify:
+            print("\nSkipping verification (--no-verify)")
+            for node in nodes_needing_rcfg:
+                node_state[node]["status"] = "SUCCESS"
+            nodes_needing_rcfg = []
+            break
+
+        print(f"\nVerifying {len(nodes_needing_rcfg)} node(s) on new channel...")
+        newly_verified = []
+        still_failing = []
+
+        for node in nodes_needing_rcfg:
+            print(f"  {node}: ", end="", flush=True)
+            if echo_node(gateway_url, node):
+                print("OK")
+                node_state[node]["status"] = "SUCCESS"
+                newly_verified.append(node)
+            else:
+                print("FAILED")
+                still_failing.append(node)
+
+        nodes_needing_rcfg = still_failing
+
+        if not nodes_needing_rcfg:
+            print("\nAll nodes verified!")
+            break
+
+        if attempt < max_attempts:
+            # Step D: Switch gateway BACK to old params for retry
+            print(f"\n{len(nodes_needing_rcfg)} node(s) failed, switching gateway back...")
+            for param, _ in params_to_set:
+                old_value = gateway_before[param]
+                if old_value is not None:
+                    set_gateway_param(gateway_url, param, old_value)
+            send_gateway_rcfg_radio(gateway_url)
+            print("Gateway reverted, will retry rcfg_radio...")
+
+    # Mark remaining nodes as failed
+    for node in nodes_needing_rcfg:
+        node_state[node]["status"] = "FAILED"
+
+    if nodes_needing_rcfg:
+        print(f"\n{len(nodes_needing_rcfg)} node(s) failed after {max_attempts} attempts")
+
+    # Phase 5: Gateway decision (majority rule)
+    # Gateway is currently on new params from Phase 4
     success_count = sum(1 for n in node_state.values() if n["status"] == "SUCCESS")
     success_rate = success_count / len(nodes)
     gateway_updated = False
@@ -598,64 +671,30 @@ def main():
     print(f"\nNode results: {success_count}/{len(nodes)} succeeded ({success_rate:.0%})")
 
     if success_rate > 0.5:
-        print(f"\nUpdating gateway ({success_rate:.0%} > 50% threshold)...")
-        gateway_success = True
-
-        # Stage all radio params first
-        print("  Staging params...")
-        for param, value in params_to_set:
-            print(f"    {param}={value}: ", end="", flush=True)
-            if set_gateway_param(gateway_url, param, value):
-                # Verify staged value
-                actual = get_gateway_param(gateway_url, param)
-                if actual == value:
-                    print("staged")
-                else:
-                    print(f"VERIFY FAILED (expected {value}, got {actual})")
-                    gateway_success = False
-            else:
-                print("FAILED")
-                gateway_success = False
-
-        # Apply staged params with rcfg_radio
-        if gateway_success:
-            print("  Applying (rcfg_radio)...", end=" ", flush=True)
-            result = send_gateway_rcfg_radio(gateway_url)
-            if result and "r" in result:
-                print(f"OK ({result['r']})")
-                # Read back values after apply
-                for param, _ in params_to_set:
-                    gateway_after[param] = get_gateway_param(gateway_url, param)
-            elif result and "error" in result:
-                print(f"FAILED ({result['error']})")
-                gateway_success = False
-            else:
-                print("FAILED (no response)")
-                gateway_success = False
+        # Keep gateway on new settings, persist to config
+        gateway_updated = True
+        print(f"\nGateway kept on new settings ({success_rate:.0%} > 50%)")
+        print("  Persisting (savecfg)...", end=" ", flush=True)
+        result = send_gateway_savecfg(gateway_url)
+        if result and "r" in result:
+            print(f"OK ({result['r']})")
         else:
-            print("  Skipping rcfg_radio (staging failed)")
-
-        # Persist all params with savecfg
-        if gateway_success:
-            print("  Persisting (savecfg)...", end=" ", flush=True)
-            result = send_gateway_savecfg(gateway_url)
-            if result and "r" in result:
-                print(f"OK ({result['r']})")
-            elif result and "error" in result:
-                print(f"FAILED ({result['error']})")
-                # Don't mark as failed - radio is already applied
-                print("    Warning: radio applied but not persisted to config")
-            else:
-                print("FAILED (no response)")
-                print("    Warning: radio applied but not persisted to config")
-
-        gateway_updated = gateway_success
+            print("OK")
+        # Read back values after apply
+        for param, _ in params_to_set:
+            gateway_after[param] = get_gateway_param(gateway_url, param)
     else:
-        print(f"\nGateway NOT updated ({success_rate:.0%} <= 50% threshold)")
-        print("  Keeping gateway on original settings to maintain connectivity")
+        # Revert gateway to old params (majority failed)
+        print(f"\nReverting gateway ({success_rate:.0%} <= 50%)")
+        for param, _ in params_to_set:
+            old_value = gateway_before[param]
+            if old_value is not None:
+                set_gateway_param(gateway_url, param, old_value)
+        send_gateway_rcfg_radio(gateway_url)
         gateway_after = gateway_before.copy()
+        print("  Keeping gateway on original settings to maintain connectivity")
 
-    # Phase 7: Detailed report
+    # Phase 6: Detailed report
     print_report(
         params_to_set,
         nodes,
