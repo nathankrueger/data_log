@@ -1207,8 +1207,15 @@ def run_gateway(
             )
             lora_transceiver.set_flash_enabled(flash_on_recv_default)
             lora_transceiver.start()
+
+            # Log all radio parameters at startup
+            sf = radio_state.spreading_factor
+            bw_hz = radio_state.signal_bandwidth
+            bw_khz = bw_hz // 1000
+            txpwr = radio_state.tx_power
             logger.info(
-                f"LoRa transceiver enabled: N2G={n2g_freq} MHz, G2N={g2n_freq} MHz"
+                f"LoRa radio initialized: SF={sf}, BW={bw_khz}kHz, "
+                f"TXpwr={txpwr}dBm, N2G={n2g_freq}MHz, G2N={g2n_freq}MHz"
             )
             # Wire transceiver and params to command server
             if command_server:
