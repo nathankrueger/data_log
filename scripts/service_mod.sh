@@ -13,6 +13,7 @@ Manage systemd services from the services/ folder.
 OPTIONS:
     -i, --install SERVICE_NAME      Install a service from services/ folder
     -u, --uninstall SERVICE_NAME    Uninstall and fully remove a service
+    -U, --uninstall-all             Uninstall all registered services
     -r, --restart SERVICE_NAME      Restart a service
     -l, --list                      List all services in services/ folder and their status
     -f, --follow SERVICE_NAME       Follow service logs in real-time (Ctrl+C to stop)
@@ -22,6 +23,7 @@ OPTIONS:
 EXAMPLES:
     $(basename "$0") --install gateway
     $(basename "$0") --uninstall data_log
+    $(basename "$0") --uninstall-all
     $(basename "$0") --restart gateway
     $(basename "$0") --list
     $(basename "$0") --follow node
@@ -158,6 +160,64 @@ uninstall_service() {
     echo "Service uninstalled successfully!"
 }
 
+uninstall_all_services() {
+    if [ ! -d "$SERVICES_DIR" ]; then
+        echo "Error: Services directory not found: $SERVICES_DIR"
+        exit 1
+    fi
+
+    local installed_services=()
+
+    # Find all installed services
+    for service_file in "$SERVICES_DIR"/*.service; do
+        if [ -f "$service_file" ]; then
+            local service_name=$(basename "$service_file")
+            if [ -f "/etc/systemd/system/$service_name" ]; then
+                installed_services+=("$service_name")
+            fi
+        fi
+    done
+
+    if [ ${#installed_services[@]} -eq 0 ]; then
+        echo "No services are currently installed."
+        exit 0
+    fi
+
+    echo "Found ${#installed_services[@]} installed service(s):"
+    for svc in "${installed_services[@]}"; do
+        echo "  - $svc"
+    done
+    echo ""
+
+    # Uninstall each service
+    for service_name in "${installed_services[@]}"; do
+        echo "Uninstalling: $service_name"
+
+        # Stop service
+        sudo systemctl stop "$service_name" 2>/dev/null
+
+        # Disable service
+        sudo systemctl disable "$service_name" 2>/dev/null
+
+        # Remove service file
+        sudo rm /etc/systemd/system/"$service_name"
+        if [ $? -ne 0 ]; then
+            echo "  Warning: Failed to remove $service_name"
+        else
+            echo "  Removed $service_name"
+        fi
+
+        # Reset failed state if any
+        sudo systemctl reset-failed "$service_name" 2>/dev/null
+    done
+
+    # Reload systemd once at the end
+    sudo systemctl daemon-reload
+
+    echo ""
+    echo "Uninstalled ${#installed_services[@]} service(s)."
+}
+
 restart_service() {
     local service_name="${1}.service"
 
@@ -225,6 +285,10 @@ case "$1" in
             exit 1
         fi
         uninstall_service "$2"
+        exit 0
+        ;;
+    -U|--uninstall-all)
+        uninstall_all_services
         exit 0
         ;;
     -r|--restart)
