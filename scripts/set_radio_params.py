@@ -626,6 +626,10 @@ def main():
         else:
             print(f"  rcfg_radio: applied")
 
+        # Brief delay for radio settling before echo tests
+        print("Waiting 1s for radio settling...")
+        time.sleep(1.0)
+
         # Step C: Echo test on new channel (skip if --no-verify)
         if args.no_verify:
             print("\nSkipping verification (--no-verify)")

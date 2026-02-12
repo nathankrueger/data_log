@@ -10,10 +10,14 @@ Message Types:
 """
 
 import json
+import logging
 import time
 import zlib
 from dataclasses import dataclass
 from typing import Any
+
+# Logger for command/ACK debugging (enabled via --cmd-debug)
+cmd_logger = logging.getLogger("cmd_debug")
 
 
 # =============================================================================
@@ -425,7 +429,8 @@ def parse_ack_packet(data: bytes) -> AckPacket | None:
     """
     try:
         message = json.loads(data.decode("utf-8"))
-    except (json.JSONDecodeError, UnicodeDecodeError):
+    except (json.JSONDecodeError, UnicodeDecodeError) as e:
+        cmd_logger.debug("ACK_PARSE json_error=%s data=%r", e, data[:100])
         return None
 
     # Check message type
@@ -434,6 +439,12 @@ def parse_ack_packet(data: bytes) -> AckPacket | None:
 
     # Verify CRC
     if not verify_crc(message, crc_key="c"):
+        expected = message.get("c", "missing")
+        actual = calculate_crc32(message, crc_key="c")
+        cmd_logger.debug(
+            "ACK_CRC_FAIL expected=%s actual=%s id=%s node=%s payload=%s",
+            expected, actual, message.get("id"), message.get("n"), message.get("p"),
+        )
         return None
 
     try:
@@ -442,5 +453,6 @@ def parse_ack_packet(data: bytes) -> AckPacket | None:
             node_id=message["n"],
             payload=message.get("p"),  # Optional response payload
         )
-    except (KeyError, TypeError, ValueError):
+    except (KeyError, TypeError, ValueError) as e:
+        cmd_logger.debug("ACK_FIELD_ERR error=%s message=%s", e, message)
         return None
