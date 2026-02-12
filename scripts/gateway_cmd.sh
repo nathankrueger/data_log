@@ -52,45 +52,58 @@ OPT_PORT=""
 DO_RCFG=0
 DO_SAVE=0
 
-while getopts "lGg:s:rSH:p:h" opt; do
-    case $opt in
-        l)
+# Use GNU getopt for proper argument reordering (handles "-s sf 9 -r" correctly)
+PARSED=$(getopt -o lGg:s:rSH:p:h -n "$(basename "$0")" -- "$@") || usage
+eval set -- "$PARSED"
+
+while true; do
+    case "$1" in
+        -l)
             MODE="list"
+            shift
             ;;
-        G)
+        -G)
             MODE="getall"
+            shift
             ;;
-        g)
+        -g)
             MODE="get"
-            PARAM="$OPTARG"
+            PARAM="$2"
+            shift 2
             ;;
-        s)
+        -s)
             MODE="set"
-            PARAM="$OPTARG"
+            PARAM="$2"
+            shift 2
             ;;
-        r)
+        -r)
             DO_RCFG=1
+            shift
             ;;
-        S)
+        -S)
             DO_SAVE=1
+            shift
             ;;
-        H)
-            OPT_HOST="$OPTARG"
+        -H)
+            OPT_HOST="$2"
+            shift 2
             ;;
-        p)
-            OPT_PORT="$OPTARG"
+        -p)
+            OPT_PORT="$2"
+            shift 2
             ;;
-        h)
+        -h)
             usage
+            ;;
+        --)
+            shift
+            break
             ;;
         *)
             usage
             ;;
     esac
 done
-
-# Shift past options to get positional args (value for -s)
-shift $((OPTIND - 1))
 
 # Must specify at least one action
 if [ -z "$MODE" ] && [ $DO_RCFG -eq 0 ] && [ $DO_SAVE -eq 0 ]; then
@@ -123,10 +136,12 @@ do_curl() {
     STDERR_FILE=$(mktemp)
 
     if [ "$method" = "GET" ]; then
-        RESPONSE=$(curl -sS --max-time "$timeout" -w "\n%{http_code}" "$url" 2>"$STDERR_FILE")
+        RESPONSE=$(curl -sS --max-time "$timeout" -H "Connection: close" \
+            -w "\n%{http_code}" "$url" 2>"$STDERR_FILE")
     else
         RESPONSE=$(curl -sS -X "$method" "$url" \
             -H "Content-Type: application/json" \
+            -H "Connection: close" \
             -d "$data" \
             --max-time "$timeout" \
             -w "\n%{http_code}" 2>"$STDERR_FILE")
