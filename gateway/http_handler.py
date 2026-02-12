@@ -235,12 +235,7 @@ class CommandHandler(BaseHTTPRequestHandler):
             query.get("retries", [disc_config.get("discovery_retries", 30)])[0]
         )
 
-        # Import at runtime to avoid circular import
-        # This will be gateway.server after the move
-        try:
-            from gateway.server import DiscoveryRequest
-        except ImportError:
-            from gateway_server import DiscoveryRequest
+        from gateway.command_queue import DiscoveryRequest
 
         request = DiscoveryRequest(
             retries=retries,

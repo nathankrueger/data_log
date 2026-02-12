@@ -41,22 +41,26 @@ pytest tests/ -v               # Verbose test output
 
 ```
 data_log/
-├── gateway/                 # Indoor gateway package
-│   ├── server.py           # Main gateway logic, LoRaTransceiver
-│   └── http_handler.py     # HTTP server, gateway param endpoints
-├── node/                    # Outdoor node package
-│   └── data_log.py         # Sensor broadcasting, CommandReceiver
-├── utils/                   # Shared utilities
-│   ├── protocol.py         # LoRa packet encoding/decoding
-│   ├── command_registry.py # Command handler registration
-│   └── config_persistence.py # Atomic config file updates
-├── radio/                   # Radio hardware abstraction
-├── sensors/                 # Sensor hardware abstraction
-├── display/                 # OLED display pages
-├── scripts/                 # Shell scripts and tools
-│   ├── set_radio_params.sh # Change SF/BW across all nodes + gateway
+├── gateway/                    # Indoor gateway package
+│   ├── server.py              # Main orchestration, run_gateway(), main()
+│   ├── command_queue.py       # CommandQueue, PendingCommand, DiscoveryRequest
+│   ├── transceiver.py         # LoRaTransceiver thread
+│   ├── sensor_collection.py   # SensorDataCollector, DashboardClient, LocalSensorReader
+│   ├── http_handler.py        # HTTP server, gateway param endpoints
+│   └── params.py              # Gateway parameter registry
+├── node/                       # Outdoor node package
+│   └── data_log.py            # Sensor broadcasting, CommandReceiver
+├── utils/                      # Shared utilities
+│   ├── protocol.py            # LoRa packet encoding/decoding
+│   ├── command_registry.py    # Command handler registration
+│   └── config_persistence.py  # Atomic config file updates
+├── radio/                      # Radio hardware abstraction
+├── sensors/                    # Sensor hardware abstraction
+├── display/                    # OLED display pages
+├── scripts/                    # Shell scripts and tools
+│   ├── set_radio_params.sh    # Change SF/BW across all nodes + gateway
 │   └── ...
-└── config/                  # JSON configuration files
+└── config/                     # JSON configuration files
 ```
 
 ## Architecture
@@ -100,7 +104,8 @@ Dashboard --HTTP POST--> Gateway --LoRa--> Node
 - `utils/protocol.py` - `build_command_packet()`, `parse_command_packet()`, `build_ack_packet()`, `parse_ack_packet()`
 - `gateway/http_handler.py` - HTTP server (POST /command, gateway param endpoints)
 - `utils/command_registry.py` - `CommandRegistry`, `CommandScope`, `HandlerEntry`
-- `gateway/server.py` - `CommandQueue`, `LoRaTransceiver`
+- `gateway/command_queue.py` - `CommandQueue`, `PendingCommand`, `DiscoveryRequest`
+- `gateway/transceiver.py` - `LoRaTransceiver`
 - `node/data_log.py` - `CommandReceiver`
 
 **Packet types:**
