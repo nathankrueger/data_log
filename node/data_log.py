@@ -195,10 +195,17 @@ class CommandReceiver(threading.Thread):
             jitter = random.uniform(0, self._broadcast_ack_jitter_sec)
             logger.debug(f"Discovery ACK jitter: {jitter * 1000:.0f}ms")
             time.sleep(jitter)
+        n2g_freq = self._get_n2g_freq()
+        t0 = time.time()
         with self._radio_lock:
+            lock_wait_ms = (time.time() - t0) * 1000
+            if lock_wait_ms > 10:
+                logger.warning(f"ACK lock wait: {lock_wait_ms:.0f}ms")
             # Explicitly set N2G frequency before ACK (defensive, matches AB01)
-            self._radio.set_frequency(self._get_n2g_freq())
-            return self._radio.send(ack_packet)
+            self._radio.set_frequency(n2g_freq)
+            success = self._radio.send(ack_packet)
+            logger.info(f"ACK sent on N2G={n2g_freq} MHz, success={success}")
+            return success
 
     def _process_packet(self, packet: bytes) -> None:
         """Parse and dispatch a received command packet, send ACK.
