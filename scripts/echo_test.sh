@@ -29,6 +29,7 @@ usage() {
 NODE_ID=""
 INTERVAL=1
 COUNT=0  # 0 = infinite
+RATE_PRECISION=3  # decimal places for success rate
 OPT_HOST=""
 OPT_PORT=""
 
@@ -78,7 +79,7 @@ GATEWAY_HOST=${OPT_HOST:-${GATEWAY_HOST:-localhost}}
 GATEWAY_PORT=${OPT_PORT:-${GATEWAY_PORT:-5001}}
 
 # Calculate inter-node delay (evenly distributed across interval)
-NODE_DELAY=$(echo "scale=3; $INTERVAL / $NUM_NODES" | bc)
+NODE_DELAY=$(echo "scale=$RATE_PRECISION; $INTERVAL / $NUM_NODES" | bc)
 
 # Statistics (combined)
 TOTAL=0
@@ -110,8 +111,8 @@ cleanup() {
             local n_mismatch=${NODE_MISMATCH[$node]}
             local n_fail=${NODE_FAIL[$node]}
             if [ $n_total -gt 0 ]; then
-                local n_rate=$(echo "scale=1; $n_success * 100 / $n_total" | bc)
-                printf "%-12s %d/%d (%.1f%%) [mismatch=%d, fail=%d]\n" \
+                local n_rate=$(echo "scale=$RATE_PRECISION; $n_success * 100 / $n_total" | bc)
+                printf "%-12s %d/%d (%s%%) [mismatch=%d, fail=%d]\n" \
                     "$node:" "$n_success" "$n_total" "$n_rate" "$n_mismatch" "$n_fail"
             else
                 printf "%-12s no data\n" "$node:"
@@ -126,7 +127,7 @@ cleanup() {
     echo "Mismatched:     $MISMATCH"
     echo "Failed:         $FAIL"
     if [ $TOTAL -gt 0 ]; then
-        RATE=$(echo "scale=1; $SUCCESS * 100 / $TOTAL" | bc)
+        RATE=$(echo "scale=$RATE_PRECISION; $SUCCESS * 100 / $TOTAL" | bc)
         echo "Success rate:   ${RATE}%"
     fi
     exit 0
@@ -147,8 +148,6 @@ NODE_IDX=0
 while true; do
     CURRENT_NODE="${NODES[$NODE_IDX]}"
     ITERATION=$((ITERATION + 1))
-    TOTAL=$((TOTAL + 1))
-    NODE_TOTAL[$CURRENT_NODE]=$((NODE_TOTAL[$CURRENT_NODE] + 1))
 
     # Generate unique data: millisecond timestamp
     SEND_DATA=$(date '+%s%3N')
@@ -157,6 +156,10 @@ while true; do
     # or prints error to stderr and exits non-zero on failure
     RESPONSE=$("$SCRIPT_DIR/node_cmd.sh" -n "$CURRENT_NODE" -c echo -a "$SEND_DATA" -w -g "$GATEWAY_HOST" -p "$GATEWAY_PORT" 2>&1)
     CMD_EXIT=$?
+
+    # Increment totals only after command completes (so Ctrl+C mid-test doesn't inflate count)
+    TOTAL=$((TOTAL + 1))
+    NODE_TOTAL[$CURRENT_NODE]=$((NODE_TOTAL[$CURRENT_NODE] + 1))
 
     TIMESTAMP=$(date '+%H:%M:%S')
 
