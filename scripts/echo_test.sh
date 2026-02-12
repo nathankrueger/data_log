@@ -7,10 +7,10 @@
 #
 # Requires: 'jq' (sudo apt install jq)
 #
-# Usage: echo_test.sh -n <node_ids> [-i <interval>] [-c <count>] [-g <gateway>] [-p <port>]
+# Usage: echo_test.sh [-n <node_ids>] [-i <interval>] [-c <count>] [-g <gateway>] [-p <port>]
 #
 # Options:
-#   -n <node_ids>  Comma-separated node IDs (e.g., pz1,pz2,pz3) (required)
+#   -n <node_ids>  Comma-separated node IDs, or omit to auto-discover
 #   -i <interval>  Seconds per full cycle through all nodes (default: 1)
 #   -c <count>     Number of iterations (default: infinite, Ctrl+C to stop)
 #   -g <gateway>   Gateway host (default: $GATEWAY_HOST or localhost)
@@ -59,10 +59,21 @@ while getopts "n:i:c:g:p:h" opt; do
     esac
 done
 
-# Node ID is required
+# Command-line options take precedence over env vars
+GATEWAY_HOST=${OPT_HOST:-${GATEWAY_HOST:-localhost}}
+GATEWAY_PORT=${OPT_PORT:-${GATEWAY_PORT:-5001}}
+
+# Auto-discover nodes if not specified
 if [ -z "$NODE_ID" ]; then
-    echo "Error: -n <node_ids> is required"
-    usage
+    echo "Running discovery (3 passes)..."
+    DISCOVER_OUT=$("$SCRIPT_DIR/discover_test.sh" -q -g "$GATEWAY_HOST" -p "$GATEWAY_PORT" 2>&1)
+    DISCOVER_EXIT=$?
+    if [ $DISCOVER_EXIT -ne 0 ]; then
+        echo "Error: Discovery failed - $DISCOVER_OUT"
+        exit 1
+    fi
+    NODE_ID="$DISCOVER_OUT"
+    echo "Discovered nodes: $NODE_ID"
 fi
 
 # Parse comma-separated nodes into array
@@ -70,13 +81,9 @@ IFS=',' read -ra NODES <<< "$NODE_ID"
 NUM_NODES=${#NODES[@]}
 
 if [ $NUM_NODES -eq 0 ]; then
-    echo "Error: at least one node ID is required"
-    usage
+    echo "Error: no nodes found"
+    exit 1
 fi
-
-# Command-line options take precedence over env vars
-GATEWAY_HOST=${OPT_HOST:-${GATEWAY_HOST:-localhost}}
-GATEWAY_PORT=${OPT_PORT:-${GATEWAY_PORT:-5001}}
 
 # Calculate inter-node delay (evenly distributed across interval)
 NODE_DELAY=$(echo "scale=$RATE_PRECISION; $INTERVAL / $NUM_NODES" | bc)

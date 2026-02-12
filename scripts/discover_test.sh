@@ -7,10 +7,11 @@
 #
 # Requires: 'jq' (sudo apt install jq)
 #
-# Usage: discover_test.sh [-c <count>] [-a <retries>] [-i <interval>] [-r <rounds>]
+# Usage: discover_test.sh [-q] [-c <count>] [-a <retries>] [-i <interval>] [-r <rounds>]
 #                         [-g <gateway>] [-p <port>]
 #
 # Options:
+#   -q            Quiet/composable mode: run 3 passes, output node list or error
 #   -c <count>    Expected number of nodes (validated each round)
 #   -a <retries>  Discovery retries passed to gateway (default: gateway config)
 #   -i <interval> Seconds between discover rounds (default: 5)
@@ -22,7 +23,7 @@
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-    head -n 21 "$0" | tail -n 20 | sed 's/^# //' | sed 's/^#//'
+    head -n 22 "$0" | tail -n 21 | sed 's/^# //' | sed 's/^#//'
     exit 1
 }
 
@@ -30,11 +31,17 @@ EXPECTED_COUNT=0  # 0 = don't check count
 RETRIES=""
 INTERVAL=5
 ROUNDS=0  # 0 = infinite
+QUIET_MODE=false
 OPT_HOST=""
 OPT_PORT=""
 
-while getopts "c:a:i:r:g:p:h" opt; do
+while getopts "qc:a:i:r:g:p:h" opt; do
     case $opt in
+        q)
+            QUIET_MODE=true
+            ROUNDS=3
+            INTERVAL=0
+            ;;
         c)
             EXPECTED_COUNT="$OPTARG"
             ;;
@@ -79,6 +86,18 @@ BASELINE_SET=false
 
 # Cleanup handler
 cleanup() {
+    if [ "$QUIET_MODE" = true ]; then
+        # Quiet mode: output node list if all passes succeeded, else error
+        if [ $SUCCESS -eq $ROUNDS ] && [ "$BASELINE_SET" = true ]; then
+            # Convert "node1, node2" to "node1,node2"
+            echo "$BASELINE_NODES" | tr -d ' '
+            exit 0
+        else
+            echo "Discovery inconsistent: $SUCCESS/$ROUNDS passes matched" >&2
+            exit 1
+        fi
+    fi
+
     echo ""
     echo "========================================"
     echo "Discovery Test Results"
@@ -105,9 +124,11 @@ if [ -n "$RETRIES" ]; then
     CMD_ARGS+=(-a "$RETRIES")
 fi
 
-echo "Discovery test: interval=${INTERVAL}s, expected=${EXPECTED_COUNT:-any}"
-echo "Press Ctrl+C to stop and see results"
-echo "----------------------------------------"
+if [ "$QUIET_MODE" = false ]; then
+    echo "Discovery test: interval=${INTERVAL}s, expected=${EXPECTED_COUNT:-any}"
+    echo "Press Ctrl+C to stop and see results"
+    echo "----------------------------------------"
+fi
 
 ITERATION=0
 while true; do
@@ -121,7 +142,7 @@ while true; do
 
     if [ $CMD_EXIT -ne 0 ]; then
         FAIL=$((FAIL + 1))
-        echo "[$TIMESTAMP] #$ITERATION: FAIL - $RESPONSE"
+        [ "$QUIET_MODE" = false ] && echo "[$TIMESTAMP] #$ITERATION: FAIL - $RESPONSE"
     else
         # Parse response: sorted comma-separated node list and count
         NODES=$(echo "$RESPONSE" | jq -r '.nodes | sort | join(", ")' 2>/dev/null)
@@ -129,7 +150,7 @@ while true; do
 
         if [ -z "$NODE_COUNT" ] || [ "$NODE_COUNT" = "null" ]; then
             FAIL=$((FAIL + 1))
-            echo "[$TIMESTAMP] #$ITERATION: FAIL - bad response: $RESPONSE"
+            [ "$QUIET_MODE" = false ] && echo "[$TIMESTAMP] #$ITERATION: FAIL - bad response: $RESPONSE"
         elif [ "$BASELINE_SET" = false ]; then
             # First successful round — establish baseline
             BASELINE_NODES="$NODES"
@@ -137,17 +158,21 @@ while true; do
             BASELINE_SET=true
 
             if [ "$EXPECTED_COUNT" -gt 0 ] && [ "$NODE_COUNT" -ne "$EXPECTED_COUNT" ]; then
-                echo "[$TIMESTAMP] #$ITERATION: ERROR - expected $EXPECTED_COUNT nodes, found $NODE_COUNT: $NODES"
-                echo ""
-                echo "Aborting: node count does not match expected."
+                if [ "$QUIET_MODE" = false ]; then
+                    echo "[$TIMESTAMP] #$ITERATION: ERROR - expected $EXPECTED_COUNT nodes, found $NODE_COUNT: $NODES"
+                    echo ""
+                    echo "Aborting: node count does not match expected."
+                else
+                    echo "Expected $EXPECTED_COUNT nodes, found $NODE_COUNT" >&2
+                fi
                 exit 1
             fi
 
             SUCCESS=$((SUCCESS + 1))
-            echo "[$TIMESTAMP] #$ITERATION: BASELINE - $NODE_COUNT nodes: $NODES"
+            [ "$QUIET_MODE" = false ] && echo "[$TIMESTAMP] #$ITERATION: BASELINE - $NODE_COUNT nodes: $NODES"
         elif [ "$NODES" = "$BASELINE_NODES" ]; then
             SUCCESS=$((SUCCESS + 1))
-            echo "[$TIMESTAMP] #$ITERATION: OK ($NODE_COUNT nodes)"
+            [ "$QUIET_MODE" = false ] && echo "[$TIMESTAMP] #$ITERATION: OK ($NODE_COUNT nodes)"
         else
             MISMATCH=$((MISMATCH + 1))
             # Show what changed
@@ -163,10 +188,12 @@ while true; do
                     EXTRA="$EXTRA $node"
                 fi
             done
-            MSG="[$TIMESTAMP] #$ITERATION: MISMATCH - got $NODE_COUNT nodes: $NODES"
-            [ -n "$MISSING" ] && MSG="$MSG (missing:$MISSING)"
-            [ -n "$EXTRA" ] && MSG="$MSG (extra:$EXTRA)"
-            echo "$MSG"
+            if [ "$QUIET_MODE" = false ]; then
+                MSG="[$TIMESTAMP] #$ITERATION: MISMATCH - got $NODE_COUNT nodes: $NODES"
+                [ -n "$MISSING" ] && MSG="$MSG (missing:$MISSING)"
+                [ -n "$EXTRA" ] && MSG="$MSG (extra:$EXTRA)"
+                echo "$MSG"
+            fi
         fi
     fi
 
