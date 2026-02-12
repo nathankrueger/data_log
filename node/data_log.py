@@ -186,12 +186,18 @@ class CommandReceiver(threading.Thread):
         self._running = False
 
     def _send_ack(self, ack_packet: bytes, add_jitter: bool = False) -> bool:
-        """Send an ACK packet, optionally applying jitter to stagger responses."""
+        """Send an ACK packet, optionally applying jitter to stagger responses.
+
+        Explicitly sets frequency to N2G before sending (defensive, matches AB01).
+        This ensures ACK goes out on correct frequency regardless of any race.
+        """
         if add_jitter and self._broadcast_ack_jitter_sec > 0:
             jitter = random.uniform(0, self._broadcast_ack_jitter_sec)
             logger.debug(f"Discovery ACK jitter: {jitter * 1000:.0f}ms")
             time.sleep(jitter)
         with self._radio_lock:
+            # Explicitly set N2G frequency before ACK (defensive, matches AB01)
+            self._radio.set_frequency(self._get_n2g_freq())
             return self._radio.send(ack_packet)
 
     def _process_packet(self, packet: bytes) -> None:

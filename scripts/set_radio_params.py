@@ -578,6 +578,10 @@ def main():
         if result and "r" in result:
             node_state[node]["status"] = "SUCCESS"
             print(f"OK ({result['r']})")
+        elif result and result.get("status") == "acked":
+            # early_ack=True: ACK received but no payload (config applied)
+            node_state[node]["status"] = "SUCCESS"
+            print("OK (acked)")
         elif result and "e" in result:
             node_state[node]["status"] = "FAILED"
             print(f"FAILED ({result['e']})")
