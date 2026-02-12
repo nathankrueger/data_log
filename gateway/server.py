@@ -200,7 +200,9 @@ class CommandQueue:
     def discovery_retries(self, val: int) -> None:
         self._discovery_retries = val
 
-    def add(self, cmd: str, args: list[str], node_id: str) -> str | None:
+    def add(
+        self, cmd: str, args: list[str], node_id: str, max_retries: int | None = None
+    ) -> str | None:
         """
         Add a command to the queue.
 
@@ -208,11 +210,13 @@ class CommandQueue:
             cmd: Command name
             args: Command arguments
             node_id: Target node ID (empty for broadcast)
+            max_retries: Override default retry count (for fire-and-forget commands)
 
         Returns:
             Command ID for tracking, or None if queue is full
         """
         packet, command_id = build_command_packet(cmd, args, node_id)
+        retries = max_retries if max_retries is not None else self._max_retries
 
         pending = PendingCommand(
             command_id=command_id,
@@ -221,7 +225,7 @@ class CommandQueue:
             node_id=node_id,
             packet=packet,
             next_retry_time=0,  # Send immediately
-            max_retries=self._max_retries,
+            max_retries=retries,
         )
 
         with self._lock:

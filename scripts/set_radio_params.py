@@ -235,9 +235,13 @@ def set_gateway_param(gateway_url: str, param: str, value: int) -> bool:
 
 
 def send_rcfg_radio(gateway_url: str, node_id: str) -> dict | None:
-    """Send rcfg_radio command to apply staged params on a node."""
-    url = f"{gateway_url}/rcfg_radio/{node_id}"
-    return http_get(url, timeout=15.0)
+    """Send rcfg_radio command to apply staged params on a node.
+
+    Uses no_wait=1 for fire-and-forget mode since ACK is unreliable
+    after radio params change. Returns immediately with queued status.
+    """
+    url = f"{gateway_url}/rcfg_radio/{node_id}?no_wait=1"
+    return http_get(url, timeout=5.0)
 
 
 def get_gateway_param(gateway_url: str, param: str) -> int | None:
@@ -601,6 +605,12 @@ def main():
             print(f"  {node}: ", end="", flush=True)
             send_rcfg_radio(gateway_url, node)  # Ignore response - ACK often lost
             print("sent")
+
+        # Wait for gateway to finish sending rcfg_radio commands
+        # Each command takes ~1.5s (2 retries with 500ms + 750ms backoff)
+        delay = 2.0 * len(nodes_needing_rcfg)
+        print(f"Waiting {delay:.0f}s for commands to complete...")
+        time.sleep(delay)
 
         # Step B: Switch gateway to new params
         print("\nSwitching gateway to new params...")

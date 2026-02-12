@@ -22,6 +22,10 @@ from utils.config_persistence import update_config_file
 
 logger = logging.getLogger(__name__)
 
+# Retry count for fire-and-forget commands (no_wait=1)
+# Used for rcfg_radio where ACK is unreliable after radio params change
+NO_WAIT_MAX_RETRIES = 2
+
 
 class CommandHandler(BaseHTTPRequestHandler):
     """
@@ -147,7 +151,29 @@ class CommandHandler(BaseHTTPRequestHandler):
         query = parse_qs(parsed.query)
         args = query.get("a", [])  # List of arg values
 
-        # Queue the command
+        # Check for fire-and-forget mode (no_wait=1)
+        # Used for rcfg_radio where ACK is unreliable after radio params change
+        no_wait = query.get("no_wait", ["0"])[0] == "1"
+
+        if no_wait:
+            # Fire-and-forget: use reduced retries, return immediately
+            command_id = self.server.command_queue.add(  # type: ignore
+                cmd, args, node_id, max_retries=NO_WAIT_MAX_RETRIES
+            )
+            if command_id is None:
+                self.send_error(503, "Command queue full")
+                return
+            logger.info(f"Queued '{cmd}' for {node_id} (no_wait mode)")
+            self.send_response(202)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "status": "queued",
+                "id": command_id,
+            }).encode("utf-8"))
+            return
+
+        # Queue the command (normal mode - wait for response)
         command_id = self.server.command_queue.add(cmd, args, node_id)  # type: ignore
         if command_id is None:
             self.send_error(503, "Command queue full")
