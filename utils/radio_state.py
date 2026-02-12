@@ -55,6 +55,9 @@ class RadioState:
         self._g2n_freq = g2n_freq
         self._pending: dict[str, str] = {}
         self._lock = threading.Lock()
+        # Event for HTTP handler to wait on config application
+        self._config_event = threading.Event()
+        self._last_applied: list[str] = []
 
     @property
     def radio(self) -> RFM9xRadio:
@@ -146,6 +149,26 @@ class RadioState:
         with self._lock:
             return len(self._pending) > 0
 
+    def wait_for_apply(self, timeout: float = 1.0) -> tuple[bool, list[str]]:
+        """
+        Wait for pending config to be applied by the transceiver thread.
+
+        Args:
+            timeout: Max seconds to wait for application
+
+        Returns:
+            (success, applied_list) - success is True if applied within timeout,
+            applied_list contains "name=value" strings of what was applied
+        """
+        if not self.has_pending():
+            return True, []  # Nothing to wait for
+        self._config_event.clear()
+        success = self._config_event.wait(timeout)
+        if success:
+            with self._lock:
+                return True, self._last_applied.copy()
+        return False, []
+
     def apply_pending(self) -> list[str]:
         """
         Apply all pending radio config changes to hardware.
@@ -173,6 +196,11 @@ class RadioState:
             self.clear_pending(name)
             applied.append(f"{name}={value}")
             logger.info(f"RadioState: applied {name}={value}")
+
+        # Store and signal for HTTP handler waiting on wait_for_apply()
+        with self._lock:
+            self._last_applied = applied.copy()
+        self._config_event.set()
 
         return applied
 

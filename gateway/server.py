@@ -680,6 +680,17 @@ class LoRaTransceiver(threading.Thread):
 
         while self._running:
             try:
+                # Apply any pending radio config changes (from HTTP handler)
+                # Must be done here to avoid SPI contention with receive()
+                if self._gateway_state and self._gateway_state.radio_state:
+                    rs = self._gateway_state.radio_state
+                    if rs.has_pending():
+                        applied = rs.apply_pending()
+                        if applied:
+                            logger.info(
+                                f"LoRaTransceiver applied config: {', '.join(applied)}"
+                            )
+
                 # Check for discovery request (takes priority)
                 discovery = None
                 with self._discovery_lock:

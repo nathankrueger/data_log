@@ -15,161 +15,12 @@ from __future__ import annotations
 import json
 import logging
 import threading
-from dataclasses import dataclass
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from typing import TYPE_CHECKING, Any, Callable
 from urllib.parse import parse_qs, urlparse
 
 from utils.config_persistence import update_config_file
 
-if TYPE_CHECKING:
-    from radio import Radio
-
 logger = logging.getLogger(__name__)
-
-
-# =============================================================================
-# Gateway Parameter Registry
-# =============================================================================
-
-# Bandwidth encoding: matches node convention (0/1/2 → Hz)
-BW_HZ_MAP = {0: 125000, 1: 250000, 2: 500000}
-BW_CODE_MAP = {v: k for k, v in BW_HZ_MAP.items()}
-
-
-@dataclass
-class GatewayParamDef:
-    """Definition of a gateway parameter."""
-
-    name: str
-    getter: Callable[[], int | float | str]
-    setter: Callable[[Any], None] | None = None  # None = read-only
-    config_key: str | None = None  # Key path for persistence (e.g., "lora.spreading_factor")
-    min_val: int | float | None = None
-    max_val: int | float | None = None
-    value_type: type = int  # int, float, str
-
-
-class GatewayParamRegistry:
-    """Registry for gateway parameters with get/set and persistence support."""
-
-    def __init__(
-        self,
-        radio: "Radio",
-        config: dict,
-        config_path: str,
-        node_id: str,
-    ):
-        self._radio = radio
-        self._config = config
-        self._config_path = config_path
-        self._node_id = node_id
-        self._params = self._build_params()
-
-    def _build_params(self) -> dict[str, GatewayParamDef]:
-        """Build the parameter definitions."""
-        radio = self._radio
-        lora_config = self._config.get("lora", {})
-
-        params = [
-            GatewayParamDef(
-                name="sf",
-                getter=lambda: radio.spreading_factor,
-                setter=lambda v: setattr(radio, "spreading_factor", int(v)),
-                config_key="lora.spreading_factor",
-                min_val=7,
-                max_val=12,
-            ),
-            GatewayParamDef(
-                name="bw",
-                getter=lambda: BW_CODE_MAP.get(radio.signal_bandwidth, 0),
-                setter=lambda v: setattr(radio, "signal_bandwidth", BW_HZ_MAP[int(v)]),
-                config_key="lora.signal_bandwidth",
-                min_val=0,
-                max_val=2,
-            ),
-            GatewayParamDef(
-                name="txpwr",
-                getter=lambda: radio.tx_power,
-                setter=lambda v: setattr(radio, "tx_power", int(v)),
-                config_key="lora.tx_power",
-                min_val=5,
-                max_val=23,
-            ),
-            GatewayParamDef(
-                name="nodeid",
-                getter=lambda: self._node_id,
-                setter=None,  # Read-only
-                value_type=str,
-            ),
-            GatewayParamDef(
-                name="n2g_freq",
-                getter=lambda: lora_config.get("n2g_frequency_mhz", 915.0),
-                setter=None,  # Frequency changes require restart
-                value_type=float,
-            ),
-            GatewayParamDef(
-                name="g2n_freq",
-                getter=lambda: lora_config.get("g2n_frequency_mhz", 915.5),
-                setter=None,  # Frequency changes require restart
-                value_type=float,
-            ),
-        ]
-        return {p.name: p for p in params}
-
-    def get_all(self) -> dict[str, Any]:
-        """Get all parameter values."""
-        return {name: p.getter() for name, p in sorted(self._params.items())}
-
-    def get(self, name: str) -> tuple[Any | None, str | None]:
-        """Get a parameter value. Returns (value, None) or (None, error_msg)."""
-        p = self._params.get(name)
-        if p is None:
-            return None, f"unknown param: {name}"
-        return p.getter(), None
-
-    def set(self, name: str, value_str: str) -> tuple[Any | None, str | None]:
-        """
-        Set a parameter value and persist to config.
-
-        Returns (new_value, None) on success or (None, error_msg) on failure.
-        """
-        p = self._params.get(name)
-        if p is None:
-            return None, f"unknown param: {name}"
-        if p.setter is None:
-            return None, f"read-only: {name}"
-
-        # Parse value
-        try:
-            if p.value_type is int:
-                val = int(value_str)
-            elif p.value_type is float:
-                val = float(value_str)
-            else:
-                val = value_str
-        except ValueError:
-            return None, f"invalid value: {value_str}"
-
-        # Range check
-        if p.min_val is not None and val < p.min_val:
-            return None, f"range: {p.min_val}..{p.max_val}"
-        if p.max_val is not None and val > p.max_val:
-            return None, f"range: {p.min_val}..{p.max_val}"
-
-        # Apply the change
-        p.setter(val)
-
-        # Persist to config file if there's a config key
-        if p.config_key and self._config_path:
-            # For bandwidth, persist the Hz value not the code
-            if name == "bw":
-                persist_val = BW_HZ_MAP[int(val)]
-            else:
-                persist_val = val
-            update_config_file(self._config_path, {p.config_key: persist_val})
-
-        return p.getter(), None
 
 
 class CommandHandler(BaseHTTPRequestHandler):
@@ -528,7 +379,11 @@ class CommandHandler(BaseHTTPRequestHandler):
         self.wfile.write(json.dumps({name: new_value}).encode("utf-8"))
 
     def _handle_rcfg_radio(self) -> None:
-        """Handle POST /gateway/rcfg_radio - apply staged radio config (no persist)."""
+        """Handle POST /gateway/rcfg_radio - apply staged radio config (no persist).
+
+        Config is applied by the LoRaTransceiver thread to avoid SPI contention.
+        This handler waits for the transceiver to apply the pending config.
+        """
         gateway_state = getattr(self.server, "gateway_state", None)
         if gateway_state is None or gateway_state.radio_state is None:
             self.send_response(503)
@@ -541,13 +396,27 @@ class CommandHandler(BaseHTTPRequestHandler):
             return
 
         radio_state = gateway_state.radio_state
-        applied = radio_state.apply_pending()
 
-        if not applied:
+        # Check if there's anything to apply
+        if not radio_state.has_pending():
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
             self.end_headers()
             self.wfile.write(json.dumps({"r": "nothing"}).encode("utf-8"))
+            return
+
+        # Wait for LoRaTransceiver to apply the pending config
+        # (it checks has_pending() at the top of each loop iteration)
+        success, applied = radio_state.wait_for_apply(timeout=1.0)
+
+        if not success:
+            self.send_response(504)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "error": "timeout",
+                "message": "Timed out waiting for config to be applied",
+            }).encode("utf-8"))
             return
 
         # NO persist here - savecfg handles persistence
