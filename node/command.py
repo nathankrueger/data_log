@@ -13,6 +13,7 @@ with json.dumps(sort_keys=True).
 from __future__ import annotations
 
 import logging
+import subprocess
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -133,6 +134,22 @@ def _handle_rssi(radio_state: RadioState, _cmd: str, args: list[str]) -> dict:
     return {"r": rssi}
 
 
+def _handle_reset(_cmd: str, args: list[str]) -> None:
+    """
+    Handle reset command - restart the node service.
+
+    Spawns a detached process that waits 1 second (to allow ACK to be sent)
+    then restarts the node.service via systemctl.
+
+    Uses early_ack=True so ACK is sent before restart begins.
+    """
+    logger.info("[HANDLER] Reset command received - restarting node.service in 1s")
+    subprocess.Popen(
+        ["sh", "-c", "sleep 1 && sudo systemctl restart node.service"],
+        start_new_session=True,
+    )
+
+
 # =============================================================================
 # Init Function
 # =============================================================================
@@ -226,6 +243,7 @@ def commands_init(registry: CommandRegistry, state: NodeState) -> None:
         "getparams",
         "ping",
         "rcfg_radio",
+        "reset",
         "rssi",
         "savecfg",
         "setparam",
@@ -239,19 +257,20 @@ def commands_init(registry: CommandRegistry, state: NodeState) -> None:
     #
     # ack_jitter=True: Random delay before ACK (for broadcast discovery)
     commands = [
-        # ping - broadcast and private variants
-        ("ping", _handle_ping, CommandScope.BROADCAST, True, False),
-        ("ping", _handle_ping, CommandScope.PRIVATE, True, False),
+        # ping - responds to both broadcast and private
+        ("ping", _handle_ping, CommandScope.ANY, True, False),
         # discover - broadcast with jitter to avoid ACK collisions
         ("discover", _handle_ping, CommandScope.BROADCAST, True, True),
-        # echo - returns response payload
-        ("echo", _handle_echo, CommandScope.PRIVATE, False, False),
+        # echo - returns response payload (ANY scope for broadcast support)
+        ("echo", _handle_echo, CommandScope.ANY, False, False),
         # param commands - pass radio_state for pending value access
         ("getcmds", partial(_handle_getcmds, cmd_names), CommandScope.ANY, False, False),
         ("getparam", partial(_handle_getparam, params, radio_state), CommandScope.ANY, False, False),
         ("getparams", partial(_handle_getparams, params, radio_state), CommandScope.ANY, False, False),
         # rcfg_radio - apply staged radio params; early_ack so ACK sent before apply
         ("rcfg_radio", partial(_handle_rcfg_radio, radio_state), CommandScope.PRIVATE, True, False),
+        # reset - restart node service; PRIVATE to prevent accidental broadcast reset
+        ("reset", _handle_reset, CommandScope.PRIVATE, True, False),
         # rssi - return RSSI of the command packet; late_ack to include RSSI in response
         ("rssi", partial(_handle_rssi, radio_state), CommandScope.ANY, False, False),
         # savecfg - persist params to config file

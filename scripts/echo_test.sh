@@ -188,14 +188,17 @@ if [ "$BROADCAST" = true ]; then
 
                 # Check if this node is in acked_nodes
                 if echo "$RESPONSE" | jq -e ".acked_nodes | index(\"$node\")" > /dev/null 2>&1; then
-                    # Check if response matches
-                    ECHOED_DATA=$(echo "$RESPONSE" | jq -r ".responses[\"$node\"].r // .responses[\"$node\"].data // \"\"" 2>/dev/null)
+                    # Check if response matches - try multiple possible field names
+                    NODE_RESP=$(echo "$RESPONSE" | jq -r ".responses[\"$node\"]" 2>/dev/null)
+                    ECHOED_DATA=$(echo "$NODE_RESP" | jq -r '.r // .data // .echo // ""' 2>/dev/null)
                     if [ "$ECHOED_DATA" = "$SEND_DATA" ]; then
                         SUCCESS=$((SUCCESS + 1))
                         NODE_SUCCESS[$node]=$((NODE_SUCCESS[$node] + 1))
                     else
                         MISMATCH=$((MISMATCH + 1))
                         NODE_MISMATCH[$node]=$((NODE_MISMATCH[$node] + 1))
+                        # Debug: show what we got
+                        echo "  [DEBUG] $node: expected='$SEND_DATA' got='$ECHOED_DATA' raw='$NODE_RESP'" >&2
                     fi
                 else
                     FAIL=$((FAIL + 1))
