@@ -36,6 +36,7 @@
         "initial_retry_ms": 300,
         "retry_multiplier": 1.1,
         "max_retry_ms": 5000,
-        "discovery_retries": 30
+        "discovery_retries": 30,
+        "wait_timeout": 30
     }
 }

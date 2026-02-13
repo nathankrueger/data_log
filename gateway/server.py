@@ -151,7 +151,9 @@ def run_gateway(
         max_retry_ms=command_config.get("max_retry_ms", 5000),
         retry_multiplier=command_config.get("retry_multiplier", 1.5),
         discovery_retries=command_config.get("discovery_retries", 30),
+        wait_timeout=command_config.get("wait_timeout", 30.0),
     )
+    command_queue.validate_timeouts()  # Warn if wait_timeout < max_retry_time
     gateway_state.command_queue = command_queue
 
     # Build discovery config from command_server section

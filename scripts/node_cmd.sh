@@ -10,7 +10,7 @@
 #   -c <command>  Command name (required unless -d)
 #   -a <arg>      Command argument (can be repeated; for -d: retry count)
 #   -d            Discover all reachable nodes
-#   -w            Wait for response (uses GET endpoint with 10s timeout)
+#   -w            Wait for response (timeout fetched from gateway + 5s buffer)
 #   -g <gateway>  Gateway host (default: $GATEWAY_HOST or localhost)
 #   -p <port>     Gateway port (default: $GATEWAY_PORT or 5001)
 #   -h            Show this help
@@ -134,9 +134,14 @@ elif [ "$WAIT" = true ]; then
         done
     fi
 
+    # Fetch server-side wait_timeout and add buffer for curl
+    # This ensures curl timeout > server timeout so we get proper 504 responses
+    SERVER_TIMEOUT=$(curl -sS --max-time 5 "http://$GATEWAY_HOST:$GATEWAY_PORT/gateway/param/wait_timeout" 2>/dev/null | jq -r '.wait_timeout // 20 | floor')
+    CURL_TIMEOUT=$((SERVER_TIMEOUT + 5))
+
     # Capture stderr separately to get clean error messages
     STDERR_FILE=$(mktemp)
-    RESPONSE=$(curl -sS --max-time 10 -w "\n%{http_code}" "$URL$QUERY" 2>"$STDERR_FILE")
+    RESPONSE=$(curl -sS --max-time "$CURL_TIMEOUT" -w "\n%{http_code}" "$URL$QUERY" 2>"$STDERR_FILE")
     CURL_EXIT=$?
     STDERR=$(cat "$STDERR_FILE")
     rm -f "$STDERR_FILE"

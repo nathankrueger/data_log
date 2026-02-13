@@ -204,8 +204,9 @@ class CommandHandler(BaseHTTPRequestHandler):
         logger.info(f"Queued '{cmd}' for {node_id}, waiting for response...")
 
         # Wait for response with timeout
+        wait_timeout = self.server.command_queue.wait_timeout  # type: ignore
         response = self.server.command_queue.wait_for_response(  # type: ignore
-            command_id, timeout=10.0
+            command_id, timeout=wait_timeout
         )
 
         if response is not None:
@@ -223,7 +224,7 @@ class CommandHandler(BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(json.dumps({
                 "error": "timeout",
-                "message": f"No response from node '{node_id}' within 10 seconds",
+                "message": f"No response from node '{node_id}' within {wait_timeout} seconds",
             }).encode("utf-8"))
 
     def _handle_discover(self, parsed) -> None:

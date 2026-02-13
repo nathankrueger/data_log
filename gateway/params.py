@@ -173,6 +173,16 @@ def build_gateway_params(state: GatewayState) -> list[GatewayParamDef]:
                 max_val=100,
                 staged=False,
             ),
+            GatewayParamDef(
+                name="wait_timeout",
+                getter=lambda cq=cq: cq.wait_timeout,
+                setter=lambda v, cq=cq: setattr(cq, "wait_timeout", float(v)),
+                config_key="command_server.wait_timeout",
+                min_val=1.0,
+                max_val=300.0,
+                value_type=float,
+                staged=False,
+            ),
         ])
 
     return params

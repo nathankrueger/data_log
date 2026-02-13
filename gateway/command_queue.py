@@ -64,6 +64,7 @@ class CommandQueue:
         max_retry_ms: int = 5000,
         retry_multiplier: float = 1.5,
         discovery_retries: int = 30,
+        wait_timeout: float = 30.0,
     ):
         """
         Initialize the command queue.
@@ -75,6 +76,7 @@ class CommandQueue:
             max_retry_ms: Maximum retry delay (backoff cap)
             retry_multiplier: Backoff multiplier per retry (default 1.5)
             discovery_retries: Retry count for discovery operations
+            wait_timeout: HTTP wait timeout for command responses (seconds)
         """
         self._queue: deque[PendingCommand] = deque()
         self._max_size = max_size
@@ -85,6 +87,7 @@ class CommandQueue:
         self._max_retry_ms = max_retry_ms
         self._retry_multiplier = retry_multiplier
         self._discovery_retries = discovery_retries
+        self._wait_timeout = wait_timeout
         self._completed_responses: dict[str, tuple[float, dict]] = {}
         self._response_ttl = 60.0  # seconds to keep completed responses
 
@@ -105,6 +108,7 @@ class CommandQueue:
     @max_retries.setter
     def max_retries(self, val: int) -> None:
         self._max_retries = val
+        self.validate_timeouts()
 
     @property
     def initial_retry_ms(self) -> int:
@@ -113,6 +117,7 @@ class CommandQueue:
     @initial_retry_ms.setter
     def initial_retry_ms(self, val: int) -> None:
         self._initial_retry_ms = val
+        self.validate_timeouts()
 
     @property
     def max_retry_ms(self) -> int:
@@ -121,6 +126,7 @@ class CommandQueue:
     @max_retry_ms.setter
     def max_retry_ms(self, val: int) -> None:
         self._max_retry_ms = val
+        self.validate_timeouts()
 
     @property
     def retry_multiplier(self) -> float:
@@ -129,6 +135,7 @@ class CommandQueue:
     @retry_multiplier.setter
     def retry_multiplier(self, val: float) -> None:
         self._retry_multiplier = val
+        self.validate_timeouts()
 
     @property
     def discovery_retries(self) -> int:
@@ -137,6 +144,41 @@ class CommandQueue:
     @discovery_retries.setter
     def discovery_retries(self, val: int) -> None:
         self._discovery_retries = val
+
+    @property
+    def wait_timeout(self) -> float:
+        return self._wait_timeout
+
+    @wait_timeout.setter
+    def wait_timeout(self, val: float) -> None:
+        self._wait_timeout = val
+        self.validate_timeouts()
+
+    # ─── Timeout Validation ─────────────────────────────────────────────────────
+
+    def calculate_max_retry_time(self) -> float:
+        """
+        Calculate max time (seconds) to exhaust all retries.
+
+        This is the sum of all inter-retry delays, not including transmission time.
+        """
+        total_ms = 0.0
+        for i in range(1, self._max_retries):  # delays between attempts
+            delay = min(
+                self._initial_retry_ms * (self._retry_multiplier ** (i - 1)),
+                self._max_retry_ms,
+            )
+            total_ms += delay
+        return total_ms / 1000
+
+    def validate_timeouts(self) -> None:
+        """Log warning if wait_timeout < max_retry_time."""
+        max_retry_time = self.calculate_max_retry_time()
+        if self._wait_timeout < max_retry_time:
+            logger.warning(
+                f"wait_timeout ({self._wait_timeout:.1f}s) < max_retry_time ({max_retry_time:.1f}s). "
+                f"Commands may be cancelled before all retries are exhausted."
+            )
 
     def add(
         self, cmd: str, args: list[str], node_id: str, max_retries: int | None = None
