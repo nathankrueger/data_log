@@ -438,14 +438,17 @@ def parse_ack_packet(data: bytes) -> AckPacket | None:
     try:
         message = json.loads(data.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        cmd_logger.debug("ACK_PARSE json_error=%s data=%r", e, data[:100])
+        logger = logging.getLogger(__name__)
+        logger.warning("ACK_JSON_FAIL len=%d error=%s data=%r", len(data), e, data[:100])
         return None
 
     # Check message type
     msg_type = message.get("t")
     if msg_type != "ack":
-        logger = logging.getLogger(__name__)
-        logger.warning("ACK_TYPE_FAIL got=%s expected=ack keys=%s", msg_type, list(message.keys()))
+        # Only warn if this looks like an ACK (has "id" field) but wrong type
+        if "id" in message:
+            logger = logging.getLogger(__name__)
+            logger.warning("ACK_TYPE_FAIL got=%s expected=ack keys=%s", msg_type, list(message.keys()))
         return None
 
     # Verify CRC
