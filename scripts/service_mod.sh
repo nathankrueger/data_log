@@ -14,6 +14,8 @@ OPTIONS:
     -i, --install SERVICE_NAME      Install a service from services/ folder
     -u, --uninstall SERVICE_NAME    Uninstall and fully remove a service
     -U, --uninstall-all             Uninstall all registered services
+    -s, --stop SERVICE_NAME         Stop a running service
+    -S, --start SERVICE_NAME        Start a stopped service
     -r, --restart SERVICE_NAME      Restart a service
     -l, --list                      List all services in services/ folder and their status
     -f, --follow SERVICE_NAME       Follow service logs in real-time (Ctrl+C to stop)
@@ -24,6 +26,8 @@ EXAMPLES:
     $(basename "$0") --install gateway
     $(basename "$0") --uninstall data_log
     $(basename "$0") --uninstall-all
+    $(basename "$0") --stop gateway
+    $(basename "$0") --start gateway
     $(basename "$0") --restart gateway
     $(basename "$0") --list
     $(basename "$0") --follow node
@@ -218,6 +222,46 @@ uninstall_all_services() {
     echo "Uninstalled ${#installed_services[@]} service(s)."
 }
 
+stop_service() {
+    local service_name="${1}.service"
+
+    if [ ! -f "/etc/systemd/system/$service_name" ]; then
+        echo "Error: Service not installed: $service_name"
+        exit 1
+    fi
+
+    echo "Stopping service: $service_name"
+    sudo systemctl stop "$service_name"
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to stop service"
+        exit 1
+    fi
+
+    echo ""
+    echo "Service stopped successfully!"
+    sudo systemctl status "$service_name" --no-pager -l
+}
+
+start_service() {
+    local service_name="${1}.service"
+
+    if [ ! -f "/etc/systemd/system/$service_name" ]; then
+        echo "Error: Service not installed: $service_name"
+        exit 1
+    fi
+
+    echo "Starting service: $service_name"
+    sudo systemctl start "$service_name"
+    if [ $? -ne 0 ]; then
+        echo "Error: Failed to start service"
+        exit 1
+    fi
+
+    echo ""
+    echo "Service started successfully!"
+    sudo systemctl status "$service_name" --no-pager -l
+}
+
 restart_service() {
     local service_name="${1}.service"
 
@@ -289,6 +333,24 @@ case "$1" in
         ;;
     -U|--uninstall-all)
         uninstall_all_services
+        exit 0
+        ;;
+    -s|--stop)
+        if [ -z "$2" ]; then
+            echo "Error: Service name required for stop"
+            usage
+            exit 1
+        fi
+        stop_service "$2"
+        exit 0
+        ;;
+    -S|--start)
+        if [ -z "$2" ]; then
+            echo "Error: Service name required for start"
+            usage
+            exit 1
+        fi
+        start_service "$2"
         exit 0
         ;;
     -r|--restart)

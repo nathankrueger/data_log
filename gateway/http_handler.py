@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import json
 import logging
+import subprocess
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
@@ -50,6 +51,10 @@ class CommandHandler(BaseHTTPRequestHandler):
 
     def do_POST(self) -> None:
         """Handle POST requests."""
+        if self.path == "/gateway/restart":
+            self._handle_restart()
+            return
+
         if self.path == "/gateway/rcfg_radio":
             self._handle_rcfg_radio()
             return
@@ -512,6 +517,24 @@ class CommandHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps({"r": "saved"}).encode("utf-8"))
+
+    def _handle_restart(self) -> None:
+        """Handle POST /gateway/restart - restart gateway service."""
+        # Send response before initiating restart
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"status": "restarting"}).encode("utf-8"))
+
+        # Spawn detached process: wait 1s to ensure HTTP response completes, then restart
+        # start_new_session=True detaches from parent so it survives our death
+        logger.info("Restart endpoint triggered - spawning systemctl restart in 1s")
+        subprocess.Popen(
+            ["sh", "-c", "sleep 1 && sudo systemctl restart gateway.service"],
+            start_new_session=True,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.DEVNULL,
+        )
 
     def log_message(self, format: str, *args) -> None:
         """Suppress default HTTP logging, use our logger instead."""

@@ -301,8 +301,13 @@ def run_gateway(
         if screen_manager:
             screen_manager.set_page(0)  # Switch to OffPage
 
+    def on_sigterm(signum, frame):
+        logger.info("Received SIGTERM - initiating shutdown")
+        raise KeyboardInterrupt()
+
     signal.signal(signal.SIGUSR1, enable_flash)
     signal.signal(signal.SIGUSR2, disable_flash)
+    signal.signal(signal.SIGTERM, on_sigterm)
     logger.info("Signal handlers registered (SIGUSR1=enable, SIGUSR2=disable LED/display)")
 
     # Run forever (threads are daemon threads, so Ctrl+C will stop everything)

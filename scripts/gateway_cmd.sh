@@ -13,6 +13,7 @@ Options:
   -s <param>    Set/stage parameter (requires value argument)
   -r            Apply staged radio config (rcfg_radio, no persist)
   -S            Save all params to config file (savecfg)
+  -R            Restart the gateway service
   -H <host>     Gateway host (default: $GATEWAY_HOST or localhost)
   -p <port>     Gateway port (default: $GATEWAY_PORT or 5001)
   -h            Show this help
@@ -51,9 +52,10 @@ OPT_HOST=""
 OPT_PORT=""
 DO_RCFG=0
 DO_SAVE=0
+DO_RESTART=0
 
 # Use GNU getopt for proper argument reordering (handles "-s sf 9 -r" correctly)
-PARSED=$(getopt -o lGg:s:rSH:p:h -n "$(basename "$0")" -- "$@") || usage
+PARSED=$(getopt -o lGg:s:rSRH:p:h -n "$(basename "$0")" -- "$@") || usage
 eval set -- "$PARSED"
 
 while true; do
@@ -84,6 +86,10 @@ while true; do
             DO_SAVE=1
             shift
             ;;
+        -R)
+            DO_RESTART=1
+            shift
+            ;;
         -H)
             OPT_HOST="$2"
             shift 2
@@ -106,8 +112,8 @@ while true; do
 done
 
 # Must specify at least one action
-if [ -z "$MODE" ] && [ $DO_RCFG -eq 0 ] && [ $DO_SAVE -eq 0 ]; then
-    echo "Error: specify -l, -G, -g <param>, -s <param> <value>, -r, or -S"
+if [ -z "$MODE" ] && [ $DO_RCFG -eq 0 ] && [ $DO_SAVE -eq 0 ] && [ $DO_RESTART -eq 0 ]; then
+    echo "Error: specify -l, -G, -g <param>, -s <param> <value>, -r, -S, or -R"
     usage
 fi
 
@@ -202,4 +208,9 @@ fi
 # Save config if requested
 if [ $DO_SAVE -eq 1 ]; then
     do_curl POST "$BASE_URL/gateway/savecfg" "{}"
+fi
+
+# Restart gateway if requested
+if [ $DO_RESTART -eq 1 ]; then
+    do_curl POST "$BASE_URL/gateway/restart" "{}"
 fi
