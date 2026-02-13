@@ -293,13 +293,26 @@ run_transition() {
     return $exit_code
 }
 
+# Format elapsed seconds as [HH:][MM:]SS
+format_elapsed() {
+    local secs=$1
+    if [[ $secs -lt 60 ]]; then
+        echo "${secs}s"
+    elif [[ $secs -lt 3600 ]]; then
+        printf "%d:%02d" $((secs / 60)) $((secs % 60))
+    else
+        printf "%d:%02d:%02d" $((secs / 3600)) $(((secs % 3600) / 60)) $((secs % 60))
+    fi
+}
+
 # Main test loop
 START_TIME=$(date +%s)
 total_transitions=$((COUNT * 2))
 transition_num=0
 
 for cycle in $(seq 1 "$COUNT"); do
-    echo "--- Cycle $cycle/$COUNT ---"
+    CYCLE_START=$(date +%s)
+    echo "--- Cycle $cycle/$COUNT started @ $(date '+%H:%M:%S') ---"
 
     # Apply new params
     ((transition_num++)) || true
@@ -319,6 +332,9 @@ for cycle in $(seq 1 "$COUNT"); do
         sleep "$SETTLE_TIME"
     fi
 
+    CYCLE_END=$(date +%s)
+    CYCLE_ELAPSED=$((CYCLE_END - CYCLE_START))
+    echo "--- Cycle $cycle/$COUNT complete ($(format_elapsed $CYCLE_ELAPSED) elapsed) ---"
     echo ""
 done
 
@@ -330,7 +346,7 @@ ELAPSED=$((END_TIME - START_TIME))
 echo "=== Summary ==="
 if [[ "$DRY_RUN" == "true" ]]; then
     echo "Transitions: $total_transitions would be attempted (dry-run)"
-    echo "Total time: ${ELAPSED}s"
+    echo "Total time: $(format_elapsed $ELAPSED)"
     exit 0
 fi
 
@@ -340,7 +356,7 @@ if [[ $total_transitions -gt 0 ]]; then
 fi
 
 echo "Transitions: ${TRANSITIONS_OK}/${total_transitions} succeeded (${success_rate}%)"
-echo "Total time: ${ELAPSED}s"
+echo "Total time: $(format_elapsed $ELAPSED)"
 
 # Verify final state
 echo ""
