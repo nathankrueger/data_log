@@ -299,10 +299,11 @@ class LoRaTransceiver(threading.Thread):
         # Otherwise, process as sensor data
         result = parse_lora_packet(packet)
         if result is None:
-            if self._verbose_logging:
-                logger.warning(f"Invalid LoRa packet (RSSI: {rssi} dB): {packet!r}")
-            else:
-                logger.warning(f"Invalid LoRa packet (RSSI: {rssi} dB): {packet[:50]}...")
+            # Log hex dump for debugging packet issues
+            hex_bytes = ' '.join(f'{b:02x}' for b in packet[:80])
+            logger.warning(
+                f"Invalid LoRa packet (RSSI: {rssi} dB, len={len(packet)}): {hex_bytes}"
+            )
             return
 
         node_id, readings = result
