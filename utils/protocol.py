@@ -114,6 +114,14 @@ def verify_crc(data: dict, crc_key: str = "crc") -> bool:
         return False
     expected = data[crc_key]
     actual = calculate_crc32(data, crc_key)
+    if expected != actual:
+        # Debug: show CRC input string for mismatch analysis
+        data_copy = {k: v for k, v in data.items() if k != crc_key}
+        crc_input = json.dumps(data_copy, sort_keys=True, separators=(",", ":"))
+        cmd_logger.debug(
+            "CRC_MISMATCH expected=%s actual=%s crc_input=%r",
+            expected, actual, crc_input
+        )
     return expected == actual
 
 
