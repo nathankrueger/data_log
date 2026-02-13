@@ -126,7 +126,7 @@ class CommandReceiver(threading.Thread):
         registry: CommandRegistry,
         receive_timeout: float = 0.5,
         radio_state: RadioState | None = None,
-        broadcast_ack_jitter_sec: float = 0.5,
+        broadcast_ack_jitter_sec: float = 0.25,
     ):
         """
         Initialize the command receiver.
@@ -204,7 +204,7 @@ class CommandReceiver(threading.Thread):
         """
         if add_jitter and self._broadcast_ack_jitter_sec > 0:
             jitter = random.uniform(0, self._broadcast_ack_jitter_sec)
-            logger.debug(f"Discovery ACK jitter: {jitter * 1000:.0f}ms")
+            logger.debug(f"Broadcast ACK jitter: {jitter * 1000:.0f}ms")
             time.sleep(jitter)
         n2g_freq = self._get_n2g_freq()
         t0 = time.time()
@@ -241,10 +241,12 @@ class CommandReceiver(threading.Thread):
         command_id = cmd.get_command_id()
         is_duplicate = command_id == self._last_command_id
 
-        # Look up handler to check early_ack and ack_jitter flags
+        # Look up handler to check early_ack flag
         handler = self._registry.lookup(cmd.command, cmd.node_id)
         use_early_ack = handler is None or handler.early_ack
-        add_jitter = handler is not None and handler.ack_jitter
+        # Add jitter for ALL broadcast responses to prevent ACK collisions
+        is_broadcast = cmd.node_id == ""
+        add_jitter = is_broadcast and self._broadcast_ack_jitter_sec > 0
 
         if is_duplicate:
             logger.info(
@@ -665,7 +667,7 @@ def main():
         # Start command receiver if enabled
         if command_receiver_enabled and radio_lock is not None:
             receive_timeout = command_config.get("receive_timeout", 0.1)
-            jitter_ms = command_config.get("broadcast_ack_jitter_ms", 500)
+            jitter_ms = command_config.get("broadcast_ack_jitter_ms", 250)
             command_receiver = CommandReceiver(
                 radio=radio,
                 radio_lock=radio_lock,
