@@ -126,7 +126,7 @@ class CommandReceiver(threading.Thread):
         registry: CommandRegistry,
         receive_timeout: float = 0.5,
         radio_state: RadioState | None = None,
-        broadcast_ack_jitter_sec: float = 0.25,
+        broadcast_ack_jitter_sec: float = 0.5,
     ):
         """
         Initialize the command receiver.
@@ -175,14 +175,10 @@ class CommandReceiver(threading.Thread):
 
         while self._running:
             try:
-                # Read frequencies fresh each iteration (catches rcfg_radio updates)
-                g2n_freq = self._get_g2n_freq()
-
-                # Listen for commands on G2N using interruptible receive
-                # Lock is held for the entire RX window (like AB01's continuous RX)
-                with self._radio_lock:
-                    self._radio.set_frequency(g2n_freq)
-                    packet = self._receive_interruptible(timeout=self._receive_timeout)
+                # Use interruptible receive with fine-grained internal locking
+                # This allows broadcast_loop to transmit during 100ms sleep intervals
+                # while maintaining long effective RX windows (4+ seconds)
+                packet = self._receive_interruptible(self._receive_timeout)
 
                 if packet is not None:
                     self._process_packet(packet)
@@ -227,15 +223,19 @@ class CommandReceiver(threading.Thread):
             return success
 
     def _receive_interruptible(self, timeout: float) -> bytes | None:
-        """Receive with periodic shutdown check (matches AB01's continuous RX).
+        """Receive with interruptible polling and fine-grained locking.
 
-        Unlike radio.receive(timeout), this:
-        1. Enters RX mode once (like AB01's Radio.Rx(0))
-        2. Polls rx_done() every 100ms
-        3. Checks self._running to respond to shutdown quickly
+        Uses fine-grained locking to allow broadcast_loop to transmit during
+        sleep intervals while maintaining long effective RX windows:
+        1. Acquires lock briefly each iteration (~10ms)
+        2. Sets frequency and enters RX mode (handles rcfg_radio changes)
+        3. Checks rx_done() and reads packet if available
+        4. Releases lock during 100ms sleep (broadcast_loop can transmit)
 
-        This gives us a long effective RX window (4+ seconds) while still
-        being able to shut down within ~100ms.
+        This gives us AB01-like continuous RX windows (4+ seconds total) while:
+        - Responding to shutdown within ~100ms
+        - Not blocking broadcast_loop for entire timeout duration
+        - Handling frequency changes from rcfg_radio
 
         Args:
             timeout: Maximum time to wait for a packet (seconds)
@@ -243,18 +243,26 @@ class CommandReceiver(threading.Thread):
         Returns:
             Received packet bytes, or None if timeout/shutdown
         """
-        self._radio.listen()  # Enter RX mode once
         start = time.monotonic()
 
         while self._running:
-            if self._radio.rx_done():
-                # Packet arrived - read it immediately (timeout=0)
-                return self._radio.receive(timeout=0)
+            with self._radio_lock:
+                # Set frequency and enter RX mode each iteration
+                # (broadcast_loop may have changed frequency, or rcfg_radio applied)
+                self._radio.set_frequency(self._get_g2n_freq())
+                self._radio.listen()
 
+                # Check for packet
+                if self._radio.rx_done():
+                    # Read packet immediately while we have lock
+                    # Note: timeout=0 doesn't work (library times out before reading)
+                    return self._radio.receive(timeout=0.5)
+
+            # Release lock during sleep - broadcast_loop can transmit
             if time.monotonic() - start >= timeout:
                 return None  # Timeout
 
-            time.sleep(0.1)  # 100ms between checks - fast shutdown response
+            time.sleep(0.1)  # 100ms between polls - fast shutdown response
 
         return None  # Shutdown requested
 
@@ -707,7 +715,7 @@ def main():
         # Start command receiver if enabled
         if command_receiver_enabled and radio_lock is not None:
             receive_timeout = command_config.get("receive_timeout", 4.0)
-            jitter_ms = command_config.get("broadcast_ack_jitter_ms", 250)
+            jitter_ms = command_config.get("broadcast_ack_jitter_ms", 500)
             command_receiver = CommandReceiver(
                 radio=radio,
                 radio_lock=radio_lock,
