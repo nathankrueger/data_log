@@ -442,16 +442,20 @@ def parse_ack_packet(data: bytes) -> AckPacket | None:
         return None
 
     # Check message type
-    if message.get("t") != "ack":
+    msg_type = message.get("t")
+    if msg_type != "ack":
+        logger = logging.getLogger(__name__)
+        logger.warning("ACK_TYPE_FAIL got=%s expected=ack keys=%s", msg_type, list(message.keys()))
         return None
 
     # Verify CRC
     if not verify_crc(message, crc_key="c"):
         expected = message.get("c", "missing")
         actual = calculate_crc32(message, crc_key="c")
-        cmd_logger.debug(
-            "ACK_CRC_FAIL expected=%s actual=%s id=%s node=%s payload=%s",
-            expected, actual, message.get("id"), message.get("n"), message.get("p"),
+        logger = logging.getLogger(__name__)
+        logger.warning(
+            "ACK_CRC_FAIL expected=%s actual=%s id=%s node=%s",
+            expected, actual, message.get("id"), message.get("n"),
         )
         return None
 
