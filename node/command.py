@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import logging
 import subprocess
+import time
 from functools import partial
 from typing import TYPE_CHECKING
 
@@ -134,6 +135,18 @@ def _handle_rssi(radio_state: RadioState, _cmd: str, args: list[str]) -> dict:
     return {"r": rssi}
 
 
+def _handle_uptime(start_time: float, _cmd: str, args: list[str]) -> dict:
+    """
+    Handle uptime command - returns seconds since node started.
+
+    Uses early_ack=false so uptime is included in response payload.
+    Returns {"r": uptime_seconds} as integer.
+    """
+    uptime = int(time.time() - start_time)
+    logger.info(f"[HANDLER] Uptime: {uptime}s")
+    return {"r": uptime}
+
+
 def _handle_reset(_cmd: str, args: list[str]) -> None:
     """
     Handle reset command - restart the node service.
@@ -247,6 +260,7 @@ def commands_init(registry: CommandRegistry, state: NodeState) -> None:
         "rssi",
         "savecfg",
         "setparam",
+        "uptime",
     ])
 
     # ─── Command Table ───────────────────────────────────────────────────────
@@ -277,6 +291,8 @@ def commands_init(registry: CommandRegistry, state: NodeState) -> None:
         ("savecfg", partial(_handle_savecfg, params, config_path), CommandScope.PRIVATE, False, False),
         # setparam - late_ack to get error response; staged params applied by rcfg_radio
         ("setparam", partial(_handle_setparam, params, radio_state), CommandScope.PRIVATE, False, False),
+        # uptime - returns seconds since node started; late_ack to include uptime in response
+        ("uptime", partial(_handle_uptime, state.start_time), CommandScope.ANY, False, False),
     ]
 
     # Register all commands
