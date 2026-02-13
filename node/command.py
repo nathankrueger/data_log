@@ -19,6 +19,7 @@ from functools import partial
 from typing import TYPE_CHECKING
 
 from utils.command_registry import CommandRegistry, CommandScope
+from utils.led import parse_color, scale_brightness
 from utils.params import ParamDef, param_get, param_set, params_list, cmds_list, params_save
 from utils.radio_state import RadioState
 
@@ -163,6 +164,135 @@ def _handle_reset(_cmd: str, args: list[str]) -> None:
     )
 
 
+def _handle_blink(state: NodeState, _cmd: str, args: list[str]) -> None:
+    """
+    Handle blink command - sets LED to a color for a duration (non-blocking).
+
+    Args:
+        args[0]: Color name (required) - "red"/"r", "green"/"g", "blue"/"b",
+                 "yellow"/"y", "cyan"/"c", "magenta"/"m", "white"/"w", "off"/"o"
+        args[1]: Duration in seconds (optional, default 0.5)
+        args[2]: Brightness 0-255 (optional, default from config)
+
+    Uses RgbLed.flash() for non-blocking operation.
+    Uses early_ack=True so ACK is sent before flash starts.
+    """
+    if state.led is None:
+        logger.warning("[HANDLER] blink: LED not available")
+        return
+
+    if not args:
+        logger.warning("[HANDLER] blink: missing color argument")
+        return
+
+    # Parse color
+    rgb = parse_color(args[0])
+    if rgb is None:
+        logger.warning(f"[HANDLER] blink: unrecognized color '{args[0]}'")
+        return
+
+    # Parse optional duration (default 0.5s)
+    duration = 0.5
+    if len(args) >= 2:
+        try:
+            duration = float(args[1])
+            if duration <= 0:
+                logger.warning("[HANDLER] blink: duration must be positive")
+                return
+        except ValueError:
+            logger.warning(f"[HANDLER] blink: invalid duration '{args[1]}'")
+            return
+
+    # Parse optional brightness (default from config)
+    brightness = state.default_brightness
+    if len(args) >= 3:
+        try:
+            brightness = int(args[2])
+            if not 0 <= brightness <= 255:
+                logger.warning("[HANDLER] blink: brightness must be 0-255")
+                return
+        except ValueError:
+            logger.warning(f"[HANDLER] blink: invalid brightness '{args[2]}'")
+            return
+
+    # Scale RGB by brightness and flash
+    scaled = scale_brightness(rgb, brightness)
+    logger.info(
+        f"[HANDLER] blink: color={args[0]} duration={duration}s brightness={brightness}"
+    )
+    state.led.flash(scaled[0], scaled[1], scaled[2], duration)
+
+
+def _handle_testled(state: NodeState, _cmd: str, args: list[str]) -> None:
+    """
+    Handle testled command - cycles through all colors for diagnostic testing.
+
+    Args:
+        args[0]: Delay in milliseconds per color (optional, default 5000)
+        args[1]: Brightness 0-255 (optional, default from config)
+
+    This is a BLOCKING command - takes ~50 seconds with default timing
+    (7 colors + 3 full-brightness primaries at 5s each).
+
+    Uses early_ack=True so ACK is sent before the test starts.
+    """
+    if state.led is None:
+        logger.warning("[HANDLER] testled: LED not available")
+        return
+
+    # Parse optional delay (default 5000ms)
+    delay_ms = 5000
+    if args:
+        try:
+            delay_ms = int(args[0])
+            if delay_ms <= 0:
+                delay_ms = 5000
+        except ValueError:
+            pass
+
+    # Parse optional brightness (default from config)
+    brightness = state.default_brightness
+    if len(args) >= 2:
+        try:
+            brightness = int(args[1])
+            if not 0 <= brightness <= 255:
+                brightness = state.default_brightness
+        except ValueError:
+            pass
+
+    delay_sec = delay_ms / 1000.0
+    logger.info(
+        f"[HANDLER] testled: cycling colors, {delay_ms}ms per step, brightness={brightness}"
+    )
+
+    # Color test sequence (matches AB01)
+    colors = [
+        ("red", (255, 0, 0)),
+        ("green", (0, 255, 0)),
+        ("blue", (0, 0, 255)),
+        ("yellow", (255, 255, 0)),
+        ("cyan", (0, 255, 255)),
+        ("magenta", (255, 0, 255)),
+        ("white", (255, 255, 255)),
+    ]
+
+    for name, rgb in colors:
+        scaled = scale_brightness(rgb, brightness)
+        logger.info(f"[HANDLER] testled: {name}")
+        state.led.set_rgb(scaled[0], scaled[1], scaled[2])
+        time.sleep(delay_sec)
+
+    # Full-brightness primary test (matches AB01)
+    logger.info("[HANDLER] testled: full-brightness RGB test")
+    for name, rgb in [("red", (255, 0, 0)), ("green", (0, 255, 0)), ("blue", (0, 0, 255))]:
+        logger.info(f"[HANDLER] testled: {name} 255")
+        state.led.set_rgb(rgb[0], rgb[1], rgb[2])
+        time.sleep(delay_sec)
+
+    state.led.off()
+    logger.info("[HANDLER] testled: complete")
+
+
 # =============================================================================
 # Init Function
 # =============================================================================
@@ -249,6 +379,7 @@ def commands_init(registry: CommandRegistry, state: NodeState) -> None:
     # ─── Sorted Command Name List ────────────────────────────────────────────
     # Built from command table, sorted for getcmds response
     cmd_names = sorted([
+        "blink",
         "discover",
         "echo",
         "getcmds",
@@ -260,6 +391,7 @@ def commands_init(registry: CommandRegistry, state: NodeState) -> None:
         "rssi",
         "savecfg",
         "setparam",
+        "testled",
         "uptime",
     ])
 
@@ -271,6 +403,8 @@ def commands_init(registry: CommandRegistry, state: NodeState) -> None:
     #
     # ack_jitter=True: Random delay before ACK (for broadcast discovery)
     commands = [
+        # blink - set LED color for duration (non-blocking)
+        ("blink", partial(_handle_blink, state), CommandScope.ANY, True, False),
         # ping - responds to both broadcast and private
         ("ping", _handle_ping, CommandScope.ANY, True, False),
         # discover - broadcast with jitter to avoid ACK collisions
@@ -291,6 +425,8 @@ def commands_init(registry: CommandRegistry, state: NodeState) -> None:
         ("savecfg", partial(_handle_savecfg, params, config_path), CommandScope.PRIVATE, False, False),
         # setparam - late_ack to get error response; staged params applied by rcfg_radio
         ("setparam", partial(_handle_setparam, params, radio_state), CommandScope.PRIVATE, False, False),
+        # testled - cycle through colors (blocking); early_ack so ACK sent before test starts
+        ("testled", partial(_handle_testled, state), CommandScope.ANY, True, False),
         # uptime - returns seconds since node started; late_ack to include uptime in response
         ("uptime", partial(_handle_uptime, state.start_time), CommandScope.ANY, False, False),
     ]

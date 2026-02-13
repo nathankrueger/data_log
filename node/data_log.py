@@ -696,6 +696,25 @@ def main():
         except Exception as e:
             logger.warning(f"Failed to initialize display: {e}")
 
+    # Initialize LED if configured
+    led = None
+    led_config = config.get("led", {})
+    if led_config:
+        try:
+            from utils.led import RgbLed
+
+            led = RgbLed(
+                red_bcm=led_config.get("red_bcm", 17),
+                green_bcm=led_config.get("green_bcm", 27),
+                blue_bcm=led_config.get("blue_bcm", 22),
+                common_anode=led_config.get("common_anode", True),
+            )
+            node_state.led = led
+            node_state.default_brightness = led_config.get("default_brightness", 128)
+            logger.info("LED initialized")
+        except Exception as e:
+            logger.warning(f"Failed to initialize LED: {e}")
+
     # Create command registry and register handlers
     command_registry = CommandRegistry(node_id)
     commands_init(command_registry, node_state)
@@ -746,6 +765,8 @@ def main():
             display_advance_button.close()
         if action_button:
             action_button.close()
+        if led:
+            led.close()
         for entry in sensors:
             entry.sensor.close()
         radio.close()

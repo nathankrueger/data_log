@@ -36,5 +36,12 @@
         "enabled": true,
         "receive_timeout": 0.5,
         "broadcast_ack_jitter_ms": 500
+    },
+    "led": {
+        "red_bcm": 17,
+        "green_bcm": 27,
+        "blue_bcm": 22,
+        "common_anode": true,
+        "default_brightness": 128
     }
 }

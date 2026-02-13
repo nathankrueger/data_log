@@ -66,6 +66,7 @@ class CommandQueue:
         max_size: int = 128,
         max_retries: int = 10,
         initial_retry_ms: int = 500,
+        min_retry_ms: int = 0,
         max_retry_ms: int = 5000,
         retry_multiplier: float = 1.5,
         discovery_retries: int = 30,
@@ -78,6 +79,7 @@ class CommandQueue:
             max_size: Maximum number of pending commands
             max_retries: Maximum retry attempts before giving up
             initial_retry_ms: Initial retry delay in milliseconds
+            min_retry_ms: Minimum retry delay floor (all retries wait at least this long)
             max_retry_ms: Maximum retry delay (backoff cap)
             retry_multiplier: Backoff multiplier per retry (default 1.5)
             discovery_retries: Retry count for discovery operations
@@ -89,6 +91,7 @@ class CommandQueue:
         self._lock = threading.Lock()
         self._max_retries = max_retries
         self._initial_retry_ms = initial_retry_ms
+        self._min_retry_ms = min_retry_ms
         self._max_retry_ms = max_retry_ms
         self._retry_multiplier = retry_multiplier
         self._discovery_retries = discovery_retries
@@ -122,6 +125,15 @@ class CommandQueue:
     @initial_retry_ms.setter
     def initial_retry_ms(self, val: int) -> None:
         self._initial_retry_ms = val
+        self.validate_timeouts()
+
+    @property
+    def min_retry_ms(self) -> int:
+        return self._min_retry_ms
+
+    @min_retry_ms.setter
+    def min_retry_ms(self, val: int) -> None:
+        self._min_retry_ms = val
         self.validate_timeouts()
 
     @property
@@ -169,9 +181,12 @@ class CommandQueue:
         """
         total_ms = 0.0
         for i in range(1, self._max_retries):  # delays between attempts
-            delay = min(
-                self._initial_retry_ms * (self._retry_multiplier ** (i - 1)),
-                self._max_retry_ms,
+            delay = max(
+                self._min_retry_ms,
+                min(
+                    self._initial_retry_ms * (self._retry_multiplier ** (i - 1)),
+                    self._max_retry_ms,
+                ),
             )
             total_ms += delay
         return total_ms / 1000
@@ -255,11 +270,14 @@ class CommandQueue:
                 self._current.retry_count += 1
                 if self._current.retry_count == 1:
                     self._current.first_sent_time = time.time()
-                # Exponential backoff with configurable multiplier, capped
-                delay_ms = min(
-                    self._initial_retry_ms
-                    * (self._retry_multiplier ** (self._current.retry_count - 1)),
-                    self._max_retry_ms,
+                # Exponential backoff with configurable multiplier, capped and floored
+                delay_ms = max(
+                    self._min_retry_ms,
+                    min(
+                        self._initial_retry_ms
+                        * (self._retry_multiplier ** (self._current.retry_count - 1)),
+                        self._max_retry_ms,
+                    ),
                 )
                 self._current.next_retry_time = time.time() + (delay_ms / 1000)
                 cmd_logger.debug(

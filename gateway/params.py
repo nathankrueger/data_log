@@ -146,6 +146,15 @@ def build_gateway_params(state: GatewayState) -> list[GatewayParamDef]:
                 staged=False,
             ),
             GatewayParamDef(
+                name="min_retry_ms",
+                getter=lambda cq=cq: cq.min_retry_ms,
+                setter=lambda v, cq=cq: setattr(cq, "min_retry_ms", int(v)),
+                config_key="command_server.min_retry_ms",
+                min_val=0,
+                max_val=30000,
+                staged=False,
+            ),
+            GatewayParamDef(
                 name="retry_multiplier",
                 getter=lambda cq=cq: cq.retry_multiplier,
                 setter=lambda v, cq=cq: setattr(cq, "retry_multiplier", float(v)),

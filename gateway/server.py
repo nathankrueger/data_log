@@ -148,6 +148,7 @@ def run_gateway(
         max_size=command_config.get("max_queue_size", 128),
         max_retries=command_config.get("max_retries", 10),
         initial_retry_ms=command_config.get("initial_retry_ms", 500),
+        min_retry_ms=command_config.get("min_retry_ms", 0),
         max_retry_ms=command_config.get("max_retry_ms", 5000),
         retry_multiplier=command_config.get("retry_multiplier", 1.5),
         discovery_retries=command_config.get("discovery_retries", 30),

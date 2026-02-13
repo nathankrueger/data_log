@@ -16,6 +16,7 @@ from utils.radio_state import RadioState
 
 if TYPE_CHECKING:
     from radio import RFM9xRadio
+    from utils.led import RgbLed
 
 
 @dataclass
@@ -56,6 +57,8 @@ class NodeState:
     sensor_readings: list[SensorReadingInfo] = field(default_factory=list)
     ocr_result: str | None = None  # None = never run, str = result or "No result found"
     ocr_in_progress: bool = False
+    led: RgbLed | None = None
+    default_brightness: int = 128
     _lock: threading.Lock = field(default_factory=threading.Lock)
 
     # ─── Backwards-Compatible Properties ────────────────────────────────────

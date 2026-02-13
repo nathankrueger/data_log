@@ -55,6 +55,58 @@ class RgbLed:
         self._led.close()
 
 
+# Color name to RGB tuple mapping (matches AB01)
+COLOR_MAP: dict[str, tuple[int, int, int]] = {
+    # Full names
+    "red": (255, 0, 0),
+    "green": (0, 255, 0),
+    "blue": (0, 0, 255),
+    "yellow": (255, 255, 0),
+    "cyan": (0, 255, 255),
+    "magenta": (255, 0, 255),
+    "white": (255, 255, 255),
+    "off": (0, 0, 0),
+    # Single-letter shortcuts
+    "r": (255, 0, 0),
+    "g": (0, 255, 0),
+    "b": (0, 0, 255),
+    "y": (255, 255, 0),
+    "c": (0, 255, 255),
+    "m": (255, 0, 255),
+    "w": (255, 255, 255),
+    "o": (0, 0, 0),
+}
+
+
+def parse_color(color_str: str) -> tuple[int, int, int] | None:
+    """
+    Parse a color name string to RGB tuple.
+
+    Accepts full names (e.g., "red") or single-letter shortcuts (e.g., "r").
+    Returns None for unrecognized colors.
+    """
+    return COLOR_MAP.get(color_str.lower())
+
+
+def scale_brightness(rgb: tuple[int, int, int], brightness: int) -> tuple[int, int, int]:
+    """
+    Scale an RGB tuple by brightness (0-255).
+
+    Args:
+        rgb: Base RGB tuple with values 0-255
+        brightness: Brightness scalar 0-255
+
+    Returns:
+        Scaled RGB tuple
+    """
+    scale = brightness / 255.0
+    return (
+        int(rgb[0] * scale),
+        int(rgb[1] * scale),
+        int(rgb[2] * scale),
+    )
+
+
 if __name__ == "__main__":
     dly = 1
     led = RgbLed(red_bcm=17, green_bcm=22, blue_bcm=27, common_anode=True)
