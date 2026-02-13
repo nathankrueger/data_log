@@ -513,6 +513,9 @@ def broadcast_loop(
                         # Acquire lock if using half-duplex coordination
                         if radio_lock:
                             with radio_lock:
+                                # Set N2G frequency before sending (CommandReceiver leaves radio on G2N)
+                                if node_state:
+                                    radio.set_frequency(node_state.n2g_freq)
                                 success = radio.send(packet)
                         else:
                             success = radio.send(packet)
