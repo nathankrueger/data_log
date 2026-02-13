@@ -88,6 +88,29 @@ class RFM9xRadio(Radio):
             raise RuntimeError("Radio not initialized. Call init() first.")
         return self._rfm9x.receive(timeout=timeout)
 
+    def listen(self) -> None:
+        """Enter receive mode (like AB01's Radio.Rx(0)).
+
+        Call this once, then poll rx_done() to check for packets.
+        More efficient than repeated receive() calls for long RX windows.
+        """
+        if self._rfm9x is None:
+            raise RuntimeError("Radio not initialized. Call init() first.")
+        self._rfm9x.listen()
+
+    def rx_done(self) -> bool:
+        """Check if a packet has been received.
+
+        Use with listen() for efficient polling:
+            radio.listen()
+            while not radio.rx_done():
+                time.sleep(0.1)
+            packet = radio.receive(timeout=0)
+        """
+        if self._rfm9x is None:
+            return False
+        return self._rfm9x.rx_done()
+
     def get_last_rssi(self) -> int | None:
         """Get RSSI of last received packet."""
         if self._rfm9x is None:

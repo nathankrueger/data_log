@@ -177,13 +177,12 @@ class CommandReceiver(threading.Thread):
             try:
                 # Read frequencies fresh each iteration (catches rcfg_radio updates)
                 g2n_freq = self._get_g2n_freq()
-                n2g_freq = self._get_n2g_freq()
 
-                # Switch to G2N to listen for commands, then back to N2G
+                # Listen for commands on G2N using interruptible receive
+                # Lock is held for the entire RX window (like AB01's continuous RX)
                 with self._radio_lock:
                     self._radio.set_frequency(g2n_freq)
-                    packet = self._radio.receive(timeout=self._receive_timeout)
-                    self._radio.set_frequency(n2g_freq)
+                    packet = self._receive_interruptible(timeout=self._receive_timeout)
 
                 if packet is not None:
                     self._process_packet(packet)
@@ -199,24 +198,65 @@ class CommandReceiver(threading.Thread):
     def _send_ack(self, ack_packet: bytes, add_jitter: bool = False) -> bool:
         """Send an ACK packet, optionally applying jitter to stagger responses.
 
+        Holds the lock during jitter to prevent broadcast_loop from transmitting
+        (which would block command reception). Matches AB01 pattern where jitter
+        and ACK send happen atomically within sendAckAndResumeRx().
+
         Explicitly sets frequency to N2G before sending (defensive, matches AB01).
         This ensures ACK goes out on correct frequency regardless of any race.
         """
-        if add_jitter and self._broadcast_ack_jitter_sec > 0:
-            jitter = random.uniform(0, self._broadcast_ack_jitter_sec)
-            logger.debug(f"Broadcast ACK jitter: {jitter * 1000:.0f}ms")
-            time.sleep(jitter)
         n2g_freq = self._get_n2g_freq()
+        g2n_freq = self._get_g2n_freq()
         t0 = time.time()
         with self._radio_lock:
             lock_wait_ms = (time.time() - t0) * 1000
             if lock_wait_ms > 10:
                 logger.warning(f"ACK lock wait: {lock_wait_ms:.0f}ms")
-            # Explicitly set N2G frequency before ACK (defensive, matches AB01)
+
+            # Jitter INSIDE lock to prevent broadcast_loop from grabbing radio
+            if add_jitter and self._broadcast_ack_jitter_sec > 0:
+                jitter = random.uniform(0, self._broadcast_ack_jitter_sec)
+                logger.debug(f"Broadcast ACK jitter: {jitter * 1000:.0f}ms")
+                time.sleep(jitter)
+
+            # Set N2G frequency, send ACK, then switch back to G2N (matches AB01)
             self._radio.set_frequency(n2g_freq)
             success = self._radio.send(ack_packet)
+            self._radio.set_frequency(g2n_freq)  # Resume on G2N for next receive
             logger.info(f"ACK sent on N2G={n2g_freq} MHz, success={success}")
             return success
+
+    def _receive_interruptible(self, timeout: float) -> bytes | None:
+        """Receive with periodic shutdown check (matches AB01's continuous RX).
+
+        Unlike radio.receive(timeout), this:
+        1. Enters RX mode once (like AB01's Radio.Rx(0))
+        2. Polls rx_done() every 100ms
+        3. Checks self._running to respond to shutdown quickly
+
+        This gives us a long effective RX window (4+ seconds) while still
+        being able to shut down within ~100ms.
+
+        Args:
+            timeout: Maximum time to wait for a packet (seconds)
+
+        Returns:
+            Received packet bytes, or None if timeout/shutdown
+        """
+        self._radio.listen()  # Enter RX mode once
+        start = time.monotonic()
+
+        while self._running:
+            if self._radio.rx_done():
+                # Packet arrived - read it immediately (timeout=0)
+                return self._radio.receive(timeout=0)
+
+            if time.monotonic() - start >= timeout:
+                return None  # Timeout
+
+            time.sleep(0.1)  # 100ms between checks - fast shutdown response
+
+        return None  # Shutdown requested
 
     def _process_packet(self, packet: bytes) -> None:
         """Parse and dispatch a received command packet, send ACK.
@@ -666,7 +706,7 @@ def main():
 
         # Start command receiver if enabled
         if command_receiver_enabled and radio_lock is not None:
-            receive_timeout = command_config.get("receive_timeout", 0.1)
+            receive_timeout = command_config.get("receive_timeout", 4.0)
             jitter_ms = command_config.get("broadcast_ack_jitter_ms", 250)
             command_receiver = CommandReceiver(
                 radio=radio,
