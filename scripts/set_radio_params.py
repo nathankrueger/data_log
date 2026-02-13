@@ -77,7 +77,7 @@ def http_get(url: str, timeout: float = 15.0) -> dict | None:
     try:
         with urlopen(url, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, json.JSONDecodeError) as e:
+    except (HTTPError, URLError, json.JSONDecodeError, TimeoutError, OSError) as e:
         print(f"  Error: {e}")
         return None
 
@@ -90,7 +90,7 @@ def http_put_json(url: str, data: dict, timeout: float = 15.0) -> dict | None:
         req.add_header("Content-Type", "application/json")
         with urlopen(req, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, json.JSONDecodeError) as e:
+    except (HTTPError, URLError, json.JSONDecodeError, TimeoutError, OSError) as e:
         print(f"  Error: {e}")
         return None
 
@@ -103,7 +103,7 @@ def http_post_json(url: str, data: dict, timeout: float = 15.0) -> dict | None:
         req.add_header("Content-Type", "application/json")
         with urlopen(req, timeout=timeout) as response:
             return json.loads(response.read().decode("utf-8"))
-    except (HTTPError, URLError, json.JSONDecodeError) as e:
+    except (HTTPError, URLError, json.JSONDecodeError, TimeoutError, OSError) as e:
         print(f"  Error: {e}")
         return None
 
