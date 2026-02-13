@@ -33,6 +33,11 @@ class PendingCommand:
     max_retries: int = 10
     first_sent_time: float = 0.0
 
+    # Multi-ACK tracking (used when expected_acks > 1)
+    expected_acks: int = 1
+    acked_nodes: set[str] = field(default_factory=set)
+    node_payloads: dict[str, dict] = field(default_factory=dict)
+
 
 @dataclass
 class DiscoveryRequest:
@@ -181,7 +186,12 @@ class CommandQueue:
             )
 
     def add(
-        self, cmd: str, args: list[str], node_id: str, max_retries: int | None = None
+        self,
+        cmd: str,
+        args: list[str],
+        node_id: str,
+        max_retries: int | None = None,
+        expected_acks: int = 1,
     ) -> str | None:
         """
         Add a command to the queue.
@@ -191,6 +201,7 @@ class CommandQueue:
             args: Command arguments
             node_id: Target node ID (empty for broadcast)
             max_retries: Override default retry count (for fire-and-forget commands)
+            expected_acks: Number of unique node ACKs required to complete (for broadcasts)
 
         Returns:
             Command ID for tracking, or None if queue is full
@@ -206,6 +217,7 @@ class CommandQueue:
             packet=packet,
             next_retry_time=0,  # Send immediately
             max_retries=retries,
+            expected_acks=expected_acks,
         )
 
         with self._lock:
@@ -255,30 +267,86 @@ class CommandQueue:
                     self._current.cmd, self._current.retry_count, int(delay_ms),
                 )
 
-    def ack_received(self, command_id: str, payload: dict | None = None) -> PendingCommand | None:
+    def ack_received(
+        self,
+        command_id: str,
+        node_id: str = "",
+        payload: dict | None = None,
+    ) -> PendingCommand | None:
         """
-        Handle an ACK - retire the command if it matches.
+        Handle an ACK - retire the command if enough ACKs received.
 
         Args:
             command_id: ID from the ACK packet
+            node_id: ID of the node that sent the ACK
             payload: Optional response payload from node
 
         Returns:
-            The retired PendingCommand if matched, None otherwise
+            The retired PendingCommand if matched and complete, None otherwise
         """
         with self._lock:
             if self._current and self._current.command_id == command_id:
-                retired = self._current
-                logger.info(
-                    f"Command '{retired.cmd}' ACK'd after "
-                    f"{retired.retry_count} attempt(s)"
+                expected = self._current.expected_acks
+
+                # Track which node ACK'd and its payload
+                if node_id:
+                    if node_id in self._current.acked_nodes:
+                        # Already seen this node - duplicate ACK
+                        logger.debug(f"Duplicate ACK from '{node_id}' ignored")
+                        return None
+                    self._current.acked_nodes.add(node_id)
+                    if payload:
+                        self._current.node_payloads[node_id] = payload
+
+                # Check if we have enough ACKs
+                ack_count = len(self._current.acked_nodes)
+
+                # Backwards compatibility: if expected_acks=1 and no node tracking,
+                # retire on first ACK (even if node_id not provided)
+                should_retire = (
+                    ack_count >= expected or
+                    (expected == 1 and not node_id)  # Legacy call without node_id
                 )
-                # Store response for retrieval (empty dict for no-payload ACKs)
-                self._completed_responses[command_id] = (
-                    time.time(), payload if payload is not None else {}
-                )
-                self._current = None
-                return retired
+
+                if should_retire:
+                    # Complete - retire the command
+                    retired = self._current
+                    if expected > 1:
+                        logger.info(
+                            f"Command '{retired.cmd}' ACK'd after "
+                            f"{retired.retry_count} attempt(s) "
+                            f"({ack_count}/{expected} ACKs)"
+                        )
+                    else:
+                        logger.info(
+                            f"Command '{retired.cmd}' ACK'd after "
+                            f"{retired.retry_count} attempt(s)"
+                        )
+                    # Store response for retrieval
+                    if expected > 1:
+                        # Multi-ACK: store all node responses
+                        self._completed_responses[command_id] = (
+                            time.time(),
+                            {
+                                "acked_nodes": list(retired.acked_nodes),
+                                "responses": retired.node_payloads,
+                            },
+                        )
+                    else:
+                        # Single ACK: store payload directly (backwards compatible)
+                        self._completed_responses[command_id] = (
+                            time.time(),
+                            payload if payload is not None else {},
+                        )
+                    self._current = None
+                    return retired
+                else:
+                    # Not enough ACKs yet - log progress
+                    logger.info(
+                        f"ACK from '{node_id}' for '{self._current.cmd}' "
+                        f"({ack_count}/{expected})"
+                    )
+                    return None
         return None
 
     def check_expired(self) -> PendingCommand | None:
@@ -331,6 +399,28 @@ class CommandQueue:
                 logger.info(f"Cancelled queued command {command_id}")
                 return True
         return False
+
+    def get_partial_acks(self, command_id: str) -> dict | None:
+        """
+        Get partial ACK info for a command that's still in progress or timed out.
+
+        Used by HTTP handlers to return partial results when a multi-ACK
+        broadcast times out before receiving all expected ACKs.
+
+        Args:
+            command_id: ID of the command
+
+        Returns:
+            Dict with acked_nodes, responses, expected_acks, or None if not found
+        """
+        with self._lock:
+            if self._current and self._current.command_id == command_id:
+                return {
+                    "acked_nodes": list(self._current.acked_nodes),
+                    "responses": dict(self._current.node_payloads),
+                    "expected_acks": self._current.expected_acks,
+                }
+        return None
 
     def wait_for_response(self, command_id: str, timeout: float = 10.0) -> dict | None:
         """

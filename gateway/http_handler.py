@@ -99,15 +99,25 @@ class CommandHandler(BaseHTTPRequestHandler):
             self.send_error(400, "'node_id' must be a string")
             return
 
+        expected_acks = data.get("expected_acks", 1)
+        if not isinstance(expected_acks, int) or expected_acks < 1:
+            self.send_error(400, "'expected_acks' must be a positive integer")
+            return
+
         # Queue the command for LoRa transmission with ACK-based delivery
-        command_id = self.server.command_queue.add(cmd, args, node_id)  # type: ignore
+        command_id = self.server.command_queue.add(  # type: ignore
+            cmd, args, node_id, expected_acks=expected_acks
+        )
 
         if command_id is None:
             self.send_error(503, "Command queue full")
             return
 
         target = node_id if node_id else "broadcast"
-        logger.info(f"Queued command '{cmd}' for {target} (id: {command_id})")
+        logger.info(
+            f"Queued command '{cmd}' for {target} "
+            f"(id: {command_id}, expected_acks: {expected_acks})"
+        )
 
         # Send success response with command_id for tracking
         self.send_response(200)
@@ -118,6 +128,7 @@ class CommandHandler(BaseHTTPRequestHandler):
             "command_id": command_id,
             "cmd": cmd,
             "target": target,
+            "expected_acks": expected_acks,
         })
         self.wfile.write(response.encode("utf-8"))
 
@@ -129,7 +140,8 @@ class CommandHandler(BaseHTTPRequestHandler):
           GET /discover[?retries=N]       - Discover all reachable nodes
           GET /gateway/params             - Get all gateway parameters
           GET /gateway/param/{name}       - Get single gateway parameter
-          GET /{cmd}/{node_id}?a=arg1     - Send command, wait for response
+          GET /{cmd}?expected_acks=N&a=X  - Broadcast command, wait for N ACKs
+          GET /{cmd}/{node_id}?a=arg1     - Send command to node, wait for response
         """
         parsed = urlparse(self.path)
         path = parsed.path.strip("/")
@@ -152,8 +164,61 @@ class CommandHandler(BaseHTTPRequestHandler):
 
         parts = path.split("/")
 
+        # Handle broadcast wait: GET /{cmd}?expected_acks=N (single path segment)
+        if len(parts) == 1 and parts[0]:
+            cmd = parts[0]
+            query = parse_qs(parsed.query)
+            expected_acks = int(query.get("expected_acks", ["1"])[0])
+            args = query.get("a", [])
+
+            command_id = self.server.command_queue.add(  # type: ignore
+                cmd, args, node_id="", expected_acks=expected_acks
+            )
+            if command_id is None:
+                self.send_error(503, "Command queue full")
+                return
+
+            logger.info(
+                f"Queued broadcast '{cmd}' (expected_acks={expected_acks}), "
+                f"waiting for response..."
+            )
+
+            wait_timeout = self.server.command_queue.wait_timeout  # type: ignore
+            response = self.server.command_queue.wait_for_response(  # type: ignore
+                command_id, timeout=wait_timeout
+            )
+
+            if response is not None:
+                self.send_response(200)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                self.wfile.write(json.dumps(response).encode("utf-8"))
+            else:
+                # Timeout - return partial results
+                partial = self.server.command_queue.get_partial_acks(command_id)  # type: ignore
+                self.server.command_queue.cancel(command_id)  # type: ignore
+
+                self.send_response(504)
+                self.send_header("Content-Type", "application/json")
+                self.end_headers()
+                if partial:
+                    result = {
+                        "error": "timeout",
+                        "expected_acks": partial["expected_acks"],
+                        "acked_nodes": partial["acked_nodes"],
+                        "responses": partial["responses"],
+                        "missing": partial["expected_acks"] - len(partial["acked_nodes"]),
+                    }
+                else:
+                    result = {
+                        "error": "timeout",
+                        "message": f"Broadcast timed out after {wait_timeout} seconds",
+                    }
+                self.wfile.write(json.dumps(result).encode("utf-8"))
+            return
+
         if len(parts) != 2:
-            self.send_error(400, "Expected: /{cmd}/{node_id}")
+            self.send_error(400, "Expected: /{cmd}/{node_id} or /{cmd}?expected_acks=N")
             return
 
         cmd, node_id = parts

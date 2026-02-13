@@ -223,7 +223,7 @@ class LoRaTransceiver(threading.Thread):
                     if ack:
                         # Forward to command queue in case it's for a queued command
                         self._command_queue.ack_received(
-                            ack.command_id, payload=ack.payload
+                            ack.command_id, node_id=ack.node_id, payload=ack.payload
                         )
                         # Record the node for discovery
                         if ack.node_id not in discovered_nodes:
@@ -269,7 +269,9 @@ class LoRaTransceiver(threading.Thread):
         # First, check if it's an ACK packet
         ack = parse_ack_packet(packet)
         if ack:
-            retired = self._command_queue.ack_received(ack.command_id, payload=ack.payload)
+            retired = self._command_queue.ack_received(
+                ack.command_id, node_id=ack.node_id, payload=ack.payload
+            )
             if retired:
                 rtt_ms = (
                     (time.time() - retired.first_sent_time) * 1000
