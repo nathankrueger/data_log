@@ -174,6 +174,14 @@ CommandReceiver thread:
 
 The `radio_lock` ensures half-duplex safety. If broadcast loop is transmitting, CommandReceiver waits.
 
+### Gateway Radio Parameter Access (SPI Contention)
+
+**Problem:** The transceiver thread's tight `receive()` loop causes SPI lock starvation. Adafruit's SPIDevice uses a spinlock (`while not try_lock(): sleep(0)`). The transceiver releases and immediately reacquires the lock, starving the HTTP thread indefinitely.
+
+**Solution:** RadioState caches sf/bw/txpwr at init. The cache is updated in `apply_pending()` (called only by transceiver thread) after writing to hardware. HTTP handlers read the cache, never touching SPI.
+
+**CRITICAL:** Never modify radio params directly via `radio_state._radio`. Always use `set_pending()` + `apply_pending()` to keep cache in sync with hardware.
+
 ### Gateway Parameter Endpoints
 
 The gateway exposes HTTP endpoints for runtime parameter tuning:

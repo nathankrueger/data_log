@@ -131,7 +131,7 @@ do_curl() {
     local method="$1"
     local url="$2"
     local data="$3"
-    local timeout="${4:-5}"
+    local timeout="${4:-10}"
 
     STDERR_FILE=$(mktemp)
 

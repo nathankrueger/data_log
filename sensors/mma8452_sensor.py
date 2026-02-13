@@ -100,3 +100,8 @@ class MMA8452Accelerometer(Sensor):
 
     def get_units(self) -> tuple[str, ...]:
         return ("g", "g", "g")
+
+    def close(self) -> None:
+        if self._bus:
+            self._bus.close()
+            self._bus = None

@@ -39,6 +39,7 @@ import inspect
 import json
 import logging
 import random
+import signal
 import sys
 import threading
 import time
@@ -65,6 +66,16 @@ LORA_RESET_PIN = 25
 
 # Bandwidth encoding: matches AB01 convention (0/1/2 -> Hz)
 BW_HZ_MAP = {0: 125000, 1: 250000, 2: 500000}
+
+# Shutdown flag for graceful SIGTERM handling
+_shutdown_requested = False
+
+
+def _signal_handler(signum: int, frame) -> None:
+    """Handle SIGTERM/SIGINT for graceful shutdown."""
+    global _shutdown_requested
+    _shutdown_requested = True
+    logger.info(f"Received signal {signum}, requesting shutdown...")
 
 # Configure logging
 logging.basicConfig(
@@ -416,7 +427,7 @@ def broadcast_loop(
 
     broadcast_count = 0
 
-    while True:
+    while not _shutdown_requested:
         now = time.time()
 
         # Find sensors that are due for broadcast
@@ -496,6 +507,10 @@ def broadcast_loop(
 
 
 def main():
+    # Register signal handlers for graceful shutdown
+    signal.signal(signal.SIGTERM, _signal_handler)
+    signal.signal(signal.SIGINT, _signal_handler)
+
     parser = argparse.ArgumentParser(
         description="Outdoor sensor node broadcaster",
         formatter_class=argparse.RawDescriptionHelpFormatter,
@@ -669,11 +684,19 @@ def main():
     except KeyboardInterrupt:
         logger.info("Shutting down...")
     finally:
+        logger.info("Cleaning up resources...")
         if command_receiver:
             command_receiver.stop()
-        radio.close()
         if screen_manager:
             screen_manager.close()
+        if display_advance_button:
+            display_advance_button.close()
+        if action_button:
+            action_button.close()
+        for entry in sensors:
+            entry.sensor.close()
+        radio.close()
+        logger.info("Cleanup complete")
 
 
 if __name__ == "__main__":

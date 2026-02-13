@@ -34,3 +34,7 @@ class Sensor(ABC):
     def get_precision(self) -> int:
         """Return the number of decimal places for float values. Default is 3."""
         return 3
+
+    def close(self) -> None:
+        """Release hardware resources. Override if sensor uses I2C/SPI/GPIO."""
+        pass

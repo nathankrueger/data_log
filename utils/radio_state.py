@@ -58,6 +58,11 @@ class RadioState:
         # Event for HTTP handler to wait on config application
         self._config_event = threading.Event()
         self._last_applied: list[str] = []
+        # Cache radio params to avoid SPI contention with transceiver thread
+        # Read once at init, then update only when apply_pending() changes them
+        self._cached_sf = radio.spreading_factor
+        self._cached_bw = radio.signal_bandwidth
+        self._cached_txpwr = radio.tx_power
 
     @property
     def radio(self) -> RFM9xRadio:
@@ -90,27 +95,27 @@ class RadioState:
         with self._lock:
             self._g2n_freq = value
 
-    # ─── Active Radio Parameters (from hardware) ────────────────────────────
+    # ─── Active Radio Parameters (cached to avoid SPI contention) ───────────
 
     @property
     def spreading_factor(self) -> int:
-        """Get current spreading factor from hardware."""
-        return self._radio.spreading_factor
+        """Get current spreading factor (cached, updated by apply_pending)."""
+        return self._cached_sf
 
     @property
     def signal_bandwidth(self) -> int:
-        """Get current signal bandwidth in Hz from hardware."""
-        return self._radio.signal_bandwidth
+        """Get current signal bandwidth in Hz (cached, updated by apply_pending)."""
+        return self._cached_bw
 
     @property
     def bandwidth_code(self) -> int:
         """Get current bandwidth as code (0=125kHz, 1=250kHz, 2=500kHz)."""
-        return BW_CODE_MAP.get(self._radio.signal_bandwidth, 0)
+        return BW_CODE_MAP.get(self._cached_bw, 0)
 
     @property
     def tx_power(self) -> int:
-        """Get current TX power from hardware."""
-        return self._radio.tx_power
+        """Get current TX power (cached, updated by apply_pending)."""
+        return self._cached_txpwr
 
     # ─── Staged/Pending Configuration ───────────────────────────────────────
 
@@ -184,11 +189,17 @@ class RadioState:
         applied = []
         for name, value in pending.items():
             if name == "sf":
-                self._radio.spreading_factor = int(value)
+                sf_val = int(value)
+                self._radio.spreading_factor = sf_val
+                self._cached_sf = sf_val
             elif name == "bw":
-                self._radio.signal_bandwidth = BW_HZ_MAP[int(value)]
+                bw_val = BW_HZ_MAP[int(value)]
+                self._radio.signal_bandwidth = bw_val
+                self._cached_bw = bw_val
             elif name == "txpwr":
-                self._radio.tx_power = int(value)
+                txpwr_val = int(value)
+                self._radio.tx_power = txpwr_val
+                self._cached_txpwr = txpwr_val
             elif name == "n2gfreq":
                 self.n2g_freq = int(value) / 1e6  # Hz to MHz
             elif name == "g2nfreq":

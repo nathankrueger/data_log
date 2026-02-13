@@ -16,7 +16,6 @@ import json
 import logging
 import threading
 from http.server import BaseHTTPRequestHandler, HTTPServer
-from socketserver import ThreadingMixIn
 from urllib.parse import parse_qs, urlparse
 
 from utils.config_persistence import update_config_file
@@ -43,7 +42,7 @@ class CommandHandler(BaseHTTPRequestHandler):
     """
 
     def setup(self) -> None:
-        """Set socket timeout to prevent indefinite blocking on write."""
+        """Set socket timeout to prevent indefinite blocking on client disconnect."""
         super().setup()
         # 30 second timeout - long enough for normal operations,
         # short enough to recover from dead clients
@@ -519,12 +518,6 @@ class CommandHandler(BaseHTTPRequestHandler):
         pass
 
 
-class ThreadedHTTPServer(ThreadingMixIn, HTTPServer):
-    """HTTP server that handles each request in a separate thread."""
-
-    daemon_threads = True  # Don't wait for threads on shutdown
-
-
 class CommandServer(threading.Thread):
     """
     HTTP server thread for receiving commands from dashboard.
@@ -593,7 +586,7 @@ class CommandServer(threading.Thread):
 
     def run(self) -> None:
         """Run the HTTP server (called by Thread.start())."""
-        self._server = ThreadedHTTPServer(("0.0.0.0", self.port), CommandHandler)
+        self._server = HTTPServer(("0.0.0.0", self.port), CommandHandler)
         self._server.command_queue = self.command_queue  # type: ignore
         self._server.discovery_config = self.discovery_config  # type: ignore
         self._server.transceiver = self.transceiver  # type: ignore
