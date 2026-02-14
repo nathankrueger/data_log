@@ -27,12 +27,18 @@ SETTLE_TIME=0
 DRY_RUN=false
 GATEWAY="${GATEWAY_HOST:-localhost}"
 PORT="${GATEWAY_PORT:-5001}"
+DISCOVERY_RETRIES=30
+DISC_ITERATIONS=3
+DISC_INTERVAL=5
 
 # New param values (captured from args)
 NEW_SF=""
 NEW_BW=""
 NEW_N2GFREQ=""
 NEW_G2NFREQ=""
+
+# Node list (discovered or from --nodes)
+NODES=""
 
 # Pass-through args for set_radio_params.sh
 PASSTHROUGH_ARGS=()
@@ -58,6 +64,11 @@ Test options:
   --count N         Number of round-trip cycles (default: 5)
   --settle-time N   Seconds to wait between transitions (default: 0)
 
+Discovery options:
+  --disc-iterations N   Discovery validation rounds (default: 3)
+  --disc-interval N     Seconds between discovery rounds (default: 5)
+  -r, --retries N       Retries per discovery round (default: 30)
+
 Pass-through options (forwarded to set_radio_params.sh):
   --nodes LIST      Comma-separated node IDs (skip discovery)
   -g, --gateway     Gateway host (default: \$GATEWAY_HOST or localhost)
@@ -65,8 +76,6 @@ Pass-through options (forwarded to set_radio_params.sh):
   --dry-run         Show what would happen without making changes
   --no-verify       Skip echo verification
   --rcfg-retries N  Max retries for rcfg_radio (default: 3)
-  -r, --retries     Discovery retries per round
-  -i, --interval    Seconds between discovery rounds
 
 Exit codes:
   0 - All transitions succeeded
@@ -122,8 +131,26 @@ while [[ $# -gt 0 ]]; do
             PASSTHROUGH_ARGS+=("--dry-run")
             shift
             ;;
-        --nodes|--no-verify|--rcfg-retries|-r|--retries|-i|--interval)
-            # Args that take a value
+        --nodes)
+            NODES="$2"
+            PASSTHROUGH_ARGS+=("--nodes" "$2")
+            shift 2
+            ;;
+        -r|--retries)
+            DISCOVERY_RETRIES="$2"
+            PASSTHROUGH_ARGS+=("$1" "$2")
+            shift 2
+            ;;
+        --disc-iterations)
+            DISC_ITERATIONS="$2"
+            shift 2
+            ;;
+        --disc-interval)
+            DISC_INTERVAL="$2"
+            shift 2
+            ;;
+        --no-verify|--rcfg-retries)
+            # Args that take a value (except --no-verify)
             if [[ "$1" == "--no-verify" ]]; then
                 PASSTHROUGH_ARGS+=("$1")
                 shift
@@ -159,6 +186,12 @@ get_gateway_params() {
     curl -s "http://${GATEWAY}:${PORT}/gateway/params"
 }
 
+# Discover nodes
+discover_nodes() {
+    local retries="$1"
+    curl -s "http://${GATEWAY}:${PORT}/discover?retries=${retries}"
+}
+
 # Check gateway connectivity and capture original params
 echo "=== Radio Reconfig Reliability Test ==="
 echo "Gateway: ${GATEWAY}:${PORT}"
@@ -174,6 +207,66 @@ if [[ -z "$ORIG_PARAMS" || "$ORIG_PARAMS" == "null" ]]; then
     echo "Error: Failed to get gateway params" >&2
     exit 2
 fi
+
+# Discover nodes if not provided via --nodes
+if [[ -z "$NODES" ]]; then
+    echo "Running ${DISC_ITERATIONS} discovery iterations to validate node list..."
+    BASELINE_NODES=""
+
+    for ((round=1; round<=DISC_ITERATIONS; round++)); do
+        if [[ $round -gt 1 ]]; then
+            echo "  Waiting ${DISC_INTERVAL}s before next discovery..."
+            sleep "$DISC_INTERVAL"
+        fi
+
+        echo -n "  Discovery round ${round}/${DISC_ITERATIONS}... "
+        DISC_RESULT=$(discover_nodes "$DISCOVERY_RETRIES") || {
+            echo "FAILED"
+            echo "Error: Discovery request failed" >&2
+            exit 2
+        }
+
+        # Check for error response
+        if echo "$DISC_RESULT" | jq -e '.error' > /dev/null 2>&1; then
+            echo "FAILED"
+            error_msg=$(echo "$DISC_RESULT" | jq -r '.message // .error')
+            echo "Error: Discovery failed - $error_msg" >&2
+            exit 2
+        fi
+
+        # Extract node list (sorted for consistent comparison)
+        NODE_COUNT=$(echo "$DISC_RESULT" | jq -r '.count // 0')
+        NODES=$(echo "$DISC_RESULT" | jq -r '.nodes | sort | join(",")')
+
+        if [[ "$NODE_COUNT" -eq 0 || -z "$NODES" ]]; then
+            echo "FAILED"
+            echo "Error: No nodes discovered" >&2
+            exit 2
+        fi
+
+        echo "found ${NODE_COUNT} nodes: ${NODES}"
+
+        if [[ -z "$BASELINE_NODES" ]]; then
+            BASELINE_NODES="$NODES"
+        elif [[ "$NODES" != "$BASELINE_NODES" ]]; then
+            echo ""
+            echo "Error: Node list changed between rounds!" >&2
+            echo "  Baseline: ${BASELINE_NODES}" >&2
+            echo "  Current:  ${NODES}" >&2
+            exit 2
+        fi
+    done
+
+    NODES="$BASELINE_NODES"
+    echo ""
+    echo "Discovery validated: $(echo "$NODES" | tr ',' '\n' | wc -l | tr -d ' ') node(s) confirmed"
+
+    # Add --nodes to passthrough args so set_radio_params.sh skips discovery
+    PASSTHROUGH_ARGS+=("--nodes" "$NODES")
+else
+    echo "Using provided nodes: ${NODES}"
+fi
+echo ""
 
 # Extract original values for params we're changing
 ORIG_SF=$(echo "$ORIG_PARAMS" | jq -r '.sf // empty')
@@ -240,7 +333,7 @@ for ((i=0; i<${#PASSTHROUGH_ARGS[@]}; i++)); do
         *)
             COMMON_ARGS+=("$arg")
             # If this arg takes a value, grab it
-            if [[ "$arg" =~ ^(--nodes|--gateway|-g|--port|-p|--rcfg-retries|-r|--retries|-i|--interval)$ ]]; then
+            if [[ "$arg" =~ ^(--nodes|--gateway|-g|--port|-p|--rcfg-retries|-r|--retries)$ ]]; then
                 ((i++)) || true
                 COMMON_ARGS+=("${PASSTHROUGH_ARGS[$i]}")
             fi
