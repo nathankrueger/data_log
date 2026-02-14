@@ -4,13 +4,14 @@ usage() {
     cat <<'EOF'
 Gateway parameter getter/setter via HTTP API.
 
-Usage: gateway_cmd.sh [-l | -G | -g <param> | -s <param> <value>] [-r] [-S] [-H <host>] [-p <port>]
+Usage: gateway_cmd.sh [-l | -G | -g <param> | -s <param> <value> | -u] [-r] [-S] [-H <host>] [-p <port>]
 
 Options:
   -l            List all gateway parameters (raw JSON)
   -G            Get all gateway parameters (formatted)
   -g <param>    Get single parameter value
   -s <param>    Set/stage parameter (requires value argument)
+  -u            Get gateway uptime (human-readable)
   -r            Apply staged radio config (rcfg_radio, no persist)
   -S            Save all params to config file (savecfg)
   -R            Restart the gateway service
@@ -41,6 +42,7 @@ Examples:
   gateway_cmd.sh -S                    # Persist all params to config file
   gateway_cmd.sh -r -S                 # Apply radio AND persist
   gateway_cmd.sh -s max_retries 5      # Set max_retries (immediate, no persist)
+  gateway_cmd.sh -u                    # Show gateway uptime (e.g., "2d 5h 30m 15s")
 EOF
     exit 1
 }
@@ -55,7 +57,7 @@ DO_SAVE=0
 DO_RESTART=0
 
 # Use GNU getopt for proper argument reordering (handles "-s sf 9 -r" correctly)
-PARSED=$(getopt -o lGg:s:rSRH:p:h -n "$(basename "$0")" -- "$@") || usage
+PARSED=$(getopt -o lGg:s:urSRH:p:h -n "$(basename "$0")" -- "$@") || usage
 eval set -- "$PARSED"
 
 while true; do
@@ -77,6 +79,10 @@ while true; do
             MODE="set"
             PARAM="$2"
             shift 2
+            ;;
+        -u)
+            MODE="uptime"
+            shift
             ;;
         -r)
             DO_RCFG=1
@@ -197,6 +203,28 @@ case "$MODE" in
             JSON_BODY=$(jq -n --arg v "$VALUE" '{value: $v}')
         fi
         do_curl PUT "$BASE_URL/gateway/param/$PARAM" "$JSON_BODY"
+        ;;
+    uptime)
+        # Get uptime and format as human-readable
+        RESULT=$(do_curl GET "$BASE_URL/gateway/uptime")
+        if [ $? -eq 0 ]; then
+            SECONDS_RAW=$(echo "$RESULT" | jq -r '.uptime_seconds')
+            # Convert to integer for arithmetic
+            SECONDS_INT=${SECONDS_RAW%.*}
+            DAYS=$((SECONDS_INT / 86400))
+            HOURS=$(( (SECONDS_INT % 86400) / 3600 ))
+            MINS=$(( (SECONDS_INT % 3600) / 60 ))
+            SECS=$((SECONDS_INT % 60))
+            if [ "$DAYS" -gt 0 ]; then
+                printf "%dd %dh %dm %ds\n" "$DAYS" "$HOURS" "$MINS" "$SECS"
+            elif [ "$HOURS" -gt 0 ]; then
+                printf "%dh %dm %ds\n" "$HOURS" "$MINS" "$SECS"
+            elif [ "$MINS" -gt 0 ]; then
+                printf "%dm %ds\n" "$MINS" "$SECS"
+            else
+                printf "%ds\n" "$SECS"
+            fi
+        fi
         ;;
 esac
 

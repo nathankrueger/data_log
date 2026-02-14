@@ -16,6 +16,7 @@ import json
 import logging
 import subprocess
 import threading
+import time
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import parse_qs, urlparse
 
@@ -153,6 +154,11 @@ class CommandHandler(BaseHTTPRequestHandler):
         # Handle /discover endpoint
         if path == "discover":
             self._handle_discover(parsed)
+            return
+
+        # Handle /gateway/uptime - get gateway uptime
+        if path == "gateway/uptime":
+            self._handle_uptime()
             return
 
         # Handle /gateway/params - get all gateway parameters
@@ -419,6 +425,27 @@ class CommandHandler(BaseHTTPRequestHandler):
             return
 
         self.send_error(404, "Not Found")
+
+    def _handle_uptime(self) -> None:
+        """Handle GET /gateway/uptime - get gateway uptime."""
+        gateway_state = getattr(self.server, "gateway_state", None)
+        if gateway_state is None:
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "error": "unavailable",
+                "message": "Gateway state not initialized",
+            }).encode("utf-8"))
+            return
+
+        uptime_seconds = time.time() - gateway_state.start_time
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({
+            "uptime_seconds": uptime_seconds,
+        }).encode("utf-8"))
 
     def _handle_gateway_params_get_all(self) -> None:
         """Handle GET /gateway/params - get all gateway parameters."""
