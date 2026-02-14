@@ -309,7 +309,7 @@ class LocalSensorReader(threading.Thread):
 
         for sensor, class_name in self._sensors:
             try:
-                values = sensor.read()
+                values = sensor.transform(sensor.read())
                 names = sensor.get_names()
                 units = sensor.get_units()
 

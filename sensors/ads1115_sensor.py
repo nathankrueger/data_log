@@ -135,12 +135,17 @@ class ADS1115ADC(Sensor):
         ]
 
     def read(self) -> tuple:
-        values = [ai.voltage for ai in self._analog_inputs]
+        return tuple(ai.voltage for ai in self._analog_inputs)
+
+    def transform(self, values: tuple) -> tuple:
+        if not self._transforms:
+            return values
+        result = list(values)
         for i, ch in enumerate(self._active_channels):
             if ch.value in self._transforms:
                 t = self._transforms[ch.value]
-                values[i] = transform_value(values[i], **t)
-        return tuple(values)
+                result[i] = transform_value(values[i], **t)
+        return tuple(result)
 
     def get_names(self) -> tuple[str, ...]:
         return self._names

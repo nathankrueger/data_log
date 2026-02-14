@@ -88,7 +88,7 @@ class DataLogger:
                     timestamp = datetime.now().isoformat()
                     row = [timestamp]
                     for s in self.sensors:
-                        row.extend(s.read())
+                        row.extend(s.transform(s.read()))
                     self._buffer.append(row)
                     self._sample_count += 1
 

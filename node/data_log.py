@@ -84,6 +84,7 @@ logging.basicConfig(
     datefmt="%Y-%m-%d %H:%M:%S",
 )
 logger = logging.getLogger(__name__)
+sensor_logger = logging.getLogger("sensor_debug")
 
 
 @dataclass
@@ -424,13 +425,30 @@ def read_sensors(entries: list[SensorEntry]) -> list[SensorReading]:
     """
     readings = []
     timestamp = time.time()
+    debug = sensor_logger.isEnabledFor(logging.DEBUG)
 
     for entry in entries:
         try:
-            values = entry.sensor.read()
+            raw_values = entry.sensor.read()
+            values = entry.sensor.transform(raw_values)
             names = entry.sensor.get_names()
             units = entry.sensor.get_units()
             precision = entry.sensor.get_precision()
+
+            if debug:
+                for raw, val, name, unit in zip(
+                    raw_values, values, names, units
+                ):
+                    if raw != val:
+                        sensor_logger.debug(
+                            "%-20s %.*f %s  →  %.*f",
+                            name, precision, raw, unit, precision, val,
+                        )
+                    else:
+                        sensor_logger.debug(
+                            "%-20s %.*f %s",
+                            name, precision, val, unit,
+                        )
 
             for value, name, unit in zip(values, names, units):
                 readings.append(
@@ -579,7 +597,24 @@ def main():
         default="config/node_config.json",
         help="Path to config file (default: config/node_config.json)",
     )
+    parser.add_argument(
+        "--sensor-debug",
+        action="store_true",
+        help="Log raw and transformed sensor values each read cycle",
+    )
     args = parser.parse_args()
+
+    if args.sensor_debug:
+        handler = logging.StreamHandler()
+        handler.setFormatter(
+            logging.Formatter(
+                "%(asctime)s.%(msecs)03d [SENSOR] %(message)s",
+                datefmt="%H:%M:%S",
+            )
+        )
+        sensor_logger.addHandler(handler)
+        sensor_logger.setLevel(logging.DEBUG)
+        sensor_logger.debug("Sensor debug mode active")
 
     # Load configuration
     try:

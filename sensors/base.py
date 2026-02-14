@@ -49,6 +49,13 @@ class Sensor(ABC):
         """Return the units of measurement. Tuple length matches read() output count."""
         pass
 
+    def transform(self, values: tuple) -> tuple:
+        """Transform raw sensor values. Override to apply per-reading transforms.
+
+        Default: identity (returns values unchanged).
+        """
+        return values
+
     def get_precision(self) -> int:
         """Return the number of decimal places for float values. Default is 3."""
         return 3
