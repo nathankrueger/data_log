@@ -10,24 +10,20 @@ def c_to_f(c: float) -> float:
 
 def transform_value(
     value: float,
-    min_clip: float | None = None,
-    max_clip: float | None = None,
+    raw_min: float,
+    raw_max: float,
     invert: bool = False,
 ) -> float:
-    """Apply clip-then-invert transform to a single value.
+    """Clip and normalize a value from [raw_min, raw_max] to [0.0, 1.0].
 
-    Clips value to [min_clip, max_clip], then optionally inverts within
-    that range: result = min_clip + max_clip - clipped_value.
+    If invert is True, output is flipped: 1.0 - normalized.
     """
-    if invert and (min_clip is None or max_clip is None):
-        raise ValueError("invert requires both min_clip and max_clip")
-    if min_clip is not None:
-        value = max(value, min_clip)
-    if max_clip is not None:
-        value = min(value, max_clip)
+    value = max(value, raw_min)
+    value = min(value, raw_max)
+    normalized = (value - raw_min) / (raw_max - raw_min)
     if invert:
-        value = min_clip + max_clip - value
-    return value
+        normalized = 1.0 - normalized
+    return normalized
 
 
 class Sensor(ABC):

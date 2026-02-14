@@ -8,58 +8,40 @@ from sensors.base import transform_value
 class TestTransformValue:
     """Tests for the transform_value function."""
 
-    def test_no_transform(self):
-        assert transform_value(2.5) == 2.5
+    def test_at_min(self):
+        assert transform_value(1.0, raw_min=1.0, raw_max=3.3) == 0.0
 
-    def test_min_clip_clamps_up(self):
-        assert transform_value(0.5, min_clip=1.0) == 1.0
+    def test_at_max(self):
+        assert transform_value(3.3, raw_min=1.0, raw_max=3.3) == 1.0
 
-    def test_min_clip_no_effect(self):
-        assert transform_value(2.0, min_clip=1.0) == 2.0
+    def test_midpoint(self):
+        result = transform_value(2.15, raw_min=1.0, raw_max=3.3)
+        assert result == pytest.approx(0.5, abs=0.01)
 
-    def test_max_clip_clamps_down(self):
-        assert transform_value(3.5, max_clip=3.3) == 3.3
+    def test_clips_below_min(self):
+        assert transform_value(0.5, raw_min=1.0, raw_max=3.3) == 0.0
 
-    def test_max_clip_no_effect(self):
-        assert transform_value(2.0, max_clip=3.3) == 2.0
-
-    def test_both_clips_passthrough(self):
-        assert transform_value(2.0, min_clip=1.0, max_clip=3.3) == 2.0
-
-    def test_both_clips_below(self):
-        assert transform_value(0.5, min_clip=1.0, max_clip=3.3) == 1.0
-
-    def test_both_clips_above(self):
-        assert transform_value(4.0, min_clip=1.0, max_clip=3.3) == 3.3
+    def test_clips_above_max(self):
+        assert transform_value(4.0, raw_min=1.0, raw_max=3.3) == 1.0
 
     def test_invert_at_min(self):
-        assert transform_value(1.0, min_clip=1.0, max_clip=3.0, invert=True) == 3.0
+        assert transform_value(1.0, raw_min=1.0, raw_max=3.3, invert=True) == 1.0
 
     def test_invert_at_max(self):
-        assert transform_value(3.0, min_clip=1.0, max_clip=3.0, invert=True) == 1.0
+        assert transform_value(3.3, raw_min=1.0, raw_max=3.3, invert=True) == 0.0
 
-    def test_invert_mid_value(self):
-        assert transform_value(1.5, min_clip=1.0, max_clip=3.0, invert=True) == 2.5
+    def test_invert_midpoint(self):
+        result = transform_value(2.15, raw_min=1.0, raw_max=3.3, invert=True)
+        assert result == pytest.approx(0.5, abs=0.01)
 
-    def test_invert_clips_then_inverts(self):
-        # 0.5 -> clip to 1.0 -> invert: 1.0 + 3.0 - 1.0 = 3.0
-        assert transform_value(0.5, min_clip=1.0, max_clip=3.0, invert=True) == 3.0
+    def test_invert_clips_below(self):
+        assert transform_value(0.5, raw_min=1.0, raw_max=3.3, invert=True) == 1.0
 
-    def test_invert_above_range(self):
-        # 4.0 -> clip to 3.0 -> invert: 1.0 + 3.0 - 3.0 = 1.0
-        assert transform_value(4.0, min_clip=1.0, max_clip=3.0, invert=True) == 1.0
+    def test_invert_clips_above(self):
+        assert transform_value(4.0, raw_min=1.0, raw_max=3.3, invert=True) == 0.0
 
-    def test_invert_requires_min_clip(self):
-        with pytest.raises(ValueError, match="invert requires both"):
-            transform_value(1.0, max_clip=3.0, invert=True)
-
-    def test_invert_requires_max_clip(self):
-        with pytest.raises(ValueError, match="invert requires both"):
-            transform_value(1.0, min_clip=1.0, invert=True)
-
-    def test_invert_requires_both_clips(self):
-        with pytest.raises(ValueError, match="invert requires both"):
-            transform_value(1.0, invert=True)
+    def test_zero_based_range(self):
+        assert transform_value(5.0, raw_min=0.0, raw_max=10.0) == 0.5
 
 
 class TestADS1115Channels:
@@ -109,18 +91,30 @@ class TestADS1115Transforms:
     def test_transform_on_inactive_channel_raises(self):
         from sensors.ads1115_sensor import ADS1115ADC
         with pytest.raises(ValueError, match="not in active channels"):
-            ADS1115ADC(channels=[0, 1], transforms={"2": {"invert": False}})
+            ADS1115ADC(channels=[0, 1], transforms={
+                "2": {"raw_min": 1.0, "raw_max": 3.3},
+            })
 
-    def test_invert_without_clips_raises(self):
+    def test_missing_raw_min_raises(self):
         from sensors.ads1115_sensor import ADS1115ADC
-        with pytest.raises(ValueError, match="invert requires"):
-            ADS1115ADC(transforms={"0": {"invert": True, "min_clip": 1.0}})
+        with pytest.raises(ValueError, match="requires both raw_min and raw_max"):
+            ADS1115ADC(transforms={"0": {"raw_max": 3.3}})
+
+    def test_missing_raw_max_raises(self):
+        from sensors.ads1115_sensor import ADS1115ADC
+        with pytest.raises(ValueError, match="requires both raw_min and raw_max"):
+            ADS1115ADC(transforms={"0": {"raw_min": 1.0}})
+
+    def test_raw_min_gte_raw_max_raises(self):
+        from sensors.ads1115_sensor import ADS1115ADC
+        with pytest.raises(ValueError, match="raw_min.*must be less than"):
+            ADS1115ADC(transforms={"0": {"raw_min": 3.3, "raw_max": 1.0}})
 
     def test_valid_transforms_accepted(self):
         from sensors.ads1115_sensor import ADS1115ADC
         sensor = ADS1115ADC(transforms={
-            "0": {"min_clip": 1.0, "max_clip": 3.3, "invert": True},
-            "2": {"min_clip": 0.0, "max_clip": 3.3},
+            "0": {"raw_min": 1.0, "raw_max": 3.3, "invert": True},
+            "2": {"raw_min": 0.0, "raw_max": 3.3},
         })
         assert 0 in sensor._transforms
         assert 2 in sensor._transforms

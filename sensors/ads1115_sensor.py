@@ -104,17 +104,21 @@ class ADS1115ADC(Sensor):
                         f"Transform channel {ch} is not in active channels "
                         f"{sorted(active_set)}"
                     )
-                min_clip = t.get("min_clip")
-                max_clip = t.get("max_clip")
-                invert = t.get("invert", False)
-                if invert and (min_clip is None or max_clip is None):
+                raw_min = t.get("raw_min")
+                raw_max = t.get("raw_max")
+                if raw_min is None or raw_max is None:
                     raise ValueError(
-                        f"Channel {ch}: invert requires both min_clip and max_clip"
+                        f"Channel {ch}: transform requires both raw_min and raw_max"
+                    )
+                if raw_min >= raw_max:
+                    raise ValueError(
+                        f"Channel {ch}: raw_min ({raw_min}) must be less than "
+                        f"raw_max ({raw_max})"
                     )
                 self._transforms[ch] = {
-                    "min_clip": min_clip,
-                    "max_clip": max_clip,
-                    "invert": invert,
+                    "raw_min": raw_min,
+                    "raw_max": raw_max,
+                    "invert": t.get("invert", False),
                 }
 
     def init(self) -> None:
