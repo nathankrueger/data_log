@@ -242,8 +242,18 @@ class ScreenManager:
 
         self._display.show()
 
-        # Slice the visible window
+        # Clamp offset if content shrunk since last scroll
         max_lines = self._display.max_lines
+        total = len(lines)
+        if total <= max_lines:
+            offset = 0
+        elif offset + max_lines > total:
+            offset = total - max_lines
+        if offset != self._line_offset:
+            with self._lock:
+                self._line_offset = offset
+
+        # Slice the visible window
         visible_lines = lines[offset : offset + max_lines]
 
         self._display.render_lines(visible_lines)

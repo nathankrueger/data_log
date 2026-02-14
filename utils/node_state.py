@@ -92,16 +92,19 @@ class NodeState:
         self, readings: list[tuple[str, float, str, str]]
     ) -> None:
         """
-        Update sensor readings (thread-safe).
+        Merge new sensor readings into existing ones (thread-safe).
+
+        Updates values for existing readings (keyed by name) and appends new ones.
+        Readings from sensors not included in this update are preserved.
 
         Args:
             readings: List of (name, value, units, sensor_class) tuples
         """
         with self._lock:
-            self.sensor_readings = [
-                SensorReadingInfo(name=n, value=v, units=u, sensor_class=c)
-                for n, v, u, c in readings
-            ]
+            existing = {r.name: r for r in self.sensor_readings}
+            for n, v, u, c in readings:
+                existing[n] = SensorReadingInfo(name=n, value=v, units=u, sensor_class=c)
+            self.sensor_readings = list(existing.values())
 
     def get_sensor_readings(self) -> list[SensorReadingInfo]:
         """Get a copy of sensor readings (thread-safe)."""
