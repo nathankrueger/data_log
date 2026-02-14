@@ -699,10 +699,10 @@ def main():
                 action_button = Button(action_pin, bounce_time=0.02)
                 action_button.when_pressed = screen_manager.do_page_action
 
-            # Scroll button (cycles visible rows on SensorValuesPage)
+            # Scroll button (circular scroll on SensorValuesPage)
             if scroll_pin := display_config.get("scroll_switch_pin"):
                 scroll_button = Button(scroll_pin, bounce_time=0.02)
-                scroll_button.when_pressed = lambda: screen_manager.scroll_page(1)
+                scroll_button.when_pressed = pages[1].scroll
 
             logger.info("OLED display initialized")
         except Exception as e:
