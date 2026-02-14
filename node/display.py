@@ -12,7 +12,7 @@ import threading
 import time
 from pathlib import Path
 
-from .base import ScreenPage, _format_duration, _get_ip_address
+from display.base import ScreenPage, _format_duration, _get_ip_address
 from utils.node_state import NodeState
 
 logger = logging.getLogger(__name__)

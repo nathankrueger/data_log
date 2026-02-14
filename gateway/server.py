@@ -36,14 +36,8 @@ from pathlib import Path
 
 from gpiozero import Button
 
-from display import (
-    GatewayLocalSensors,
-    LastPacketPage,
-    OffPage,
-    ScreenManager,
-    SSD1306Display,
-    SystemInfoPage,
-)
+from display import OffPage, ScreenManager, SSD1306Display
+from gateway.display import GatewayLocalSensors, LastPacketPage, SystemInfoPage
 from gateway.command_queue import CommandQueue
 from gateway.http_handler import CommandServer
 from gateway.sensor_collection import (

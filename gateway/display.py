@@ -12,7 +12,7 @@ import time
 from datetime import datetime
 from urllib.parse import urlparse
 
-from .base import ScreenPage, _format_duration, _get_ip_address
+from display.base import ScreenPage, _format_duration, _get_ip_address
 from utils.gateway_state import GatewayState
 
 
