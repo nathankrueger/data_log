@@ -71,11 +71,23 @@ class ADS1115ADC(Sensor):
             self._units = tuple(units)
 
         if not isinstance(gain, ADS1115Gain):
-            try:
-                gain = ADS1115Gain(gain)
-            except ValueError:
-                valid = [g.value for g in ADS1115Gain]
-                raise ValueError(f"Invalid gain {gain}, must be one of: {valid}")
+            if isinstance(gain, str):
+                _name_map = {g.name: g for g in ADS1115Gain}
+                _name_map["2/3"] = ADS1115Gain.GAIN_2_3
+                if gain not in _name_map:
+                    raise ValueError(
+                        f"Invalid gain '{gain}', must be one of: "
+                        f"{list(_name_map.keys())}"
+                    )
+                gain = _name_map[gain]
+            else:
+                try:
+                    gain = ADS1115Gain(gain)
+                except ValueError:
+                    valid = [g.value for g in ADS1115Gain]
+                    raise ValueError(
+                        f"Invalid gain {gain}, must be one of: {valid}"
+                    )
         self._gain = gain
         self._ads = None
         self._i2c = None
