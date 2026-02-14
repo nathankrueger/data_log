@@ -197,6 +197,12 @@ def run_gateway(
             )
             radio.init()
 
+            # Apply SF and BW from config if present (overrides rfm9x.py defaults)
+            if "spreading_factor" in lora_config:
+                radio.spreading_factor = lora_config["spreading_factor"]
+            if "signal_bandwidth" in lora_config:
+                radio.signal_bandwidth = lora_config["signal_bandwidth"]
+
             # Create RadioState (shared class with nodes)
             radio_state = RadioState(
                 radio=radio,
