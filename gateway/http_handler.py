@@ -63,6 +63,10 @@ class CommandHandler(BaseHTTPRequestHandler):
             self._handle_savecfg()
             return
 
+        if self.path == "/gateway/flush_commands":
+            self._handle_flush_commands()
+            return
+
         if self.path != "/command":
             self.send_error(404, "Not Found")
             return
@@ -583,6 +587,14 @@ class CommandHandler(BaseHTTPRequestHandler):
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps({"r": "saved"}).encode("utf-8"))
+
+    def _handle_flush_commands(self) -> None:
+        """Handle POST /gateway/flush_commands - clear all pending commands."""
+        count = self.server.command_queue.flush()  # type: ignore
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"flushed": count}).encode("utf-8"))
 
     def _handle_restart(self) -> None:
         """Handle POST /gateway/restart - restart gateway service."""

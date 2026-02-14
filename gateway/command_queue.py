@@ -98,6 +98,8 @@ class CommandQueue:
         self._wait_timeout = wait_timeout
         self._completed_responses: dict[str, tuple[float, dict]] = {}
         self._response_ttl = 60.0  # seconds to keep completed responses
+        # Preserve partial ACK info when commands expire (for HTTP 504 response)
+        self._expired_partials: dict[str, tuple[float, dict]] = {}
 
     # ─── Runtime Parameter Properties ───────────────────────────────────────
 
@@ -371,12 +373,25 @@ class CommandQueue:
         """
         Check if the current command has exceeded max retries.
 
+        For multi-ACK broadcast commands, preserves partial ACK info in
+        _expired_partials so HTTP handlers can report which nodes responded.
+
         Returns:
             The expired PendingCommand if one expired, None otherwise
         """
         with self._lock:
             if self._current and self._current.retry_count >= self._current.max_retries:
                 expired = self._current
+                # Preserve partial ACK info for multi-ACK commands
+                if expired.expected_acks > 1:
+                    self._expired_partials[expired.command_id] = (
+                        time.time(),
+                        {
+                            "acked_nodes": list(expired.acked_nodes),
+                            "responses": dict(expired.node_payloads),
+                            "expected_acks": expired.expected_acks,
+                        },
+                    )
                 self._current = None
                 return expired
         return None
@@ -418,12 +433,32 @@ class CommandQueue:
                 return True
         return False
 
+    def flush(self) -> int:
+        """
+        Clear all pending commands and the current command.
+
+        Returns:
+            Number of commands flushed.
+        """
+        with self._lock:
+            count = len(self._queue)
+            if self._current is not None:
+                count += 1
+            self._queue.clear()
+            self._current = None
+            logger.info(f"Flushed {count} command(s) from queue")
+            return count
+
     def get_partial_acks(self, command_id: str) -> dict | None:
         """
         Get partial ACK info for a command that's still in progress or timed out.
 
         Used by HTTP handlers to return partial results when a multi-ACK
         broadcast times out before receiving all expected ACKs.
+
+        Checks both:
+        1. Current command (still in progress)
+        2. Expired partials (command exceeded max_retries)
 
         Args:
             command_id: ID of the command
@@ -432,12 +467,17 @@ class CommandQueue:
             Dict with acked_nodes, responses, expected_acks, or None if not found
         """
         with self._lock:
+            # Check current command first
             if self._current and self._current.command_id == command_id:
                 return {
                     "acked_nodes": list(self._current.acked_nodes),
                     "responses": dict(self._current.node_payloads),
                     "expected_acks": self._current.expected_acks,
                 }
+            # Check expired commands (preserves partial info after max_retries)
+            expired = self._expired_partials.pop(command_id, None)
+            if expired:
+                return expired[1]  # Return the dict portion (index 0 is timestamp)
         return None
 
     def wait_for_response(self, command_id: str, timeout: float = 10.0) -> dict | None:
@@ -477,12 +517,20 @@ class CommandQueue:
         return None
 
     def cleanup_old_responses(self) -> None:
-        """Remove expired response payloads."""
+        """Remove expired response payloads and expired partials."""
         now = time.time()
         with self._lock:
+            # Clean up completed responses
             expired = [
                 cid for cid, (ts, _) in self._completed_responses.items()
                 if now - ts > self._response_ttl
             ]
             for cid in expired:
                 del self._completed_responses[cid]
+            # Clean up expired partials (same TTL)
+            expired_partials = [
+                cid for cid, (ts, _) in self._expired_partials.items()
+                if now - ts > self._response_ttl
+            ]
+            for cid in expired_partials:
+                del self._expired_partials[cid]
