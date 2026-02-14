@@ -39,8 +39,8 @@
     },
     "led": {
         "red_bcm": 17,
-        "green_bcm": 27,
-        "blue_bcm": 22,
+        "green_bcm": 22,
+        "blue_bcm": 27,
         "common_anode": true,
         "default_brightness": 128
     }
