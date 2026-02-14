@@ -270,8 +270,9 @@ class ScreenManager:
             try:
                 self._check_autoscroll()
                 self._refresh()
-            except Exception:
-                pass  # Don't crash on display errors
+            except Exception as e:
+                import logging
+                logging.getLogger(__name__).error(f"Display refresh error: {e}")
             time.sleep(self._refresh_interval)
 
     def close(self) -> None:
