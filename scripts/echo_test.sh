@@ -1,33 +1,31 @@
 #!/bin/bash
 #
 # Echo command reliability test.
-#
-# Runs the echo command in a loop at a configurable rate and collects
-# success/failure statistics.
-#
-# Requires: 'jq' (sudo apt install jq)
-#
-# Usage: echo_test.sh [-n <node_ids>] [-i <interval>] [-c <count>] [-b] [-g <gateway>] [-p <port>]
-#
-# Options:
-#   -n <node_ids>  Comma-separated node IDs, or omit to auto-discover
-#   -i <interval>  Seconds between echo commands (default: 1)
-#   -c <count>     Number of iterations (default: infinite, Ctrl+C to stop)
-#   -b             Broadcast mode: send to all nodes at once, expect all ACKs
-#   -g <gateway>   Gateway host (default: $GATEWAY_HOST or localhost)
-#   -p <port>      Gateway port (default: $GATEWAY_PORT or 5001)
-#   -h             Show this help
-#
 # Each echo sends a unique millisecond timestamp and validates the response.
+# Requires: 'jq' (sudo apt install jq)
 
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
 usage() {
-    head -n 19 "$0" | tail -n 18 | sed 's/^# //' | sed 's/^#//'
+    cat <<'EOF'
+Usage: echo_test.sh [-n <node_ids>] [-e <expected>] [-i <interval>] [-c <count>] [-b]
+                    [-g <gateway>] [-p <port>]
+
+Options:
+  -n <node_ids>  Comma-separated node IDs, or omit to auto-discover
+  -e <expected>  Expected number of nodes (speeds up discovery, validates count)
+  -i <interval>  Seconds between echo commands (default: 1)
+  -c <count>     Number of iterations (default: infinite, Ctrl+C to stop)
+  -b             Broadcast mode: send to all nodes at once, expect all ACKs
+  -g <gateway>   Gateway host (default: $GATEWAY_HOST or localhost)
+  -p <port>      Gateway port (default: $GATEWAY_PORT or 5001)
+  -h             Show this help
+EOF
     exit 1
 }
 
 NODE_ID=""
+EXPECTED_NODES=0  # 0 = not specified
 INTERVAL=1
 COUNT=0  # 0 = infinite
 BROADCAST=false
@@ -35,10 +33,13 @@ RATE_PRECISION=3  # decimal places for success rate
 OPT_HOST=""
 OPT_PORT=""
 
-while getopts "n:i:c:bg:p:h" opt; do
+while getopts "n:e:i:c:bg:p:h" opt; do
     case $opt in
         n)
             NODE_ID="$OPTARG"
+            ;;
+        e)
+            EXPECTED_NODES="$OPTARG"
             ;;
         i)
             INTERVAL="$OPTARG"
@@ -70,22 +71,54 @@ GATEWAY_PORT=${OPT_PORT:-${GATEWAY_PORT:-5001}}
 
 # Auto-discover nodes if not specified
 if [ -z "$NODE_ID" ]; then
-    echo "Running discovery (3 passes)..."
-    DISCOVER_OUT=$("$SCRIPT_DIR/discover_test.sh" -q -g "$GATEWAY_HOST" -p "$GATEWAY_PORT" 2>&1)
-    DISCOVER_EXIT=$?
-    if [ $DISCOVER_EXIT -ne 0 ]; then
-        echo "Error: Discovery failed - $DISCOVER_OUT"
-        exit 1
+    if [ "$BROADCAST" = true ] && [ "$EXPECTED_NODES" -gt 0 ]; then
+        # Broadcast with -e: skip discovery, build baseline from first response
+        echo "Broadcast mode with -e $EXPECTED_NODES: skipping discovery"
+        NUM_NODES=$EXPECTED_NODES
+        NODES=()  # Empty array - will be populated from first response
+    elif [ "$EXPECTED_NODES" -gt 0 ]; then
+        # Unicast with -e: single discovery pass with count validation
+        echo "Running discovery (1 pass, expecting $EXPECTED_NODES nodes)..."
+        DISCOVER_OUT=$("$SCRIPT_DIR/node_cmd.sh" -d -g "$GATEWAY_HOST" -p "$GATEWAY_PORT" 2>&1)
+        DISCOVER_EXIT=$?
+        if [ $DISCOVER_EXIT -ne 0 ]; then
+            echo "Error: Discovery failed - $DISCOVER_OUT"
+            exit 1
+        fi
+        # Parse response
+        NODE_ID=$(echo "$DISCOVER_OUT" | jq -r '.nodes | sort | join(",")' 2>/dev/null)
+        NODE_COUNT=$(echo "$DISCOVER_OUT" | jq '.count' 2>/dev/null)
+        if [ -z "$NODE_COUNT" ] || [ "$NODE_COUNT" = "null" ]; then
+            echo "Error: Failed to parse discovery response - $DISCOVER_OUT"
+            exit 1
+        fi
+        if [ "$NODE_COUNT" -ne "$EXPECTED_NODES" ]; then
+            echo "Error: Expected $EXPECTED_NODES nodes, found $NODE_COUNT: $NODE_ID"
+            exit 1
+        fi
+        echo "Discovered nodes: $NODE_ID"
+    else
+        # Original behavior: 3-pass discovery
+        echo "Running discovery (3 passes)..."
+        DISCOVER_OUT=$("$SCRIPT_DIR/discover_test.sh" -q -g "$GATEWAY_HOST" -p "$GATEWAY_PORT" 2>&1)
+        DISCOVER_EXIT=$?
+        if [ $DISCOVER_EXIT -ne 0 ]; then
+            echo "Error: Discovery failed - $DISCOVER_OUT"
+            exit 1
+        fi
+        NODE_ID="$DISCOVER_OUT"
+        echo "Discovered nodes: $NODE_ID"
     fi
-    NODE_ID="$DISCOVER_OUT"
-    echo "Discovered nodes: $NODE_ID"
 fi
 
-# Parse comma-separated nodes into array
-IFS=',' read -ra NODES <<< "$NODE_ID"
-NUM_NODES=${#NODES[@]}
+# Parse comma-separated nodes into array (may be empty for broadcast with -e)
+if [ -n "$NODE_ID" ]; then
+    IFS=',' read -ra NODES <<< "$NODE_ID"
+    NUM_NODES=${#NODES[@]}
+fi
 
-if [ $NUM_NODES -eq 0 ]; then
+# For non-broadcast mode, we need nodes
+if [ "$BROADCAST" != true ] && [ ${#NODES[@]} -eq 0 ]; then
     echo "Error: no nodes found"
     exit 1
 fi
@@ -99,7 +132,7 @@ SUCCESS=0
 FAIL=0
 MISMATCH=0
 
-# Per-node statistics
+# Per-node statistics (initialized for known nodes, may be extended dynamically for broadcast -e)
 declare -A NODE_TOTAL NODE_SUCCESS NODE_FAIL NODE_MISMATCH
 for node in "${NODES[@]}"; do
     NODE_TOTAL[$node]=0
@@ -107,6 +140,9 @@ for node in "${NODES[@]}"; do
     NODE_FAIL[$node]=0
     NODE_MISMATCH[$node]=0
 done
+
+# For broadcast with -e, track whether baseline has been established
+BASELINE_SET=false
 
 # Cleanup handler
 cleanup() {
@@ -178,10 +214,38 @@ if [ "$BROADCAST" = true ]; then
 
         if [ $CMD_EXIT -eq 0 ]; then
             # Parse broadcast response - contains acked_nodes and responses
-            ACKED_NODES=$(echo "$RESPONSE" | jq -r '.acked_nodes // [] | join(",")' 2>/dev/null)
+            ACKED_NODES_STR=$(echo "$RESPONSE" | jq -r '.acked_nodes // [] | sort | join(",")' 2>/dev/null)
             ACKED_COUNT=$(echo "$RESPONSE" | jq -r '.acked_nodes // [] | length' 2>/dev/null)
 
-            # Update per-node stats based on who responded
+            # If baseline not yet established (broadcast with -e, first response)
+            if [ "$BASELINE_SET" = false ] && [ ${#NODES[@]} -eq 0 ]; then
+                # Build baseline from first response (only if we got nodes)
+                if [ -n "$ACKED_NODES_STR" ]; then
+                    IFS=',' read -ra NODES <<< "$ACKED_NODES_STR"
+                    for node in "${NODES[@]}"; do
+                        NODE_TOTAL[$node]=0
+                        NODE_SUCCESS[$node]=0
+                        NODE_FAIL[$node]=0
+                        NODE_MISMATCH[$node]=0
+                    done
+                    BASELINE_SET=true
+                    BASELINE_NODES_STR="$ACKED_NODES_STR"
+                    echo "Baseline established: ${#NODES[@]} nodes ($ACKED_NODES_STR)"
+                else
+                    echo "[$TIMESTAMP] BROADCAST #$ITERATION: No nodes responded, waiting for baseline..."
+                fi
+            fi
+
+            # Determine if this iteration is a success (same set as baseline)
+            ITERATION_SUCCESS=true
+            if [ "$BASELINE_SET" = true ]; then
+                # For baseline comparison: check if acked set matches baseline exactly
+                if [ "$ACKED_NODES_STR" != "$BASELINE_NODES_STR" ]; then
+                    ITERATION_SUCCESS=false
+                fi
+            fi
+
+            # Update per-node stats based on who responded (baseline nodes only)
             for node in "${NODES[@]}"; do
                 NODE_TOTAL[$node]=$((NODE_TOTAL[$node] + 1))
                 TOTAL=$((TOTAL + 1))
@@ -206,7 +270,18 @@ if [ "$BROADCAST" = true ]; then
                 fi
             done
 
-            echo "[$TIMESTAMP] BROADCAST #$ITERATION: $ACKED_COUNT/$NUM_NODES ACKs (sent=$SEND_DATA, nodes=$ACKED_NODES)"
+            # Report iteration result
+            if [ "$BASELINE_SET" = true ]; then
+                # Broadcast with -e: show OK/FAIL based on baseline comparison
+                if [ "$ITERATION_SUCCESS" = true ]; then
+                    echo "[$TIMESTAMP] BROADCAST #$ITERATION: OK $ACKED_COUNT/$NUM_NODES ACKs (sent=$SEND_DATA, nodes=$ACKED_NODES_STR)"
+                else
+                    echo "[$TIMESTAMP] BROADCAST #$ITERATION: FAIL $ACKED_COUNT/$NUM_NODES ACKs (sent=$SEND_DATA, nodes=$ACKED_NODES_STR)"
+                fi
+            else
+                # Original behavior: just show count
+                echo "[$TIMESTAMP] BROADCAST #$ITERATION: $ACKED_COUNT/$NUM_NODES ACKs (sent=$SEND_DATA, nodes=$ACKED_NODES_STR)"
+            fi
         else
             # Complete failure - no response at all
             for node in "${NODES[@]}"; do
