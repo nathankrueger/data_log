@@ -1,5 +1,6 @@
 pimoroni-bme280
 adafruit-circuitpython-rfm9x
+adafruit-circuitpython-ads1x15
 adafruit-blinka
 rpi-lgpio
 gpiozero

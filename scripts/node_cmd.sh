@@ -138,7 +138,9 @@ elif [ "$WAIT" = true ] && [ -z "$NODE_ID" ]; then
     fi
 
     # Fetch server-side wait_timeout and add buffer for curl
-    SERVER_TIMEOUT=$(curl -sS --max-time 5 "http://$GATEWAY_HOST:$GATEWAY_PORT/gateway/param/wait_timeout" 2>/dev/null | jq -r '.wait_timeout // 20 | floor')
+    # Default to 60s if fetch fails (jq errors on empty input, leaving SERVER_TIMEOUT empty)
+    SERVER_TIMEOUT=$(curl -sS --max-time 5 "http://$GATEWAY_HOST:$GATEWAY_PORT/gateway/param/wait_timeout" 2>/dev/null | jq -r '.wait_timeout // empty | floor' 2>/dev/null)
+    : "${SERVER_TIMEOUT:=60}"
     CURL_TIMEOUT=$((SERVER_TIMEOUT + 5))
 
     # Capture stderr separately to get clean error messages

@@ -8,12 +8,14 @@ various hardware sensors on Raspberry Pi.
 from .base import Sensor, c_to_f
 from .bme280_sensor import BME280TempPressureHumidity
 from .mma8452_sensor import MMA8452Accelerometer
+from .ads1115_sensor import ADS1115ADC
 
 __all__ = [
     "Sensor",
     "c_to_f",
     "BME280TempPressureHumidity",
     "MMA8452Accelerometer",
+    "ADS1115ADC",
     "SENSOR_CLASS_IDS",
     "SENSOR_ID_CLASSES",
     "get_sensor_class_id",
