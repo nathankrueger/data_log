@@ -560,6 +560,10 @@ def broadcast_loop(
 
 
 def main():
+    from utils.process_lock import acquire_lock
+
+    acquire_lock("node")
+
     # Register signal handlers for graceful shutdown
     signal.signal(signal.SIGTERM, _signal_handler)
     signal.signal(signal.SIGINT, _signal_handler)

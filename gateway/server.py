@@ -348,6 +348,10 @@ def run_gateway(
 
 
 def main():
+    from utils.process_lock import acquire_lock
+
+    acquire_lock("gateway")
+
     parser = argparse.ArgumentParser(
         description="Indoor gateway - posts sensor data to Pi5 dashboard",
         formatter_class=argparse.RawDescriptionHelpFormatter,
