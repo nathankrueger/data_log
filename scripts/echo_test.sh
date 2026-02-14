@@ -283,14 +283,19 @@ if [ "$BROADCAST" = true ]; then
                 echo "[$TIMESTAMP] BROADCAST #$ITERATION: $ACKED_COUNT/$NUM_NODES ACKs (sent=$SEND_DATA, nodes=$ACKED_NODES_STR)"
             fi
         else
-            # Complete failure - no response at all
+            # Command failed (e.g. HTTP 504 timeout) - may still have partial ACK info
+            # Try to extract acked count from JSON in error response
+            ERR_JSON=$(echo "$RESPONSE" | sed 's/^[^{]*//')
+            ERR_ACKED_COUNT=$(echo "$ERR_JSON" | jq -r '.acked_nodes // [] | length' 2>/dev/null)
+            [ -z "$ERR_ACKED_COUNT" ] && ERR_ACKED_COUNT=0
+
             for node in "${NODES[@]}"; do
                 NODE_TOTAL[$node]=$((NODE_TOTAL[$node] + 1))
                 NODE_FAIL[$node]=$((NODE_FAIL[$node] + 1))
                 TOTAL=$((TOTAL + 1))
                 FAIL=$((FAIL + 1))
             done
-            echo "[$TIMESTAMP] BROADCAST #$ITERATION: FAIL - $RESPONSE"
+            echo "[$TIMESTAMP] BROADCAST #$ITERATION: FAIL $ERR_ACKED_COUNT/$NUM_NODES - $RESPONSE"
         fi
 
         # Check if we've reached the count limit
