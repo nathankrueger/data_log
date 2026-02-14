@@ -30,16 +30,17 @@ class ADS1115ADC(Sensor):
         import busio
         import adafruit_ads1x15.ads1115 as ADS
         from adafruit_ads1x15.analog_in import AnalogIn
+        from adafruit_ads1x15.ads1x15 import P0, P1, P2, P3
 
         self._i2c = busio.I2C(board.SCL, board.SDA)
         self._ads = ADS.ADS1115(self._i2c, address=self._address)
         self._ads.gain = self._gain
 
         self._channels = [
-            AnalogIn(self._ads, ADS.P0),
-            AnalogIn(self._ads, ADS.P1),
-            AnalogIn(self._ads, ADS.P2),
-            AnalogIn(self._ads, ADS.P3),
+            AnalogIn(self._ads, P0),
+            AnalogIn(self._ads, P1),
+            AnalogIn(self._ads, P2),
+            AnalogIn(self._ads, P3),
         ]
 
     def read(self) -> tuple[float, float, float, float]:
