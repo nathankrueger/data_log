@@ -20,17 +20,16 @@ logger = logging.getLogger(__name__)
 
 class SensorValuesPage(ScreenPage):
     """
-    Displays all sensor readings with autoscroll or manual circular scroll.
+    Displays all sensor readings.
 
     Shows one reading per line: "name: value units"
-    When auto_scroll=True, autoscrolls through all sensors at 2s intervals.
-    When auto_scroll=False, use scroll() to cycle readings in round-robin fashion.
+    When auto_scroll=True, autoscrolls through readings at 2s intervals.
+    When auto_scroll=False, use ScreenManager.scroll_page() via a button.
     """
 
     def __init__(self, state: NodeState, auto_scroll: bool = False):
         self._state = state
         self._auto_scroll = auto_scroll
-        self._scroll_offset = 0
 
     def get_lines(self) -> list[str | None]:
         readings = self._state.get_sensor_readings()
@@ -38,25 +37,16 @@ class SensorValuesPage(ScreenPage):
         if not readings:
             return ["Sensor Values", "---", "No readings yet", None]
 
-        sensor_lines: list[str] = []
+        lines: list[str | None] = ["Sensor Values"]
         for r in readings:
             # Format: "temp: 72.5 F" - truncate name if needed
             name = r.name[:8]
-            sensor_lines.append(f"{name}: {r.value:.1f} {r.units}")
+            lines.append(f"{name}: {r.value:.1f} {r.units}")
 
-        # Circular rotation for manual scroll mode
-        if not self._auto_scroll and sensor_lines:
-            offset = self._scroll_offset % len(sensor_lines)
-            sensor_lines = sensor_lines[offset:] + sensor_lines[:offset]
-
-        return ["Sensor Values"] + sensor_lines
+        return lines
 
     def get_autoscroll_interval(self) -> float | None:
         return 2.0 if self._auto_scroll else None
-
-    def scroll(self) -> None:
-        """Advance circular scroll by one reading."""
-        self._scroll_offset += 1
 
 
 class NodeInfoPage(ScreenPage):
