@@ -6,4 +6,4 @@ PROJECT_DIR="$(dirname "$SCRIPT_DIR")"
 
 source "$PROJECT_DIR/.venv/bin/activate"
 export PYTHONPATH="$PROJECT_DIR"
-exec python "$PROJECT_DIR/node/data_log.py" "$@"
+cd "$PROJECT_DIR" && exec python -m node.data_log "$@"
