@@ -108,7 +108,7 @@ def scale_brightness(rgb: tuple[int, int, int], brightness: int) -> tuple[int, i
 
 
 if __name__ == "__main__":
-    dly = 1
+    dly = 5
     led = RgbLed(red_bcm=17, green_bcm=22, blue_bcm=27, common_anode=True)
     try:
         while True:
