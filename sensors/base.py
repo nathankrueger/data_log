@@ -8,6 +8,28 @@ def c_to_f(c: float) -> float:
     return (c * 9.0 / 5.0) + 32
 
 
+def transform_value(
+    value: float,
+    min_clip: float | None = None,
+    max_clip: float | None = None,
+    invert: bool = False,
+) -> float:
+    """Apply clip-then-invert transform to a single value.
+
+    Clips value to [min_clip, max_clip], then optionally inverts within
+    that range: result = min_clip + max_clip - clipped_value.
+    """
+    if invert and (min_clip is None or max_clip is None):
+        raise ValueError("invert requires both min_clip and max_clip")
+    if min_clip is not None:
+        value = max(value, min_clip)
+    if max_clip is not None:
+        value = min(value, max_clip)
+    if invert:
+        value = min_clip + max_clip - value
+    return value
+
+
 class Sensor(ABC):
     """Abstract base class for all sensors."""
 
