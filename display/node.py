@@ -63,7 +63,7 @@ class NodeInfoPage(ScreenPage):
         broadcasts = self._state.get_broadcast_count()
 
         return [
-            "Node Info",
+            f"Node Info - {self._state.node_id}",
             f"IP: {ip}",
             f"Uptime: {uptime}",
             f"Broadcasts: {broadcasts}",
