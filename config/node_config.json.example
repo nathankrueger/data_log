@@ -23,6 +23,8 @@
         "enabled": true,
         "advance_switch_pin": 16,
         "action_switch_pin": 26,
+        "scroll_switch_pin": 5,
+        "auto_scroll": false,
         "i2c_port": 1,
         "i2c_address": 60,
         "refresh_interval": 0.5

@@ -26,8 +26,9 @@ class SensorValuesPage(ScreenPage):
     Autoscrolls through all sensors at 2s intervals.
     """
 
-    def __init__(self, state: NodeState):
+    def __init__(self, state: NodeState, auto_scroll: bool = False):
         self._state = state
+        self._auto_scroll = auto_scroll
 
     def get_lines(self) -> list[str | None]:
         readings = self._state.get_sensor_readings()
@@ -44,7 +45,7 @@ class SensorValuesPage(ScreenPage):
         return lines
 
     def get_autoscroll_interval(self) -> float | None:
-        return 2.0  # 2 second autoscroll
+        return 2.0 if self._auto_scroll else None
 
 
 class NodeInfoPage(ScreenPage):

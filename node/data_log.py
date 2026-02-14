@@ -654,6 +654,7 @@ def main():
     screen_manager = None
     display_advance_button = None
     action_button = None
+    scroll_button = None
     display_config = config.get("display", {})
 
     if display_config.get("enabled", False):
@@ -675,7 +676,7 @@ def main():
             )
             pages = [
                 OffPage(),
-                SensorValuesPage(node_state),
+                SensorValuesPage(node_state, auto_scroll=display_config.get("auto_scroll", False)),
                 NodeInfoPage(node_state),
                 ArducamOCRPage(node_state),
             ]
@@ -695,6 +696,11 @@ def main():
             if action_pin := display_config.get("action_switch_pin"):
                 action_button = Button(action_pin, bounce_time=0.02)
                 action_button.when_pressed = screen_manager.do_page_action
+
+            # Scroll button (cycles visible rows on SensorValuesPage)
+            if scroll_pin := display_config.get("scroll_switch_pin"):
+                scroll_button = Button(scroll_pin, bounce_time=0.02)
+                scroll_button.when_pressed = lambda: screen_manager.scroll_page(1)
 
             logger.info("OLED display initialized")
         except Exception as e:
