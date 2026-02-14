@@ -233,12 +233,14 @@ class ScreenManager:
             page = self._pages[self._current_page_idx]
             offset = self._line_offset
 
-        if page.is_off():
+        # Get lines once and use for both off-check and rendering
+        lines = page.get_lines()
+
+        if all(line is None for line in lines):
             self._display.hide()
             return
 
         self._display.show()
-        lines = page.get_lines()
 
         # Slice the visible window
         max_lines = self._display.max_lines
