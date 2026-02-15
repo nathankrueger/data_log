@@ -107,17 +107,19 @@ for entry in "${DESTINATIONS[@]}"; do
 
     # Restart the active service if requested
     if [ "$RESTART" = true ]; then
-        # Build a systemctl check for all known services in a single SSH call
+        # Find installed services and their states in a single SSH call
+        # Output format: "service.name state" per line
         service_list=$(printf " %s" "${KNOWN_SERVICES[@]}")
-        active_services=$(ssh $SSH_OPTS "${username}@${hostname}" \
-            "for svc in ${service_list}; do systemctl is-active \$svc 2>/dev/null | grep -q '^active$' && echo \$svc; done")
+        service_states=$(ssh $SSH_OPTS "${username}@${hostname}" \
+            "for svc in ${service_list}; do state=\$(systemctl is-active \$svc 2>/dev/null); if [ \"\$state\" != \"inactive\" ] && [ \"\$state\" != \"unknown\" ]; then echo \$svc \$state; fi; done")
 
-        # Count active services
-        count=$(echo "$active_services" | grep -c '\.service$')
+        # Count running services (active, activating, restarting, failed)
+        count=$(echo "$service_states" | grep -c '\.service ')
 
         if [[ $count -eq 1 ]]; then
-            svc_name=$(echo "$active_services" | tr -d '[:space:]')
-            echo "Restarting $svc_name on $hostname..."
+            svc_name=$(echo "$service_states" | awk '{print $1}')
+            svc_state=$(echo "$service_states" | awk '{print $2}')
+            echo "Restarting $svc_name on $hostname (was $svc_state)..."
             ssh $SSH_OPTS "${username}@${hostname}" "sudo systemctl restart $svc_name"
             if [[ $? -eq 0 ]]; then
                 echo "Successfully restarted $svc_name on $hostname"
@@ -125,10 +127,10 @@ for entry in "${DESTINATIONS[@]}"; do
                 echo "Failed to restart $svc_name on $hostname"
             fi
         elif [[ $count -eq 0 ]]; then
-            echo "No active services found on $hostname, skipping restart"
+            echo "No running services found on $hostname, skipping restart"
         else
-            echo "Multiple active services on $hostname, skipping restart:"
-            echo "$active_services" | sed 's/^/  /'
+            echo "Multiple running services on $hostname, skipping restart:"
+            echo "$service_states" | sed 's/^/  /'
         fi
     fi
     echo
