@@ -127,15 +127,13 @@ fi
 NODE_DELAY=$(echo "scale=$RATE_PRECISION; $INTERVAL / $NUM_NODES" | bc)
 
 # Statistics (combined)
-TOTAL=0
 SUCCESS=0
 FAIL=0
 MISMATCH=0
 
 # Per-node statistics (initialized for known nodes, may be extended dynamically for broadcast -e)
-declare -A NODE_TOTAL NODE_SUCCESS NODE_FAIL NODE_MISMATCH
+declare -A NODE_SUCCESS NODE_FAIL NODE_MISMATCH
 for node in "${NODES[@]}"; do
-    NODE_TOTAL[$node]=0
     NODE_SUCCESS[$node]=0
     NODE_FAIL[$node]=0
     NODE_MISMATCH[$node]=0
@@ -154,10 +152,10 @@ cleanup() {
     # Per-node breakdown (only if multiple nodes)
     if [ $NUM_NODES -gt 1 ]; then
         for node in "${NODES[@]}"; do
-            local n_total=${NODE_TOTAL[$node]}
-            local n_success=${NODE_SUCCESS[$node]}
-            local n_mismatch=${NODE_MISMATCH[$node]}
-            local n_fail=${NODE_FAIL[$node]}
+            local n_success=${NODE_SUCCESS[$node]:-0}
+            local n_mismatch=${NODE_MISMATCH[$node]:-0}
+            local n_fail=${NODE_FAIL[$node]:-0}
+            local n_total=$((n_success + n_mismatch + n_fail))
             if [ $n_total -gt 0 ]; then
                 local n_rate=$(echo "scale=$RATE_PRECISION; $n_success * 100 / $n_total" | bc)
                 printf "%-12s %d/%d (%s%%) [mismatch=%d, fail=%d]\n" \
@@ -169,7 +167,8 @@ cleanup() {
         echo "----------------------------------------"
     fi
 
-    # Combined totals
+    # Derive totals from result counters (immune to Ctrl+C race conditions)
+    TOTAL=$((SUCCESS + MISMATCH + FAIL))
     echo "Total attempts: $TOTAL"
     echo "Successful:     $SUCCESS"
     echo "Mismatched:     $MISMATCH"
@@ -223,7 +222,6 @@ if [ "$BROADCAST" = true ]; then
                 if [ -n "$ACKED_NODES_STR" ]; then
                     IFS=',' read -ra NODES <<< "$ACKED_NODES_STR"
                     for node in "${NODES[@]}"; do
-                        NODE_TOTAL[$node]=0
                         NODE_SUCCESS[$node]=0
                         NODE_FAIL[$node]=0
                         NODE_MISMATCH[$node]=0
@@ -247,9 +245,6 @@ if [ "$BROADCAST" = true ]; then
 
             # Update per-node stats based on who responded (baseline nodes only)
             for node in "${NODES[@]}"; do
-                NODE_TOTAL[$node]=$((NODE_TOTAL[$node] + 1))
-                TOTAL=$((TOTAL + 1))
-
                 # Check if this node is in acked_nodes
                 if echo "$RESPONSE" | jq -e ".acked_nodes | index(\"$node\")" > /dev/null 2>&1; then
                     # Check if response matches - try multiple possible field names
@@ -290,9 +285,7 @@ if [ "$BROADCAST" = true ]; then
             [ -z "$ERR_ACKED_COUNT" ] && ERR_ACKED_COUNT=0
 
             for node in "${NODES[@]}"; do
-                NODE_TOTAL[$node]=$((NODE_TOTAL[$node] + 1))
                 NODE_FAIL[$node]=$((NODE_FAIL[$node] + 1))
-                TOTAL=$((TOTAL + 1))
                 FAIL=$((FAIL + 1))
             done
             echo "[$TIMESTAMP] BROADCAST #$ITERATION: FAIL $ERR_ACKED_COUNT/$NUM_NODES - $RESPONSE"
@@ -318,10 +311,6 @@ else
         # or prints error to stderr and exits non-zero on failure
         RESPONSE=$("$SCRIPT_DIR/node_cmd.sh" -n "$CURRENT_NODE" -c echo -a "$SEND_DATA" -w -g "$GATEWAY_HOST" -p "$GATEWAY_PORT" 2>&1)
         CMD_EXIT=$?
-
-        # Increment totals only after command completes (so Ctrl+C mid-test doesn't inflate count)
-        TOTAL=$((TOTAL + 1))
-        NODE_TOTAL[$CURRENT_NODE]=$((NODE_TOTAL[$CURRENT_NODE] + 1))
 
         TIMESTAMP=$(date '+%H:%M:%S')
 
