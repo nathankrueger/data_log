@@ -701,7 +701,7 @@ def main():
                 ScreenManager,
                 SSD1306Display,
             )
-            from node.display import (
+            from node.display_pages import (
                 ArducamOCRPage,
                 NodeInfoPage,
                 SensorValuesPage,

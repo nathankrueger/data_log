@@ -276,7 +276,7 @@ Both switch pins are optional - the system works without any buttons configured.
 
 **New Radio:** Create class in `radio/` extending `Radio`, export in `radio/__init__.py`
 
-**New Display Page:** Create class extending `ScreenPage` in the appropriate package (`gateway/display.py` or `node/display.py`), implement `get_lines() -> list[str | None]`, add instance to `pages` list in the corresponding server module
+**New Display Page:** Create class extending `ScreenPage` in the appropriate package (`gateway/display_pages.py` or `node/display_pages.py`), implement `get_lines() -> list[str | None]`, add instance to `pages` list in the corresponding server module
 
 ### Display System Architecture
 
