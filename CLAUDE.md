@@ -75,7 +75,7 @@ Both support context managers (`with` statement).
 Sensors are discovered via reflection in `sensors/__init__.py`:
 - `get_all_sensor_classes()` - Returns all Sensor subclasses
 - `get_sensor_class(name)` - Lookup by class name string
-- `SENSOR_CLASS_IDS` / `SENSOR_ID_CLASSES` - Compact IDs for protocol
+- `SENSOR_CLASS_IDS` / `SENSOR_ID_CLASSES` - Manually assigned compact IDs for protocol (never reassign)
 
 This enables config-driven instantiation without hardcoding sensor types.
 
@@ -272,7 +272,7 @@ Both switch pins are optional - the system works without any buttons configured.
 
 ## Adding New Components
 
-**New Sensor:** Create class in `sensors/` extending `Sensor`, add to `SENSOR_CLASS_IDS` in `sensors/__init__.py`
+**New Sensor:** Create class in `sensors/` extending `Sensor`, add to `_SENSOR_ID_MAP` in `sensors/__init__.py` with the next available ID
 
 **New Radio:** Create class in `radio/` extending `Radio`, export in `radio/__init__.py`
 

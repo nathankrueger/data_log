@@ -358,10 +358,20 @@ class TestSensorRegistry:
         assert get_sensor_class_id("NonexistentSensor") is None
         assert get_sensor_class_name(9999) is None
 
-    def test_ids_are_alphabetically_ordered(self):
-        """Sensor IDs should be assigned in alphabetical order of class names."""
-        class_names = list(SENSOR_CLASS_IDS.keys())
-        assert class_names == sorted(class_names)
+    def test_ids_are_manually_assigned(self):
+        """Sensor IDs should match the manually maintained registry."""
+        assert SENSOR_CLASS_IDS["BME280TempPressureHumidity"] == 0
+        assert SENSOR_CLASS_IDS["MMA8452Accelerometer"] == 1
+        assert SENSOR_CLASS_IDS["ADS1115ADC"] == 2
+
+    def test_ids_are_unique(self):
+        """No two sensor classes should share the same ID."""
+        seen = {}
+        for name, sid in SENSOR_CLASS_IDS.items():
+            assert sid not in seen, (
+                f"Duplicate sensor ID {sid}: {seen[sid]!r} and {name!r}"
+            )
+            seen[sid] = name
 
 
 # =============================================================================

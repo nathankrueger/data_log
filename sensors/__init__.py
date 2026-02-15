@@ -24,32 +24,24 @@ __all__ = [
 ]
 
 
-def _build_sensor_registry() -> tuple[dict[str, int], dict[int, str]]:
-    """
-    Build sensor class ID registry from all Sensor subclasses.
+# Manual sensor class ID registry.
+# IDs are permanent — never reassign or reuse an ID.
+# The HTCC AB01 firmware hardcodes these IDs, so changing
+# existing assignments will break cross-device compatibility.
+# When adding a new sensor, append it with the next available ID.
+_SENSOR_ID_MAP: dict[str, int] = {
+    "BME280TempPressureHumidity": 0,
+    "MMA8452Accelerometer": 1,
+    "ADS1115ADC": 2,
+}
 
-    Finds all concrete Sensor subclasses, sorts by name for deterministic
-    ordering, and assigns sequential integer IDs.
+SENSOR_CLASS_IDS: dict[str, int] = dict(_SENSOR_ID_MAP)
+SENSOR_ID_CLASSES: dict[int, str] = {v: k for k, v in _SENSOR_ID_MAP.items()}
 
-    Returns:
-        Tuple of (class_name -> id, id -> class_name) dicts
-    """
-    # Find all Sensor subclasses (excluding Sensor itself)
-    sensor_classes = [
-        cls.__name__
-        for cls in Sensor.__subclasses__()
-    ]
-    # Sort alphabetically for deterministic IDs
-    sensor_classes.sort()
-
-    class_to_id = {name: i for i, name in enumerate(sensor_classes)}
-    id_to_class = {i: name for i, name in enumerate(sensor_classes)}
-
-    return class_to_id, id_to_class
-
-
-# Build registry at import time from all loaded Sensor subclasses
-SENSOR_CLASS_IDS, SENSOR_ID_CLASSES = _build_sensor_registry()
+assert len(SENSOR_CLASS_IDS) == len(SENSOR_ID_CLASSES), (
+    f"Duplicate sensor class IDs in _SENSOR_ID_MAP: "
+    f"{len(SENSOR_CLASS_IDS)} names but {len(SENSOR_ID_CLASSES)} unique IDs"
+)
 
 
 def get_sensor_class_id(class_name: str) -> int | None:
