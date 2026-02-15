@@ -67,7 +67,7 @@ data_log/
 
 ### Abstract Base Classes
 - `sensors/base.py` - `Sensor` ABC with `init()`, `read()`, `get_names()`, `get_units()`
-- `radio/base.py` - `Radio` ABC with `init()`, `send()`, `receive()`, `close()`
+- `radio/base.py` - `Radio` ABC with `init()`, `send()`, `receive()`, `close()`, `idle()`, `recover_rx()`
 
 Both support context managers (`with` statement).
 
@@ -173,6 +173,8 @@ CommandReceiver thread:
 ```
 
 The `radio_lock` ensures half-duplex safety. If broadcast loop is transmitting, CommandReceiver waits.
+
+**RX recovery:** The SX1276 LoRa modem can enter a stuck state where `rx_done` is permanently asserted (reads stale FIFO data as bare JSON numbers). `CommandReceiver` tracks consecutive invalid packets on G2N and calls `Radio.recover_rx()` after 10 in a row. `recover_rx()` cycles SLEEP→STANDBY→clear IRQ flags — this resets the modem state machine while preserving all register config (SF, BW, freq, etc.). This is distinct from a hardware reset (pin toggle), which wipes all registers and happens automatically during `Radio.init()`.
 
 ### Gateway Radio Parameter Access (SPI Contention)
 

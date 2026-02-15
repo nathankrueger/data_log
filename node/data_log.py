@@ -33,6 +33,7 @@ Usage:
     python3 -m node.data_log [config_file]
     python3 node/data_log.py [config_file]
 """
+from __future__ import annotations
 
 import argparse
 import inspect
@@ -153,6 +154,9 @@ class CommandReceiver(threading.Thread):
         # Single-slot dedup (matches AB01 pattern)
         self._last_command_id: str = ""
         self._last_ack_packet: bytes | None = None
+        # Consecutive error counter for radio recovery
+        self._consecutive_errors: int = 0
+        self._max_errors_before_reset: int = 10
 
     def _get_n2g_freq(self) -> float:
         """Get current N2G frequency (from RadioState if available)."""
@@ -176,21 +180,43 @@ class CommandReceiver(threading.Thread):
 
         while self._running:
             try:
-                # Use interruptible receive with fine-grained internal locking
-                # This allows broadcast_loop to transmit during 100ms sleep intervals
-                # while maintaining long effective RX windows (4+ seconds)
                 packet = self._receive_interruptible(self._receive_timeout)
 
-                if packet is not None:
-                    self._process_packet(packet)
+                if packet is None:
+                    # Normal timeout, no data — radio is working fine
+                    self._consecutive_errors = 0
+                elif self._process_packet(packet):
+                    # Valid command processed
+                    self._consecutive_errors = 0
+                else:
+                    # Received data but not a valid command — suspicious on G2N
+                    self._consecutive_errors += 1
+                    if self._consecutive_errors >= self._max_errors_before_reset:
+                        self._reset_radio()
+                        self._consecutive_errors = 0
 
             except Exception as e:
                 logger.error(f"Command receive error: {e}")
+                self._consecutive_errors += 1
+                if self._consecutive_errors >= self._max_errors_before_reset:
+                    self._reset_radio()
+                    self._consecutive_errors = 0
                 time.sleep(0.5)  # Back off on error
 
     def stop(self) -> None:
         """Signal the thread to stop."""
         self._running = False
+
+    def _reset_radio(self) -> None:
+        """Reset the radio RX modem to recover from a stuck rx_done state.
+
+        The SX1276 LoRa modem can enter a state where rx_done is permanently
+        asserted (e.g. due to an SPI glitch). Cycling through STANDBY and
+        clearing IRQ flags breaks the modem out of this state.
+        """
+        logger.warning("Resetting radio RX modem after repeated errors")
+        with self._radio_lock:
+            self._radio.recover_rx()
 
     def _send_ack(self, ack_packet: bytes, add_jitter: bool = False) -> bool:
         """Send an ACK packet, optionally applying jitter to stagger responses.
@@ -267,7 +293,7 @@ class CommandReceiver(threading.Thread):
 
         return None  # Shutdown requested
 
-    def _process_packet(self, packet: bytes) -> None:
+    def _process_packet(self, packet: bytes) -> bool:
         """Parse and dispatch a received command packet, send ACK.
 
         Follows the AB01 earlyAck pattern:
@@ -276,15 +302,19 @@ class CommandReceiver(threading.Thread):
 
         Dedup: If the same command_id is received again (retransmission),
         resend the cached ACK but skip handler re-execution (matches AB01).
+
+        Returns:
+            True if a valid command was processed (or duplicate handled),
+            False if parsing failed (garbage data).
         """
         cmd = parse_command_packet(packet)
         if cmd is None:
-            # Not a valid command packet (might be a sensor packet from another node)
-            return
+            logger.warning("RX_INVALID len=%d hex=%s", len(packet), packet[:40].hex())
+            return False
 
         # Check if command is for this node
         if cmd.node_id and cmd.node_id != self._node_id:
-            return  # Not for us (targeted to another node)
+            return True  # Not for us, but valid packet (not garbage)
 
         target = cmd.node_id if cmd.node_id else "broadcast"
         command_id = cmd.get_command_id()
@@ -304,7 +334,7 @@ class CommandReceiver(threading.Thread):
             )
             if self._last_ack_packet is not None:
                 self._send_ack(self._last_ack_packet, add_jitter)
-            return
+            return True
 
         logger.info(f"Received command '{cmd.command}' for {target} (id: {command_id})")
 
@@ -340,6 +370,8 @@ class CommandReceiver(threading.Thread):
                 )
             else:
                 logger.warning(f"Failed to send ACK for '{cmd.command}'")
+
+        return True
 
 
 def load_config(config_path: str) -> dict:

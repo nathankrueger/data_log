@@ -259,6 +259,9 @@ def parse_lora_packet(data: bytes) -> tuple[str, list[SensorReading]] | None:
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
 
+    if not isinstance(message, dict):
+        return None
+
     if not verify_crc(message, crc_key="c"):
         return None
 
@@ -368,6 +371,9 @@ def parse_command_packet(data: bytes) -> CommandPacket | None:
     except (json.JSONDecodeError, UnicodeDecodeError):
         return None
 
+    if not isinstance(message, dict):
+        return None
+
     # Check message type
     if message.get("t") != "cmd":
         return None
@@ -440,6 +446,9 @@ def parse_ack_packet(data: bytes) -> AckPacket | None:
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
         logger = logging.getLogger(__name__)
         logger.warning("ACK_JSON_FAIL len=%d error=%s data=%r", len(data), e, data[:100])
+        return None
+
+    if not isinstance(message, dict):
         return None
 
     # Check message type

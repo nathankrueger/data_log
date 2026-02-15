@@ -1,5 +1,7 @@
 """RFM9x LoRa radio implementation."""
 
+import time
+
 from .base import Radio
 
 
@@ -128,10 +130,37 @@ class RFM9xRadio(Radio):
         self._cs = None
         self._reset = None
 
-    def set_frequency(self, frequency_mhz: float) -> None:
-        """Change the radio frequency at runtime."""
+    def idle(self) -> None:
+        """Enter standby mode (stops RX/TX)."""
         if self._rfm9x is None:
             raise RuntimeError("Radio not initialized. Call init() first.")
+        self._rfm9x.idle()
+
+    def recover_rx(self) -> None:
+        """Reset the RX modem by cycling through SLEEP and clearing IRQ flags.
+
+        Use this to recover from a stuck rx_done state where the LoRa modem's
+        RX state machine is jammed and the flag is permanently asserted.
+
+        SLEEP mode fully resets the LoRa modem state machine while preserving
+        all register configuration (SF, BW, frequency, CRC, etc.).
+        """
+        if self._rfm9x is None:
+            raise RuntimeError("Radio not initialized. Call init() first.")
+        self._rfm9x.sleep()
+        time.sleep(0.01)  # 10ms for modem state machine to fully reset
+        self._rfm9x.idle()
+        self._rfm9x._write_u8(0x12, 0xFF)  # Clear all IRQ flags (reg 0x12)
+
+    def set_frequency(self, frequency_mhz: float) -> None:
+        """Change the radio frequency at runtime.
+
+        Enters STANDBY first — the SX1276 frequency registers should only
+        be written in SLEEP or STANDBY mode.
+        """
+        if self._rfm9x is None:
+            raise RuntimeError("Radio not initialized. Call init() first.")
+        self._rfm9x.idle()
         self._rfm9x.frequency_mhz = frequency_mhz
         self._frequency_mhz = frequency_mhz
 

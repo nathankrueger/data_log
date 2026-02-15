@@ -76,6 +76,16 @@ class Radio(ABC):
         """
         pass
 
+    @abstractmethod
+    def idle(self) -> None:
+        """Enter standby mode (stops RX/TX)."""
+        pass
+
+    @abstractmethod
+    def recover_rx(self) -> None:
+        """Reset the RX modem to recover from a stuck receive state."""
+        pass
+
     def __enter__(self):
         """Context manager entry."""
         self.init()
