@@ -155,12 +155,10 @@ class RFM9xRadio(Radio):
     def set_frequency(self, frequency_mhz: float) -> None:
         """Change the radio frequency at runtime.
 
-        Enters STANDBY first — the SX1276 frequency registers should only
-        be written in SLEEP or STANDBY mode.
+        Does NOT enter STANDBY first — callers may be in RX_CONTINUOUS.
         """
         if self._rfm9x is None:
             raise RuntimeError("Radio not initialized. Call init() first.")
-        self._rfm9x.idle()
         self._rfm9x.frequency_mhz = frequency_mhz
         self._frequency_mhz = frequency_mhz
 
