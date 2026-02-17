@@ -83,7 +83,12 @@ class Radio(ABC):
 
     @abstractmethod
     def recover_rx(self) -> None:
-        """Reset the RX modem to recover from a stuck receive state."""
+        """Soft-recover from a stuck receive state (preserves register config)."""
+        pass
+
+    @abstractmethod
+    def hard_reset(self) -> None:
+        """Hardware reset via pin toggle and full register re-initialization."""
         pass
 
     def __enter__(self):

@@ -154,9 +154,11 @@ class CommandReceiver(threading.Thread):
         # Single-slot dedup (matches AB01 pattern)
         self._last_command_id: str = ""
         self._last_ack_packet: bytes | None = None
-        # Consecutive error counter for radio recovery
+        # Radio recovery: soft after 10 errors, hard after 3 failed soft recoveries
         self._consecutive_errors: int = 0
         self._max_errors_before_reset: int = 10
+        self._soft_recovery_count: int = 0
+        self._max_soft_recoveries: int = 3
 
     def _get_n2g_freq(self) -> float:
         """Get current N2G frequency (from RadioState if available)."""
@@ -185,21 +187,23 @@ class CommandReceiver(threading.Thread):
                 if packet is None:
                     # Normal timeout, no data — radio is working fine
                     self._consecutive_errors = 0
+                    self._soft_recovery_count = 0
                 elif self._process_packet(packet):
                     # Valid command processed
                     self._consecutive_errors = 0
+                    self._soft_recovery_count = 0
                 else:
                     # Received data but not a valid command — suspicious on G2N
                     self._consecutive_errors += 1
                     if self._consecutive_errors >= self._max_errors_before_reset:
-                        self._reset_radio()
+                        self._attempt_recovery()
                         self._consecutive_errors = 0
 
             except Exception as e:
                 logger.error(f"Command receive error: {e}")
                 self._consecutive_errors += 1
                 if self._consecutive_errors >= self._max_errors_before_reset:
-                    self._reset_radio()
+                    self._attempt_recovery()
                     self._consecutive_errors = 0
                 time.sleep(0.5)  # Back off on error
 
@@ -207,16 +211,28 @@ class CommandReceiver(threading.Thread):
         """Signal the thread to stop."""
         self._running = False
 
-    def _reset_radio(self) -> None:
-        """Reset the radio RX modem to recover from a stuck rx_done state.
+    def _attempt_recovery(self) -> None:
+        """Escalate recovery: soft first, then hard after repeated failures."""
+        self._soft_recovery_count += 1
+        if self._soft_recovery_count >= self._max_soft_recoveries:
+            self._hard_reset_radio()
+            self._soft_recovery_count = 0
+        else:
+            self._soft_reset_radio()
 
-        The SX1276 LoRa modem can enter a state where rx_done is permanently
-        asserted (e.g. due to an SPI glitch). Cycling through STANDBY and
-        clearing IRQ flags breaks the modem out of this state.
-        """
-        logger.warning("Resetting radio RX modem after repeated errors")
+    def _soft_reset_radio(self) -> None:
+        """Soft RX recovery: SLEEP cycle + FIFO pointer reset."""
+        logger.warning("Soft recovery (%d/%d)",
+                       self._soft_recovery_count, self._max_soft_recoveries)
         with self._radio_lock:
             self._radio.recover_rx()
+
+    def _hard_reset_radio(self) -> None:
+        """Hard RX recovery: hardware pin reset + full re-init."""
+        logger.warning("Hard recovery: hardware reset after %d failed soft recoveries",
+                       self._soft_recovery_count)
+        with self._radio_lock:
+            self._radio.hard_reset()
 
     def _send_ack(self, ack_packet: bytes, add_jitter: bool = False) -> bool:
         """Send an ACK packet, optionally applying jitter to stagger responses.

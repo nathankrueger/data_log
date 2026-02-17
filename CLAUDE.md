@@ -67,7 +67,7 @@ data_log/
 
 ### Abstract Base Classes
 - `sensors/base.py` - `Sensor` ABC with `init()`, `read()`, `get_names()`, `get_units()`
-- `radio/base.py` - `Radio` ABC with `init()`, `send()`, `receive()`, `close()`, `idle()`, `recover_rx()`
+- `radio/base.py` - `Radio` ABC with `init()`, `send()`, `receive()`, `close()`, `idle()`, `recover_rx()`, `hard_reset()`
 
 Both support context managers (`with` statement).
 
@@ -174,7 +174,9 @@ CommandReceiver thread:
 
 The `radio_lock` ensures half-duplex safety. If broadcast loop is transmitting, CommandReceiver waits.
 
-**RX recovery:** The SX1276 LoRa modem can enter a stuck state where `rx_done` is permanently asserted (reads stale FIFO data as bare JSON numbers). `CommandReceiver` tracks consecutive invalid packets on G2N and calls `Radio.recover_rx()` after 10 in a row. `recover_rx()` cycles SLEEP→STANDBY→clear IRQ flags — this resets the modem state machine while preserving all register config (SF, BW, freq, etc.). This is distinct from a hardware reset (pin toggle), which wipes all registers and happens automatically during `Radio.init()`.
+**RX recovery:** The SX1276 LoRa modem can enter a stuck state where `rx_done` is permanently asserted (reads stale FIFO data — 7 bytes of 0xFF). `CommandReceiver` tracks consecutive invalid packets on G2N and escalates recovery:
+- **Soft recovery** (`recover_rx()`, after 10 consecutive errors): SLEEP→STANDBY→reset FIFO pointer (0x0D←0x0F)→clear IRQ flags. Preserves register config. FIFO pointer reset is critical — stale pointers survive SLEEP.
+- **Hard recovery** (`hard_reset()`, after 3 failed soft recoveries): GPIO pin toggle + full register re-init from cached values (SF, BW, freq, TX power, etc.). Equivalent to `Radio.init()` without re-creating SPI/GPIO objects.
 
 ### Gateway Radio Parameter Access (SPI Contention)
 

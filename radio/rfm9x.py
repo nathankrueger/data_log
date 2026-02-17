@@ -137,20 +137,64 @@ class RFM9xRadio(Radio):
         self._rfm9x.idle()
 
     def recover_rx(self) -> None:
-        """Reset the RX modem by cycling through SLEEP and clearing IRQ flags.
+        """Soft-recover from a stuck rx_done state.
 
-        Use this to recover from a stuck rx_done state where the LoRa modem's
-        RX state machine is jammed and the flag is permanently asserted.
-
-        SLEEP mode fully resets the LoRa modem state machine while preserving
-        all register configuration (SF, BW, frequency, CRC, etc.).
+        Cycles SLEEP→STANDBY to reset the LoRa state machine, resets the FIFO
+        pointer to the RX base address, and clears all IRQ flags.  SLEEP
+        preserves register config (SF, BW, frequency, etc.) but FIFO pointer
+        registers survive the cycle and must be reset explicitly.
         """
         if self._rfm9x is None:
             raise RuntimeError("Radio not initialized. Call init() first.")
         self._rfm9x.sleep()
-        time.sleep(0.01)  # 10ms for modem state machine to fully reset
+        time.sleep(0.01)
         self._rfm9x.idle()
-        self._rfm9x._write_u8(0x12, 0xFF)  # Clear all IRQ flags (reg 0x12)
+        # Reset FIFO pointer to RX base address (stale pointers survive SLEEP)
+        rx_base = self._rfm9x._read_u8(0x0F)   # RegFifoRxBaseAddr
+        self._rfm9x._write_u8(0x0D, rx_base)    # RegFifoAddrPtr
+        self._rfm9x._write_u8(0x12, 0xFF)       # Clear all IRQ flags
+
+    def hard_reset(self) -> None:
+        """Hardware reset via pin toggle and full register re-initialization.
+
+        Wipes all registers.  Saves current config from live registers before
+        reset, then restores LoRa mode + all RF parameters.
+        """
+        if self._rfm9x is None:
+            raise RuntimeError("Radio not initialized. Call init() first.")
+        import logging
+        logger = logging.getLogger(__name__)
+
+        # Save config from live registers (wiped by hardware reset)
+        sf = self._rfm9x.spreading_factor
+        bw = self._rfm9x.signal_bandwidth
+        freq = self._frequency_mhz
+        txpwr = self._tx_power
+
+        logger.warning("Hard reset (SF=%d, BW=%d, freq=%.1f, txpwr=%d)", sf, bw, freq, txpwr)
+
+        # Toggle hardware reset pin (LOW 100μs → HIGH 5ms)
+        self._rfm9x.reset()
+
+        # Re-enter LoRa mode (must be set in SLEEP)
+        self._rfm9x.sleep()
+        time.sleep(0.01)
+        self._rfm9x.long_range_mode = True
+
+        # FIFO base addresses (cleared by hardware reset)
+        self._rfm9x._write_u8(0x0E, 0x00)  # RegFifoTxBaseAddr
+        self._rfm9x._write_u8(0x0F, 0x00)  # RegFifoRxBaseAddr
+
+        # Restore all RF parameters
+        self._rfm9x.idle()
+        self._rfm9x.frequency_mhz = freq
+        self._rfm9x.tx_power = txpwr
+        self._rfm9x.spreading_factor = sf
+        self._rfm9x.signal_bandwidth = bw
+        self._rfm9x.coding_rate = 5
+        self._rfm9x.preamble_length = 8
+        self._rfm9x.enable_crc = True
+        self._rfm9x._write_u8(0x12, 0xFF)  # Clear all IRQ flags
 
     def set_frequency(self, frequency_mhz: float) -> None:
         """Change the radio frequency at runtime.
