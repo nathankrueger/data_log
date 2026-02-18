@@ -154,11 +154,9 @@ class CommandReceiver(threading.Thread):
         # Single-slot dedup (matches AB01 pattern)
         self._last_command_id: str = ""
         self._last_ack_packet: bytes | None = None
-        # Radio recovery: soft after 10 errors, hard after 3 failed soft recoveries
+        # Radio recovery: hard_reset after consecutive errors
         self._consecutive_errors: int = 0
         self._max_errors_before_reset: int = 10
-        self._soft_recovery_count: int = 0
-        self._max_soft_recoveries: int = 3
 
     def _get_n2g_freq(self) -> float:
         """Get current N2G frequency (from RadioState if available)."""
@@ -187,23 +185,21 @@ class CommandReceiver(threading.Thread):
                 if packet is None:
                     # Normal timeout, no data — radio is working fine
                     self._consecutive_errors = 0
-                    self._soft_recovery_count = 0
                 elif self._process_packet(packet):
                     # Valid command processed
                     self._consecutive_errors = 0
-                    self._soft_recovery_count = 0
                 else:
                     # Received data but not a valid command — suspicious on G2N
                     self._consecutive_errors += 1
                     if self._consecutive_errors >= self._max_errors_before_reset:
-                        self._attempt_recovery()
+                        self._reset_radio()
                         self._consecutive_errors = 0
 
             except Exception as e:
                 logger.error(f"Command receive error: {e}")
                 self._consecutive_errors += 1
                 if self._consecutive_errors >= self._max_errors_before_reset:
-                    self._attempt_recovery()
+                    self._reset_radio()
                     self._consecutive_errors = 0
                 time.sleep(0.5)  # Back off on error
 
@@ -211,26 +207,10 @@ class CommandReceiver(threading.Thread):
         """Signal the thread to stop."""
         self._running = False
 
-    def _attempt_recovery(self) -> None:
-        """Escalate recovery: soft first, then hard after repeated failures."""
-        self._soft_recovery_count += 1
-        if self._soft_recovery_count >= self._max_soft_recoveries:
-            self._hard_reset_radio()
-            self._soft_recovery_count = 0
-        else:
-            self._soft_reset_radio()
-
-    def _soft_reset_radio(self) -> None:
-        """Soft RX recovery: SLEEP cycle + FIFO pointer reset."""
-        logger.warning("Soft recovery (%d/%d)",
-                       self._soft_recovery_count, self._max_soft_recoveries)
-        with self._radio_lock:
-            self._radio.recover_rx()
-
-    def _hard_reset_radio(self) -> None:
-        """Hard RX recovery: hardware pin reset + full re-init."""
-        logger.warning("Hard recovery: hardware reset after %d failed soft recoveries",
-                       self._soft_recovery_count)
+    def _reset_radio(self) -> None:
+        """Hardware reset to recover from stuck rx_done state."""
+        logger.warning("Resetting radio after %d consecutive errors",
+                       self._consecutive_errors)
         with self._radio_lock:
             self._radio.hard_reset()
 
@@ -712,12 +692,11 @@ def main():
     radio = RFM9xRadio(
         frequency_mhz=n2g_freq,  # Start on N2G (sensor broadcasts + ACKs)
         tx_power=tx_power,
+        spreading_factor=spreading_factor,
+        signal_bandwidth=bandwidth_hz,
         cs_pin=LORA_CS_PIN,
         reset_pin=LORA_RESET_PIN,
     )
-    # Apply SF/BW from config (radio.init() will use these)
-    radio.spreading_factor = spreading_factor
-    radio.signal_bandwidth = bandwidth_hz
 
     # Create RadioState (encapsulates radio hardware and frequencies)
     radio_state = RadioState(

@@ -122,6 +122,20 @@ def _handle_rcfg_radio(radio_state: RadioState, _cmd: str, args: list[str]) -> d
         return {"e": str(e)}
 
 
+def _handle_reset_radio(radio_state: RadioState, _cmd: str, args: list[str]) -> None:
+    """Hardware reset of LoRa radio (diagnostic).
+
+    Toggles the reset pin and re-initializes all registers from cached values.
+    Uses early_ack=True so ACK is sent before the radio goes offline.
+    """
+    logger.info("[HANDLER] reset_radio: performing hardware reset")
+    try:
+        radio_state.radio.hard_reset()
+        logger.info("[HANDLER] reset_radio: success")
+    except Exception as e:
+        logger.error(f"[HANDLER] reset_radio failed: {e}")
+
+
 def _handle_rssi(radio_state: RadioState, _cmd: str, args: list[str]) -> dict:
     """
     Handle rssi command - returns RSSI of the received command packet.
@@ -388,6 +402,7 @@ def commands_init(registry: CommandRegistry, state: NodeState) -> None:
         "ping",
         "rcfg_radio",
         "reset",
+        "reset_radio",
         "rssi",
         "savecfg",
         "setparam",
@@ -419,6 +434,8 @@ def commands_init(registry: CommandRegistry, state: NodeState) -> None:
         ("rcfg_radio", partial(_handle_rcfg_radio, radio_state), CommandScope.PRIVATE, True, False),
         # reset - restart node service; PRIVATE to prevent accidental broadcast reset
         ("reset", _handle_reset, CommandScope.PRIVATE, True, False),
+        # reset_radio - hardware reset of LoRa radio (diagnostic)
+        ("reset_radio", partial(_handle_reset_radio, radio_state), CommandScope.PRIVATE, True, False),
         # rssi - return RSSI of the command packet; late_ack to include RSSI in response
         ("rssi", partial(_handle_rssi, radio_state), CommandScope.ANY, False, False),
         # savecfg - persist params to config file

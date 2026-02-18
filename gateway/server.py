@@ -186,16 +186,12 @@ def run_gateway(
             radio = RFM9xRadio(
                 frequency_mhz=n2g_freq,  # Start on N2G (sensors + ACKs)
                 tx_power=lora_config.get("tx_power", 23),
+                spreading_factor=lora_config.get("spreading_factor", 7),
+                signal_bandwidth=lora_config.get("signal_bandwidth", 125000),
                 cs_pin=lora_config.get("cs_pin", 24),
                 reset_pin=lora_config.get("reset_pin", 25),
             )
             radio.init()
-
-            # Apply SF and BW from config if present (overrides rfm9x.py defaults)
-            if "spreading_factor" in lora_config:
-                radio.spreading_factor = lora_config["spreading_factor"]
-            if "signal_bandwidth" in lora_config:
-                radio.signal_bandwidth = lora_config["signal_bandwidth"]
 
             # Create RadioState (shared class with nodes)
             radio_state = RadioState(

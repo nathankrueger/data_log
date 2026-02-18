@@ -239,12 +239,15 @@ def params_save(params: list[ParamDef], config_path: str) -> bool:
     """
     from utils.config_persistence import update_config_file
 
-    saved_any = False
+    updates = {}
     for p in params:
         if p.config_key and p.setter:  # Only save writable params with config_key
             value = p.getter()
-            update_config_file(config_path, p.config_key, value)
+            updates[p.config_key] = value
             logger.info(f"savecfg: {p.config_key}={value}")
-            saved_any = True
 
-    return saved_any
+    if not updates:
+        return False
+
+    update_config_file(config_path, updates)
+    return True

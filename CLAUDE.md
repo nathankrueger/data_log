@@ -174,9 +174,7 @@ CommandReceiver thread:
 
 The `radio_lock` ensures half-duplex safety. If broadcast loop is transmitting, CommandReceiver waits.
 
-**RX recovery:** The SX1276 LoRa modem can enter a stuck state where `rx_done` is permanently asserted (reads stale FIFO data — 7 bytes of 0xFF). `CommandReceiver` tracks consecutive invalid packets on G2N and escalates recovery:
-- **Soft recovery** (`recover_rx()`, after 10 consecutive errors): SLEEP→STANDBY→reset FIFO pointer (0x0D←0x0F)→clear IRQ flags. Preserves register config. FIFO pointer reset is critical — stale pointers survive SLEEP.
-- **Hard recovery** (`hard_reset()`, after 3 failed soft recoveries): GPIO pin toggle + full register re-init from cached values (SF, BW, freq, TX power, etc.). Equivalent to `Radio.init()` without re-creating SPI/GPIO objects.
+**RX recovery:** The SX1276 LoRa modem can enter a stuck state where `rx_done` is permanently asserted (reads stale FIFO data — 7 bytes of 0xFF). `CommandReceiver` tracks consecutive invalid packets on G2N and calls `hard_reset()` after 10 in a row. `hard_reset()` toggles the hardware reset pin and re-initializes all registers from cached values (SF, BW, freq, TX power). The `reset_radio` command allows triggering this on demand. `RFM9xRadio` caches SF/BW/freq/txpwr so `hard_reset()` never reads corrupted registers.
 
 ### Gateway Radio Parameter Access (SPI Contention)
 

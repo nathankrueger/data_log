@@ -21,7 +21,6 @@ def mock_radio():
     radio.rx_done = MagicMock(return_value=False)
     radio.receive = MagicMock(return_value=None)
     radio.send = MagicMock(return_value=True)
-    radio.recover_rx = MagicMock()
     radio.hard_reset = MagicMock()
     return radio
 
@@ -114,10 +113,10 @@ class TestProcessPacket:
 
 
 class TestRunLoop:
-    """Tests for run() loop error tracking and radio reset.
+    """Tests for run() loop error tracking and radio hard_reset.
 
     All tests exercise the real run() logic by mocking _receive_interruptible
-    to feed a scripted sequence of packets, then checking recover_rx calls.
+    to feed a scripted sequence of packets, then checking hard_reset calls.
     """
 
     def _run_iterations(self, receiver, packets):
@@ -145,30 +144,30 @@ class TestRunLoop:
         receiver.run()
 
     def test_consecutive_junk_triggers_reset(self, receiver, mock_radio):
-        """recover_rx fires after N consecutive junk packets."""
+        """hard_reset fires after N consecutive junk packets."""
         receiver._max_errors_before_reset = 3
         self._run_iterations(receiver, [b"42"] * 3)
-        mock_radio.recover_rx.assert_called_once()
+        mock_radio.hard_reset.assert_called_once()
 
     def test_below_threshold_no_reset(self, receiver, mock_radio):
-        """recover_rx does NOT fire when errors < threshold."""
+        """hard_reset does NOT fire when errors < threshold."""
         receiver._max_errors_before_reset = 10
         self._run_iterations(receiver, [b"42"] * 9)
-        mock_radio.recover_rx.assert_not_called()
+        mock_radio.hard_reset.assert_not_called()
 
     def test_timeout_resets_counter(self, receiver, mock_radio):
         """Timeout (None) resets error counter, preventing reset."""
         receiver._max_errors_before_reset = 3
         # 2 junk → timeout resets → 2 more junk — never hits 3 consecutive
         self._run_iterations(receiver, [b"42", b"99", None, b"42", b"99"])
-        mock_radio.recover_rx.assert_not_called()
+        mock_radio.hard_reset.assert_not_called()
 
     def test_valid_command_resets_counter(self, receiver, mock_radio):
         """Valid command resets error counter, preventing reset."""
         receiver._max_errors_before_reset = 3
         valid, _ = build_command_packet("ping", [], node_id="test_node")
         self._run_iterations(receiver, [b"42", b"99", valid, b"42", b"99"])
-        mock_radio.recover_rx.assert_not_called()
+        mock_radio.hard_reset.assert_not_called()
 
     def test_interleaved_junk_and_valid_never_resets(self, receiver, mock_radio):
         """Valid command every 2 junk packets prevents reset from ever firing."""
@@ -176,69 +175,30 @@ class TestRunLoop:
         valid, _ = build_command_packet("ping", [], node_id="test_node")
         # Pattern repeated 10x: junk, junk, valid — never 3 consecutive junk
         self._run_iterations(receiver, [b"42", b"99", valid] * 10)
-        mock_radio.recover_rx.assert_not_called()
+        mock_radio.hard_reset.assert_not_called()
 
     def test_counter_resets_after_radio_reset(self, receiver, mock_radio):
         """After reset fires, counter resets — needs N more junk to fire again."""
         receiver._max_errors_before_reset = 3
         # 3 junk → reset, then only 2 more — not enough for second reset
         self._run_iterations(receiver, [b"42"] * 3 + [b"99"] * 2)
-        mock_radio.recover_rx.assert_called_once()
+        mock_radio.hard_reset.assert_called_once()
 
-    def test_multiple_soft_resets(self, receiver, mock_radio):
-        """Multiple batches of junk trigger multiple soft resets."""
+    def test_multiple_resets(self, receiver, mock_radio):
+        """Multiple batches of N junk trigger multiple resets."""
         receiver._max_errors_before_reset = 3
-        # 2 batches of 3: both are soft recoveries (count 1, 2)
-        self._run_iterations(receiver, [b"42"] * 6)
-        assert mock_radio.recover_rx.call_count == 2
-        mock_radio.hard_reset.assert_not_called()
+        self._run_iterations(receiver, [b"42"] * 9)  # 3 batches of 3
+        assert mock_radio.hard_reset.call_count == 3
 
     def test_exception_increments_counter(self, receiver, mock_radio):
         """Exceptions from _receive_interruptible also count toward reset."""
         receiver._max_errors_before_reset = 3
         errors = [RuntimeError("SPI error")] * 3
         self._run_iterations(receiver, errors)
-        mock_radio.recover_rx.assert_called_once()
+        mock_radio.hard_reset.assert_called_once()
 
     def test_mixed_junk_types(self, receiver, mock_radio):
         """Various junk types (int, float, array, binary) all count."""
         receiver._max_errors_before_reset = 4
         self._run_iterations(receiver, [b"42", b"3.14", b"[1,2]", b"\xff\xfe"])
-        mock_radio.recover_rx.assert_called_once()
-
-    def test_hard_reset_after_failed_soft_recoveries(self, receiver, mock_radio):
-        """Hard reset fires after max_soft_recoveries failed soft recoveries."""
-        receiver._max_errors_before_reset = 3
-        receiver._max_soft_recoveries = 3
-        # 9 junk: batch 1 → soft(1), batch 2 → soft(2), batch 3 → hard
-        self._run_iterations(receiver, [b"42"] * 9)
-        assert mock_radio.recover_rx.call_count == 2
         mock_radio.hard_reset.assert_called_once()
-
-    def test_soft_recovery_count_resets_after_hard(self, receiver, mock_radio):
-        """After hard reset, soft recovery count resets — next escalation is soft again."""
-        receiver._max_errors_before_reset = 3
-        receiver._max_soft_recoveries = 3
-        # 9 → hard reset (resets soft count), then 3 more → soft again
-        self._run_iterations(receiver, [b"42"] * 12)
-        assert mock_radio.recover_rx.call_count == 3  # 2 before hard + 1 after
-        mock_radio.hard_reset.assert_called_once()
-
-    def test_valid_packet_resets_soft_recovery_count(self, receiver, mock_radio):
-        """Valid packet resets soft recovery counter, preventing escalation."""
-        receiver._max_errors_before_reset = 3
-        receiver._max_soft_recoveries = 2
-        valid, _ = build_command_packet("ping", [], node_id="test_node")
-        # 3 junk → soft(1), valid resets both, 3 junk → soft(1) again, not hard
-        self._run_iterations(receiver, [b"42"] * 3 + [valid] + [b"42"] * 3)
-        assert mock_radio.recover_rx.call_count == 2
-        mock_radio.hard_reset.assert_not_called()
-
-    def test_timeout_resets_soft_recovery_count(self, receiver, mock_radio):
-        """Timeout resets soft recovery counter, preventing escalation."""
-        receiver._max_errors_before_reset = 3
-        receiver._max_soft_recoveries = 2
-        # 3 junk → soft(1), timeout resets, 3 junk → soft(1) again, not hard
-        self._run_iterations(receiver, [b"42"] * 3 + [None] + [b"42"] * 3)
-        assert mock_radio.recover_rx.call_count == 2
-        mock_radio.hard_reset.assert_not_called()

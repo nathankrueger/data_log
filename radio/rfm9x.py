@@ -23,6 +23,8 @@ class RFM9xRadio(Radio):
         self,
         frequency_mhz: float = 915.0,
         tx_power: int = 23,
+        spreading_factor: int = 7,
+        signal_bandwidth: int = 125000,
         cs_pin: int = 24,
         reset_pin: int = 25,
     ):
@@ -32,6 +34,8 @@ class RFM9xRadio(Radio):
         Args:
             frequency_mhz: Radio frequency (915.0 for US, 868.0 for EU)
             tx_power: Transmit power in dBm (5-23)
+            spreading_factor: LoRa spreading factor (7-12)
+            signal_bandwidth: Signal bandwidth in Hz (125000, 250000, 500000)
             cs_pin: GPIO pin number for chip select
             reset_pin: GPIO pin number for reset
         """
@@ -39,6 +43,8 @@ class RFM9xRadio(Radio):
         self._tx_power = tx_power
         self._cs_pin = cs_pin
         self._reset_pin = reset_pin
+        self._spreading_factor = spreading_factor
+        self._signal_bandwidth = signal_bandwidth
 
         self._rfm9x = None
         self._spi = None
@@ -66,8 +72,8 @@ class RFM9xRadio(Radio):
         self._rfm9x.tx_power = self._tx_power
         
         # Match AB01 Arduino radio settings
-        self._rfm9x.spreading_factor = 7      # SF7
-        self._rfm9x.signal_bandwidth = 125000 # 125 kHz
+        self._rfm9x.spreading_factor = self._spreading_factor
+        self._rfm9x.signal_bandwidth = self._signal_bandwidth
         self._rfm9x.coding_rate = 5           # 4/5 (library uses denominator)
         self._rfm9x.preamble_length = 8       # 8 symbol preamble
         self._rfm9x.enable_crc = True         # Enable CRC (should be default, but explicit)
@@ -157,21 +163,17 @@ class RFM9xRadio(Radio):
     def hard_reset(self) -> None:
         """Hardware reset via pin toggle and full register re-initialization.
 
-        Wipes all registers.  Saves current config from live registers before
-        reset, then restores LoRa mode + all RF parameters.
+        Wipes all registers.  Restores LoRa mode and all RF parameters from
+        cached values (NOT live registers, which may be corrupted).
         """
         if self._rfm9x is None:
             raise RuntimeError("Radio not initialized. Call init() first.")
         import logging
         logger = logging.getLogger(__name__)
 
-        # Save config from live registers (wiped by hardware reset)
-        sf = self._rfm9x.spreading_factor
-        bw = self._rfm9x.signal_bandwidth
-        freq = self._frequency_mhz
-        txpwr = self._tx_power
-
-        logger.warning("Hard reset (SF=%d, BW=%d, freq=%.1f, txpwr=%d)", sf, bw, freq, txpwr)
+        logger.warning("Hard reset (SF=%d, BW=%d, freq=%.1f, txpwr=%d)",
+                       self._spreading_factor, self._signal_bandwidth,
+                       self._frequency_mhz, self._tx_power)
 
         # Toggle hardware reset pin (LOW 100μs → HIGH 5ms)
         self._rfm9x.reset()
@@ -185,12 +187,12 @@ class RFM9xRadio(Radio):
         self._rfm9x._write_u8(0x0E, 0x00)  # RegFifoTxBaseAddr
         self._rfm9x._write_u8(0x0F, 0x00)  # RegFifoRxBaseAddr
 
-        # Restore all RF parameters
+        # Restore all RF parameters from cached values
         self._rfm9x.idle()
-        self._rfm9x.frequency_mhz = freq
-        self._rfm9x.tx_power = txpwr
-        self._rfm9x.spreading_factor = sf
-        self._rfm9x.signal_bandwidth = bw
+        self._rfm9x.frequency_mhz = self._frequency_mhz
+        self._rfm9x.tx_power = self._tx_power
+        self._rfm9x.spreading_factor = self._spreading_factor
+        self._rfm9x.signal_bandwidth = self._signal_bandwidth
         self._rfm9x.coding_rate = 5
         self._rfm9x.preamble_length = 8
         self._rfm9x.enable_crc = True
@@ -225,27 +227,25 @@ class RFM9xRadio(Radio):
 
     @property
     def spreading_factor(self) -> int:
-        """Get the current spreading factor."""
-        if self._rfm9x is not None:
-            return self._rfm9x.spreading_factor
-        return 7  # default
+        """Get the current spreading factor (cached)."""
+        return self._spreading_factor
 
     @spreading_factor.setter
     def spreading_factor(self, value: int) -> None:
         """Set the spreading factor (7-12)."""
+        self._spreading_factor = value
         if self._rfm9x is not None:
             self._rfm9x.spreading_factor = value
 
     @property
     def signal_bandwidth(self) -> int:
-        """Get the current signal bandwidth in Hz."""
-        if self._rfm9x is not None:
-            return self._rfm9x.signal_bandwidth
-        return 125000  # default
+        """Get the current signal bandwidth in Hz (cached)."""
+        return self._signal_bandwidth
 
     @signal_bandwidth.setter
     def signal_bandwidth(self, value: int) -> None:
         """Set the signal bandwidth in Hz (125000, 250000, or 500000)."""
+        self._signal_bandwidth = value
         if self._rfm9x is not None:
             self._rfm9x.signal_bandwidth = value
 
