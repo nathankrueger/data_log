@@ -1,7 +1,10 @@
 #!/bin/bash
 set -e
 
-source .venv/bin/activate
+SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 
-# Run pytest with any passed arguments
+source "$SCRIPT_DIR/.venv/bin/activate"
+
+# Run pytest from the project root so it picks up pytest.ini and testpaths
+cd "$SCRIPT_DIR"
 pytest "$@"

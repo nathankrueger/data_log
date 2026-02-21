@@ -317,4 +317,4 @@ Git credentials must be stored in `~/.git-credentials` for non-interactive push 
 
 ## Important
 
-When adding dependencies or imports to python files, be sure to always add it to requirements.txt. Note that transitive dependencies (packages already required by other packages) don't need to be added explicitly.
+When adding dependencies or imports to python files, be sure to add them to the correct requirements file. Portable packages (no hardware dependency) go in `requirements.txt`. Raspberry Pi hardware packages (GPIO, I2C, SPI, display drivers) go in `requirements-hw.txt`. Transitive dependencies don't need to be added explicitly.

@@ -33,6 +33,8 @@ _SENSOR_ID_MAP: dict[str, int] = {
     "BME280TempPressureHumidity": 0,
     "MMA8452Accelerometer": 1,
     "ADS1115ADC": 2,
+    "BatteryVoltage": 3,
+    "NEO6MGPS": 4,
 }
 
 SENSOR_CLASS_IDS: dict[str, int] = dict(_SENSOR_ID_MAP)

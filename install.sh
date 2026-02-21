@@ -19,6 +19,12 @@ EOF
     return 0
 }
 
+# Platform detection
+IS_PI=false
+if [ "$(uname -s)" = "Linux" ]; then
+    IS_PI=true
+fi
+
 # Parse command line arguments
 REINSTALL=false
 UPDATE=false
@@ -48,13 +54,13 @@ done
 # Handle reinstall option
 if [ "$REINSTALL" = true ]; then
     echo "Reinstalling from scratch..."
-    
+
     # Deactivate if currently in a virtual environment
     if [ -n "$VIRTUAL_ENV" ]; then
         echo "Deactivating current virtual environment..."
         deactivate 2>/dev/null || true
     fi
-    
+
     # Remove existing .venv
     if [ -d ".venv" ]; then
         echo "Removing existing .venv..."
@@ -69,6 +75,9 @@ if [ "$UPDATE" = true ]; then
         source .venv/bin/activate
         echo "Updating requirements..."
         pip install -r requirements.txt
+        if [ "$IS_PI" = true ]; then
+            pip install -r requirements-hw.txt
+        fi
     else
         echo "Error: No .venv directory found. Run without --update first to create it."
         return 1 2>/dev/null || exit 1
@@ -81,15 +90,24 @@ if [ -d ".venv" ]; then
     echo "Activating existing virtual environment..."
     source .venv/bin/activate
 else
-    echo "Installing GPIO library..."
-    sudo apt install python3-rpi-lgpio
+    if [ "$IS_PI" = true ]; then
+        echo "Installing GPIO library..."
+        sudo apt install python3-rpi-lgpio
 
-    echo "Creating new virtual environment..."
-    # use system packages for python3-rpi-lgpio access
-    python3 -m venv --system-site-packages .venv
+        echo "Creating new virtual environment..."
+        # use system packages for python3-rpi-lgpio access
+        python3 -m venv --system-site-packages .venv
+    else
+        echo "Creating new virtual environment (dev mode — no hardware deps)..."
+        python3 -m venv .venv
+    fi
     source .venv/bin/activate
     echo "Updating pip..."
     pip install --upgrade pip
     echo "Installing requirements..."
     pip install -r requirements.txt
+    if [ "$IS_PI" = true ]; then
+        echo "Installing hardware dependencies..."
+        pip install -r requirements-hw.txt
+    fi
 fi
