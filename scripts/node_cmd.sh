@@ -2,11 +2,12 @@
 
 USAGE="Generic command sender for LoRa nodes via gateway HTTP API.
 
-Usage: node_cmd.sh [-n <node_id>] -c <command> [-a <arg>]... [-e <count>] [-w] [-g <gateway>] [-p <port>]
+Usage: node_cmd.sh [-n <node_id>[,<node_id>...]] -c <command> [-a <arg>]... [-e <count>] [-w] [-g <gateway>] [-p <port>]
        node_cmd.sh -d [-a <retries>] [-g <gateway>] [-p <port>]
 
 Options:
   -n <node_id>  Target node ID (optional; omit for broadcast)
+                Can be comma-separated or repeated: -n a,b or -n a -n b
   -c <command>  Command name (required unless -d)
   -a <arg>      Command argument (can be repeated; for -d: retry count)
   -e <count>    Expected ACK count for broadcasts (default 1)
@@ -18,6 +19,8 @@ Options:
 
 Examples:
   node_cmd.sh -n patio -c ping                    # Ping specific node (fire-and-forget)
+  node_cmd.sh -n patio,garden -c ping             # Ping multiple nodes
+  node_cmd.sh -n patio -n garden -c ping -w       # Same, using repeated -n
   node_cmd.sh -c ping                             # Broadcast ping to all nodes
   node_cmd.sh -c ping -e 3                        # Broadcast ping, wait for 3 ACKs
   node_cmd.sh -c params -e 3 -w                   # Get params from all 3 nodes
@@ -31,7 +34,7 @@ usage() {
     exit 1
 }
 
-NODE_ID=""
+NODE_IDS_RAW=()
 COMMAND=""
 ARGS=()
 EXPECTED_ACKS=1
@@ -43,7 +46,7 @@ OPT_PORT=""
 while getopts "n:c:a:e:dwg:p:h" opt; do
     case $opt in
         n)
-            NODE_ID="$OPTARG"
+            NODE_IDS_RAW+=("$OPTARG")
             ;;
         c)
             COMMAND="$OPTARG"
@@ -75,6 +78,13 @@ while getopts "n:c:a:e:dwg:p:h" opt; do
     esac
 done
 
+# Flatten comma-separated -n values into NODE_IDS array
+NODE_IDS=()
+for raw in "${NODE_IDS_RAW[@]}"; do
+    IFS=',' read -ra PARTS <<< "$raw"
+    NODE_IDS+=("${PARTS[@]}")
+done
+
 # Must specify either -c or -d
 if [ -z "$COMMAND" ] && [ "$DISCOVER" = false ]; then
     echo "Error: -c <command> or -d is required"
@@ -87,7 +97,7 @@ if [ -n "$COMMAND" ] && [ "$DISCOVER" = true ]; then
 fi
 
 # -e (expected_acks) only makes sense for broadcasts
-if [ "$EXPECTED_ACKS" != "1" ] && [ -n "$NODE_ID" ]; then
+if [ "$EXPECTED_ACKS" != "1" ] && [ ${#NODE_IDS[@]} -gt 0 ]; then
     echo "Error: -e is only valid for broadcasts (don't use with -n)"
     usage
 fi
@@ -123,98 +133,27 @@ if [ "$DISCOVER" = true ]; then
         echo "Error: HTTP $HTTP_CODE - $BODY" >&2
         exit 1
     fi
-elif [ "$WAIT" = true ] && [ -z "$NODE_ID" ]; then
-    # Broadcast wait: GET /{cmd}?expected_acks=N&a=arg1&a=arg2
-    URL="http://$GATEWAY_HOST:$GATEWAY_PORT/$COMMAND"
-
-    # Build query string
-    QUERY="?expected_acks=$EXPECTED_ACKS"
-    if [ ${#ARGS[@]} -gt 0 ]; then
-        ALL_ARGS=$(IFS=,; echo "${ARGS[*]}")
-        IFS=',' read -ra ARG_ARRAY <<< "$ALL_ARGS"
-        for arg in "${ARG_ARRAY[@]}"; do
-            QUERY="$QUERY&a=$(printf '%s' "$arg" | jq -sRr @uri)"
-        done
-    fi
-
-    # Fetch server-side wait_timeout and add buffer for curl
-    # Default to 60s if fetch fails (jq errors on empty input, leaving SERVER_TIMEOUT empty)
-    SERVER_TIMEOUT=$(curl -sS --max-time 5 "http://$GATEWAY_HOST:$GATEWAY_PORT/gateway/param/wait_timeout" 2>/dev/null | jq -r '.wait_timeout // empty | floor' 2>/dev/null)
-    : "${SERVER_TIMEOUT:=60}"
-    CURL_TIMEOUT=$((SERVER_TIMEOUT + 5))
-
-    # Capture stderr separately to get clean error messages
-    STDERR_FILE=$(mktemp)
-    RESPONSE=$(curl -sS --max-time "$CURL_TIMEOUT" -w "\n%{http_code}" "$URL$QUERY" 2>"$STDERR_FILE")
-    CURL_EXIT=$?
-    STDERR=$(cat "$STDERR_FILE")
-    rm -f "$STDERR_FILE"
-
-    if [ $CURL_EXIT -ne 0 ]; then
-        echo "Error: $STDERR" >&2
-        exit 1
-    fi
-
-    # Parse response body and HTTP code
-    HTTP_CODE=$(echo "$RESPONSE" | tail -n 1)
-    BODY=$(echo "$RESPONSE" | sed '$d')
-
-    if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-        echo "$BODY"
-    else
-        echo "Error: HTTP $HTTP_CODE - $BODY" >&2
-        exit 1
-    fi
-elif [ "$WAIT" = true ]; then
-    # Unicast wait: GET /{cmd}/{node_id}?a=arg1&a=arg2
-    URL="http://$GATEWAY_HOST:$GATEWAY_PORT/$COMMAND/$NODE_ID"
-
-    # Build query string for args - split comma-separated values
-    QUERY=""
-    if [ ${#ARGS[@]} -gt 0 ]; then
-        ALL_ARGS=$(IFS=,; echo "${ARGS[*]}")
-        IFS=',' read -ra ARG_ARRAY <<< "$ALL_ARGS"
-        for arg in "${ARG_ARRAY[@]}"; do
-            if [ -z "$QUERY" ]; then
-                QUERY="?a=$(printf '%s' "$arg" | jq -sRr @uri)"
-            else
-                QUERY="$QUERY&a=$(printf '%s' "$arg" | jq -sRr @uri)"
-            fi
-        done
-    fi
-
-    # Fetch server-side wait_timeout and add buffer for curl
-    # This ensures curl timeout > server timeout so we get proper 504 responses
-    SERVER_TIMEOUT=$(curl -sS --max-time 5 "http://$GATEWAY_HOST:$GATEWAY_PORT/gateway/param/wait_timeout" 2>/dev/null | jq -r '.wait_timeout // 20 | floor')
-    CURL_TIMEOUT=$((SERVER_TIMEOUT + 5))
-
-    # Capture stderr separately to get clean error messages
-    STDERR_FILE=$(mktemp)
-    RESPONSE=$(curl -sS --max-time "$CURL_TIMEOUT" -w "\n%{http_code}" "$URL$QUERY" 2>"$STDERR_FILE")
-    CURL_EXIT=$?
-    STDERR=$(cat "$STDERR_FILE")
-    rm -f "$STDERR_FILE"
-
-    if [ $CURL_EXIT -ne 0 ]; then
-        echo "Error: $STDERR" >&2
-        exit 1
-    fi
-
-    # Parse response body and HTTP code
-    HTTP_CODE=$(echo "$RESPONSE" | tail -n 1)
-    BODY=$(echo "$RESPONSE" | sed '$d')
-
-    if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-        echo "$BODY"
-    else
-        echo "Error: HTTP $HTTP_CODE - $BODY" >&2
-        exit 1
-    fi
 else
-    # POST endpoint: /command with JSON body
-    # Build args JSON array - split comma-separated values
+    # Build loop targets: empty array = broadcast (single iteration with empty NODE_ID)
+    if [ ${#NODE_IDS[@]} -eq 0 ]; then
+        LOOP_IDS=("")
+    else
+        LOOP_IDS=("${NODE_IDS[@]}")
+    fi
+
+    MULTI=false
+    [ ${#LOOP_IDS[@]} -gt 1 ] && MULTI=true
+    OVERALL_EXIT=0
+
+    # Fetch server-side wait_timeout once if needed
+    if [ "$WAIT" = true ]; then
+        SERVER_TIMEOUT=$(curl -sS --max-time 5 "http://$GATEWAY_HOST:$GATEWAY_PORT/gateway/param/wait_timeout" 2>/dev/null | jq -r '.wait_timeout // empty | floor' 2>/dev/null)
+        : "${SERVER_TIMEOUT:=60}"
+        CURL_TIMEOUT=$((SERVER_TIMEOUT + 5))
+    fi
+
+    # Build args JSON array once for POST path
     if [ ${#ARGS[@]} -gt 0 ]; then
-        # Join all -a args with commas, then split by comma
         ALL_ARGS=$(IFS=,; echo "${ARGS[*]}")
         IFS=',' read -ra ARG_ARRAY <<< "$ALL_ARGS"
         ARGS_JSON=$(printf '%s\n' "${ARG_ARRAY[@]}" | jq -R . | jq -s .)
@@ -222,37 +161,81 @@ else
         ARGS_JSON="[]"
     fi
 
-    JSON_BODY=$(jq -n \
-        --arg cmd "$COMMAND" \
-        --argjson args "$ARGS_JSON" \
-        --arg node_id "$NODE_ID" \
-        --argjson expected_acks "$EXPECTED_ACKS" \
-        '{cmd: $cmd, args: $args, node_id: $node_id, expected_acks: $expected_acks}')
-
-    # Capture stderr separately to get clean error messages
-    STDERR_FILE=$(mktemp)
-    RESPONSE=$(curl -sS -X POST "http://$GATEWAY_HOST:$GATEWAY_PORT/command" \
-        -H "Content-Type: application/json" \
-        -d "$JSON_BODY" \
-        --max-time 5 \
-        -w "\n%{http_code}" 2>"$STDERR_FILE")
-    CURL_EXIT=$?
-    STDERR=$(cat "$STDERR_FILE")
-    rm -f "$STDERR_FILE"
-
-    if [ $CURL_EXIT -ne 0 ]; then
-        echo "Error: $STDERR" >&2
-        exit 1
+    # Build query string for args once (used by wait paths)
+    ARGS_QUERY=""
+    if [ "$WAIT" = true ] && [ ${#ARGS[@]} -gt 0 ]; then
+        ALL_ARGS=$(IFS=,; echo "${ARGS[*]}")
+        IFS=',' read -ra ARG_ARRAY <<< "$ALL_ARGS"
+        for arg in "${ARG_ARRAY[@]}"; do
+            ARGS_QUERY="$ARGS_QUERY&a=$(printf '%s' "$arg" | jq -sRr @uri)"
+        done
     fi
 
-    # Parse response body and HTTP code
-    HTTP_CODE=$(echo "$RESPONSE" | tail -n 1)
-    BODY=$(echo "$RESPONSE" | sed '$d')
+    for NODE_ID in "${LOOP_IDS[@]}"; do
+        if [ "$MULTI" = true ]; then
+            echo "--- $NODE_ID ---"
+        fi
 
-    if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
-        echo "$BODY"
-    else
-        echo "Error: HTTP $HTTP_CODE - $BODY" >&2
-        exit 1
-    fi
+        if [ "$WAIT" = true ] && [ -z "$NODE_ID" ]; then
+            # Broadcast wait: GET /{cmd}?expected_acks=N&a=arg1&a=arg2
+            URL="http://$GATEWAY_HOST:$GATEWAY_PORT/$COMMAND"
+            QUERY="?expected_acks=$EXPECTED_ACKS$ARGS_QUERY"
+
+            STDERR_FILE=$(mktemp)
+            RESPONSE=$(curl -sS --max-time "$CURL_TIMEOUT" -w "\n%{http_code}" "$URL$QUERY" 2>"$STDERR_FILE")
+            CURL_EXIT=$?
+            STDERR=$(cat "$STDERR_FILE")
+            rm -f "$STDERR_FILE"
+        elif [ "$WAIT" = true ]; then
+            # Unicast wait: GET /{cmd}/{node_id}?a=arg1&a=arg2
+            URL="http://$GATEWAY_HOST:$GATEWAY_PORT/$COMMAND/$NODE_ID"
+            QUERY=""
+            if [ -n "$ARGS_QUERY" ]; then
+                QUERY="?${ARGS_QUERY:1}"  # strip leading &
+            fi
+
+            STDERR_FILE=$(mktemp)
+            RESPONSE=$(curl -sS --max-time "$CURL_TIMEOUT" -w "\n%{http_code}" "$URL$QUERY" 2>"$STDERR_FILE")
+            CURL_EXIT=$?
+            STDERR=$(cat "$STDERR_FILE")
+            rm -f "$STDERR_FILE"
+        else
+            # POST endpoint: /command with JSON body
+            JSON_BODY=$(jq -n \
+                --arg cmd "$COMMAND" \
+                --argjson args "$ARGS_JSON" \
+                --arg node_id "$NODE_ID" \
+                --argjson expected_acks "$EXPECTED_ACKS" \
+                '{cmd: $cmd, args: $args, node_id: $node_id, expected_acks: $expected_acks}')
+
+            STDERR_FILE=$(mktemp)
+            RESPONSE=$(curl -sS -X POST "http://$GATEWAY_HOST:$GATEWAY_PORT/command" \
+                -H "Content-Type: application/json" \
+                -d "$JSON_BODY" \
+                --max-time 5 \
+                -w "\n%{http_code}" 2>"$STDERR_FILE")
+            CURL_EXIT=$?
+            STDERR=$(cat "$STDERR_FILE")
+            rm -f "$STDERR_FILE"
+        fi
+
+        if [ $CURL_EXIT -ne 0 ]; then
+            echo "Error: $STDERR" >&2
+            OVERALL_EXIT=1
+            if [ "$MULTI" = true ]; then continue; else exit 1; fi
+        fi
+
+        HTTP_CODE=$(echo "$RESPONSE" | tail -n 1)
+        BODY=$(echo "$RESPONSE" | sed '$d')
+
+        if [ "$HTTP_CODE" -ge 200 ] && [ "$HTTP_CODE" -lt 300 ]; then
+            echo "$BODY"
+        else
+            echo "Error: HTTP $HTTP_CODE - $BODY" >&2
+            OVERALL_EXIT=1
+            if [ "$MULTI" = true ]; then continue; else exit 1; fi
+        fi
+    done
+
+    exit $OVERALL_EXIT
 fi
