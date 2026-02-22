@@ -742,8 +742,9 @@ def main():
                 OffPage(),
                 SensorValuesPage(node_state, auto_scroll=display_config.get("auto_scroll", False)),
                 NodeInfoPage(node_state),
-                ArducamOCRPage(node_state),
             ]
+            if config.get("arducam", {}).get("enabled", False):
+                pages.append(ArducamOCRPage(node_state))
             screen_manager = ScreenManager(
                 display=display,
                 pages=pages,
