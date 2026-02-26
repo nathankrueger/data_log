@@ -6,3 +6,4 @@ adafruit-blinka
 rpi-lgpio
 gpiozero
 luma.oled
+pyftdi
