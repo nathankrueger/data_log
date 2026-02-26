@@ -26,6 +26,15 @@ Prerequisites:
         sudo apt install libusb-1.0-0
         pip install pyftdi adafruit-blinka adafruit-circuitpython-rfm9x
 
+    Windows (WSL):
+        sudo apt install libusb-1.0-0
+        pip install pyftdi adafruit-blinka adafruit-circuitpython-rfm9x
+
+        Attach the FT232H USB device to WSL:
+            (PowerShell, admin) usbipd list
+            (PowerShell, admin) usbipd bind --busid <BUSID>
+            (PowerShell, admin) usbipd attach --wsl --busid <BUSID>
+
 Usage:
     export BLINKA_FT232H=1
     python3 rfm9x_ft232h_listen.py
