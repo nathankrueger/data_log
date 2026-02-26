@@ -35,6 +35,13 @@ Prerequisites:
             (PowerShell, admin) usbipd bind --busid <BUSID>
             (PowerShell, admin) usbipd attach --wsl --busid <BUSID>
 
+        FTDI Permissions:
+            sudo tee /etc/udev/rules.d/99-ftdi.rules << 'EOF'
+            SUBSYSTEM=="usb", ATTR{idVendor}=="0403", ATTR{idProduct}=="6014", MODE="0666"
+            EOF
+
+            sudo udevadm control --reload-rules && sudo udevadm trigger
+
 Usage:
     export BLINKA_FT232H=1
     python3 rfm9x_ft232h_listen.py
