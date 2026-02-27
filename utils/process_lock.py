@@ -2,14 +2,15 @@
 
 Uses fcntl.flock() for an exclusive file lock that is automatically released
 by the OS when the process exits (even on SIGKILL or power loss).
+
+The lock file contains the PID of the holder. Launch scripts read this to
+kill existing processes before starting a new instance.
 """
 
 import atexit
 import fcntl
-import logging
+import os
 import sys
-
-logger = logging.getLogger(__name__)
 
 _lock_fd = None
 
@@ -24,15 +25,26 @@ def acquire_lock(name: str) -> None:
     global _lock_fd
 
     lock_path = f"/tmp/data_log_{name}.lock"
+
+    _lock_fd = open(lock_path, "w+")
     try:
-        _lock_fd = open(lock_path, "w")
         fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
+        # Read PID of existing holder for a useful error message
+        _lock_fd.seek(0)
+        existing_pid = _lock_fd.read().strip()
+        pid_info = f" (PID {existing_pid})" if existing_pid else ""
         print(
-            f"Another instance of {name} is already running. Exiting.",
+            f"Another instance of {name} is already running{pid_info}. Exiting.",
             file=sys.stderr,
         )
         sys.exit(1)
+
+    # Write our PID so launch scripts can find us
+    _lock_fd.seek(0)
+    _lock_fd.truncate()
+    _lock_fd.write(str(os.getpid()))
+    _lock_fd.flush()
 
     atexit.register(_release_lock)
 
