@@ -6,7 +6,11 @@
     ],
     "local_sensor_interval_sec": 5,
     "lora": {
-        "frequency_mhz": 915.0,
+        "n2g_frequency_mhz": 915.0,
+        "g2n_frequency_mhz": 915.5,
+        "spreading_factor": 7,
+        "signal_bandwidth": 125000,
+        "tx_power": 23,
         "cs_pin": 24,
         "reset_pin": 25,
         "backend": "rpi"

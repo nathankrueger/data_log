@@ -138,7 +138,22 @@ class RFM9xRadio(Radio):
         """Receive data from LoRa with timeout."""
         if self._rfm9x is None:
             raise RuntimeError("Radio not initialized. Call init() first.")
-        return self._rfm9x.receive(timeout=timeout)
+        if self._backend == "ft232h":
+            # Efficient polling: listen mode + periodic rx_done check with sleeps.
+            # The Adafruit library's receive() busy-polls the IRQ register with no
+            # sleep. Over native RPi SPI this is cheap (memory-mapped), but over
+            # FT232H USB-SPI each poll is a ~1ms USB roundtrip that burns CPU.
+            self._rfm9x.listen()
+            deadline = time.monotonic() + timeout
+            while True:
+                if self._rfm9x.rx_done():
+                    return self._rfm9x.receive(timeout=0)
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    return None
+                time.sleep(min(0.05, remaining))
+        else:
+            return self._rfm9x.receive(timeout=timeout)
 
     def listen(self) -> None:
         """Enter receive mode (like AB01's Radio.Rx(0)).
