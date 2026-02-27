@@ -119,7 +119,7 @@ def run_gateway(
     # Initialize LED if configured
     led = None
     led_config = config.get("led", {})
-    if led_config.get("enabled", False):
+    if led_config.get("enabled", bool(led_config)):
         try:
             led = RgbLed(
                 red_bcm=led_config.get("red_bcm", 17),

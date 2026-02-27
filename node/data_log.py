@@ -775,7 +775,7 @@ def main():
     # Initialize LED if configured
     led = None
     led_config = config.get("led", {})
-    if led_config.get("enabled", False):
+    if led_config.get("enabled", bool(led_config)):
         try:
             from utils.led import RgbLed
 
