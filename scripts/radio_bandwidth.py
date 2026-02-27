@@ -48,12 +48,16 @@ def format_rate(bytes_per_sec: float) -> str:
 
 
 
-def create_radio(radio_type: str) -> Radio:
+def create_radio(radio_type: str, backend: str = "rpi",
+                 cs_pin: int | str = 24, reset_pin: int | str = 25) -> Radio:
     """
     Create a radio instance based on type string.
 
     Args:
         radio_type: Radio type identifier (e.g., 'rfm9x')
+        backend: "rpi" for native SPI/GPIO, "ft232h" for USB adapter
+        cs_pin: Chip select pin (int for RPi, str for FT232H)
+        reset_pin: Reset pin (int for RPi, str for FT232H)
 
     Returns:
         Configured Radio instance (not yet initialized)
@@ -62,8 +66,9 @@ def create_radio(radio_type: str) -> Radio:
         return RFM9xRadio(
             frequency_mhz=915.0,
             tx_power=23,
-            cs_pin=24,
-            reset_pin=25,
+            cs_pin=cs_pin,
+            reset_pin=reset_pin,
+            backend=backend,
         )
     else:
         raise ValueError(f"Unknown radio type: {radio_type}")
@@ -238,9 +243,17 @@ def main():
     parser.add_argument("-t", "--time", type=int, default=60, help="Test duration in seconds (default: 60)")
     parser.add_argument("-n", "--num", type=int, default=None, help="Number of packets to send")
     parser.add_argument("-r", "--radio", type=str, default="rfm9x", choices=["rfm9x"], help="Radio type to use (default: rfm9x)")
+    parser.add_argument("--backend", choices=["rpi", "ft232h"], default="rpi",
+                        help="SPI backend: rpi (native GPIO) or ft232h (USB adapter) (default: rpi)")
+    parser.add_argument("--cs-pin", default="24",
+                        help="CS pin: int GPIO for RPi, str for FT232H (default: 24)")
+    parser.add_argument("--reset-pin", default="25",
+                        help="Reset pin: int GPIO for RPi, str for FT232H (default: 25)")
     args = parser.parse_args()
 
-    radio = create_radio(args.radio)
+    cs = int(args.cs_pin) if args.cs_pin.isdigit() else args.cs_pin
+    rst = int(args.reset_pin) if args.reset_pin.isdigit() else args.reset_pin
+    radio = create_radio(args.radio, backend=args.backend, cs_pin=cs, reset_pin=rst)
 
     try:
         radio.init()

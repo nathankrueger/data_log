@@ -43,20 +43,18 @@ Prerequisites:
             sudo udevadm control --reload-rules && sudo udevadm trigger
 
 Usage:
-    export BLINKA_FT232H=1
     python3 rfm9x_ft232h_listen.py
     python3 rfm9x_ft232h_listen.py --freq 915.5 --sf 9 --bw 125000
 """
 
 import argparse
+import sys
 import os
 
-import board
-import busio
-import digitalio
+# Allow running from examples/ directory
+sys.path.insert(0, os.path.join(os.path.dirname(__file__), ".."))
 
-os.environ['BLINKA_FT232H'] = '1'
-import adafruit_rfm9x
+from radio import RFM9xRadio
 
 
 def main():
@@ -75,29 +73,24 @@ def main():
                         help="FT232H RST pin (default: D5)")
     args = parser.parse_args()
 
-    cs_pin = getattr(board, args.cs)
-    rst_pin = getattr(board, args.rst)
+    radio = RFM9xRadio(
+        frequency_mhz=args.freq,
+        spreading_factor=args.sf,
+        signal_bandwidth=args.bw,
+        cs_pin=args.cs,
+        reset_pin=args.rst,
+        backend="ft232h",
+    )
+    radio.init()
 
-    spi = busio.SPI(board.SCK, MOSI=board.MOSI, MISO=board.MISO)
-    cs = digitalio.DigitalInOut(cs_pin)
-    reset = digitalio.DigitalInOut(rst_pin)
-
-    rfm9x = adafruit_rfm9x.RFM9x(spi, cs, reset, args.freq)
-    rfm9x.spreading_factor = args.sf
-    rfm9x.signal_bandwidth = args.bw
-    rfm9x.coding_rate = 5
-    rfm9x.preamble_length = 8
-    rfm9x.enable_crc = True
-
-    backend = "FT232H" if os.environ.get("BLINKA_FT232H") else "native"
-    print(f"Listening on {args.freq} MHz  SF={args.sf}  BW={args.bw} Hz  ({backend})")
+    print(f"Listening on {args.freq} MHz  SF={args.sf}  BW={args.bw} Hz  (FT232H)")
     print("Ctrl+C to stop.\n")
 
     try:
         while True:
-            packet = rfm9x.receive(timeout=5.0)
+            packet = radio.receive(timeout=5.0)
             if packet is not None:
-                rssi = rfm9x.last_rssi
+                rssi = radio.get_last_rssi()
                 try:
                     text = packet.decode("utf-8")
                     print(f"[RSSI {rssi:>4d} dBm] {text}")
@@ -108,7 +101,7 @@ def main():
     except KeyboardInterrupt:
         print("\nStopped.")
     finally:
-        spi.deinit()
+        radio.close()
 
 
 if __name__ == "__main__":

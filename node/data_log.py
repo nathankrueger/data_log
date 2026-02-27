@@ -694,8 +694,9 @@ def main():
         tx_power=tx_power,
         spreading_factor=spreading_factor,
         signal_bandwidth=bandwidth_hz,
-        cs_pin=LORA_CS_PIN,
-        reset_pin=LORA_RESET_PIN,
+        cs_pin=lora_config.get("cs_pin", LORA_CS_PIN),
+        reset_pin=lora_config.get("reset_pin", LORA_RESET_PIN),
+        backend=lora_config.get("backend", "rpi"),
     )
 
     # Create RadioState (encapsulates radio hardware and frequencies)

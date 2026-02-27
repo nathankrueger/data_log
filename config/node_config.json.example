@@ -17,7 +17,10 @@
         "g2n_frequency_hz": 915500000,
         "spreading_factor": 7,
         "bandwidth": 0,
-        "tx_power": 23
+        "tx_power": 23,
+        "cs_pin": 24,
+        "reset_pin": 25,
+        "backend": "rpi"
     },
     "display": {
         "enabled": true,

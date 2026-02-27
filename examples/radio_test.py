@@ -91,16 +91,26 @@ def main():
     group.add_argument("-r", "--receive", action="store_true", help="Receive messages")
     group.add_argument("-t", "--temp", action="store_true", help="Send Temperature Values")
     group.add_argument("--no_led", action="store_true", help="Skip using LED to show RSSI")
+    parser.add_argument("--backend", choices=["rpi", "ft232h"], default="rpi",
+                        help="SPI backend: rpi (native GPIO) or ft232h (USB adapter) (default: rpi)")
+    parser.add_argument("--cs-pin", default="24",
+                        help="CS pin: int GPIO for RPi, str for FT232H (default: 24)")
+    parser.add_argument("--reset-pin", default="25",
+                        help="Reset pin: int GPIO for RPi, str for FT232H (default: 25)")
     args = parser.parse_args()
 
     led = None
+
+    cs = int(args.cs_pin) if args.cs_pin.isdigit() else args.cs_pin
+    rst = int(args.reset_pin) if args.reset_pin.isdigit() else args.reset_pin
 
     # Create radio with default configuration
     radio = RFM9xRadio(
         frequency_mhz=915.0,
         tx_power=23,
-        cs_pin=24,
-        reset_pin=25,
+        cs_pin=cs,
+        reset_pin=rst,
+        backend=args.backend,
     )
 
     try:

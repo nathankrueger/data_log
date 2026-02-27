@@ -1,5 +1,6 @@
 """RFM9x LoRa radio implementation."""
 
+import os
 import time
 
 from .base import Radio
@@ -9,7 +10,11 @@ class RFM9xRadio(Radio):
     """
     Adafruit RFM9x LoRa radio implementation.
 
-    Wiring (RFM9x to Pi):
+    Supports two backends:
+      - "rpi": Native SPI/GPIO on Raspberry Pi (default)
+      - "ft232h": FT232H USB-to-SPI adapter (macOS, Pi, WSL, Linux)
+
+    Wiring (RPi native SPI):
         VIN  -> 3.3V
         GND  -> GND
         SCK  -> GPIO 11 (SPI0 SCLK)
@@ -17,6 +22,15 @@ class RFM9xRadio(Radio):
         MOSI -> GPIO 10 (SPI0 MOSI)
         CS   -> Configurable GPIO (default: GPIO 24)
         RST  -> Configurable GPIO (default: GPIO 25)
+
+    Wiring (FT232H):
+        VIN  -> 3.3V
+        GND  -> GND
+        SCK  -> AD0 (SCLK)
+        MOSI -> AD1 (DO)
+        MISO -> AD2 (DI)
+        CS   -> AD4 (GPIO) — default "D4"
+        RST  -> AD5 (GPIO) — default "D5"
     """
 
     def __init__(
@@ -25,8 +39,9 @@ class RFM9xRadio(Radio):
         tx_power: int = 23,
         spreading_factor: int = 7,
         signal_bandwidth: int = 125000,
-        cs_pin: int = 24,
-        reset_pin: int = 25,
+        cs_pin: int | str = 24,
+        reset_pin: int | str = 25,
+        backend: str = "rpi",
     ):
         """
         Initialize RFM9x radio configuration.
@@ -36,31 +51,60 @@ class RFM9xRadio(Radio):
             tx_power: Transmit power in dBm (5-23)
             spreading_factor: LoRa spreading factor (7-12)
             signal_bandwidth: Signal bandwidth in Hz (125000, 250000, 500000)
-            cs_pin: GPIO pin number for chip select
-            reset_pin: GPIO pin number for reset
+            cs_pin: Chip select pin — int GPIO number for RPi (e.g. 24),
+                    or str board pin name for FT232H (e.g. "D4")
+            reset_pin: Reset pin — int GPIO number for RPi (e.g. 25),
+                       or str board pin name for FT232H (e.g. "D5")
+            backend: "rpi" for native SPI/GPIO, "ft232h" for USB-to-SPI adapter
         """
+        if backend not in ("rpi", "ft232h"):
+            raise ValueError(f"Unknown backend: {backend!r}. Must be 'rpi' or 'ft232h'.")
+
         self._frequency_mhz = frequency_mhz
         self._tx_power = tx_power
         self._cs_pin = cs_pin
         self._reset_pin = reset_pin
         self._spreading_factor = spreading_factor
         self._signal_bandwidth = signal_bandwidth
+        self._backend = backend
 
         self._rfm9x = None
         self._spi = None
         self._cs = None
         self._reset = None
 
+    @staticmethod
+    def _resolve_pin(board_module, pin: int | str):
+        """Resolve a pin specifier to a board pin object.
+
+        Args:
+            board_module: The imported board module.
+            pin: int GPIO number (e.g. 24 -> board.D24) or
+                 str pin name (e.g. "D4" -> board.D4).
+        """
+        if isinstance(pin, int):
+            attr_name = f"D{pin}"
+        elif isinstance(pin, str):
+            attr_name = pin
+        else:
+            raise ValueError(f"Pin must be int or str, got {type(pin).__name__}: {pin}")
+        try:
+            return getattr(board_module, attr_name)
+        except AttributeError:
+            raise ValueError(f"Pin '{attr_name}' not found on board module")
+
     def init(self) -> None:
         """Initialize the RFM9x radio hardware."""
+        if self._backend == "ft232h":
+            os.environ["BLINKA_FT232H"] = "1"
+
         import board
         import busio
         import digitalio
         import adafruit_rfm9x
 
-        # Map pin numbers to board pins
-        cs_board_pin = getattr(board, f"D{self._cs_pin}")
-        reset_board_pin = getattr(board, f"D{self._reset_pin}")
+        cs_board_pin = self._resolve_pin(board, self._cs_pin)
+        reset_board_pin = self._resolve_pin(board, self._reset_pin)
 
         self._spi = busio.SPI(board.SCK, MOSI=board.MOSI, MISO=board.MISO)
         self._cs = digitalio.DigitalInOut(cs_board_pin)

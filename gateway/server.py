@@ -190,6 +190,7 @@ def run_gateway(
                 signal_bandwidth=lora_config.get("signal_bandwidth", 125000),
                 cs_pin=lora_config.get("cs_pin", 24),
                 reset_pin=lora_config.get("reset_pin", 25),
+                backend=lora_config.get("backend", "rpi"),
             )
             radio.init()
 

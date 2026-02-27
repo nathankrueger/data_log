@@ -132,12 +132,16 @@ def parse_args() -> argparse.Namespace:
         help="Transmit power in dBm, 5-23 (default: 23)",
     )
     parser.add_argument(
-        "--cs-pin", type=int, default=24,
-        help="GPIO pin for radio chip select (default: 24)",
+        "--cs-pin", default=24,
+        help="CS pin: int GPIO number for RPi (default: 24), or str for FT232H (e.g. D4)",
     )
     parser.add_argument(
-        "--reset-pin", type=int, default=25,
-        help="GPIO pin for radio reset (default: 25)",
+        "--reset-pin", default=25,
+        help="Reset pin: int GPIO number for RPi (default: 25), or str for FT232H (e.g. D5)",
+    )
+    parser.add_argument(
+        "--backend", choices=["rpi", "ft232h"], default="rpi",
+        help="SPI backend: rpi (native GPIO) or ft232h (USB adapter) (default: rpi)",
     )
     parser.add_argument(
         "--map", action="store_true", default=False,
@@ -151,11 +155,16 @@ def parse_args() -> argparse.Namespace:
 
 
 def run_range_test(args: argparse.Namespace) -> None:
+    # Parse pin args: try int first, fall back to str (for FT232H pin names)
+    cs_pin = int(args.cs_pin) if str(args.cs_pin).isdigit() else args.cs_pin
+    reset_pin = int(args.reset_pin) if str(args.reset_pin).isdigit() else args.reset_pin
+
     radio = RFM9xRadio(
         frequency_mhz=FREQ_N2G,
         tx_power=args.tx_power,
-        cs_pin=args.cs_pin,
-        reset_pin=args.reset_pin,
+        cs_pin=cs_pin,
+        reset_pin=reset_pin,
+        backend=args.backend,
     )
     radio.init()
 

@@ -9,7 +9,8 @@
         "enabled": true,
         "frequency_mhz": 915.0,
         "cs_pin": 24,
-        "reset_pin": 25
+        "reset_pin": 25,
+        "backend": "rpi"
     },
     "led": {
         "red_bcm": 17,
