@@ -775,7 +775,7 @@ def main():
     # Initialize LED if configured
     led = None
     led_config = config.get("led", {})
-    if led_config:
+    if led_config.get("enabled", False):
         try:
             from utils.led import RgbLed
 
@@ -796,35 +796,28 @@ def main():
     commands_init(command_registry, node_state)
 
     # Create radio lock for half-duplex coordination
-    radio_lock: threading.Lock | None = None
+    radio_lock = threading.Lock()
     command_receiver: CommandReceiver | None = None
-
-    # Check if command receiver is enabled
     command_config = config.get("command_receiver", {})
-    command_receiver_enabled = command_config.get("enabled", False)
-
-    if command_receiver_enabled:
-        radio_lock = threading.Lock()
 
     try:
         radio.init()
         logger.info("Radio initialized")
 
-        # Start command receiver if enabled
-        if command_receiver_enabled and radio_lock is not None:
-            receive_timeout = command_config.get("receive_timeout", 4.0)
-            jitter_ms = command_config.get("broadcast_ack_jitter_ms", 500)
-            command_receiver = CommandReceiver(
-                radio=radio,
-                radio_lock=radio_lock,
-                node_id=node_id,
-                registry=command_registry,
-                receive_timeout=receive_timeout,
-                radio_state=radio_state,
-                broadcast_ack_jitter_sec=jitter_ms / 1000.0,
-            )
-            command_receiver.start()
-            logger.info("Command receiver enabled")
+        # Start command receiver
+        receive_timeout = command_config.get("receive_timeout", 4.0)
+        jitter_ms = command_config.get("broadcast_ack_jitter_ms", 500)
+        command_receiver = CommandReceiver(
+            radio=radio,
+            radio_lock=radio_lock,
+            node_id=node_id,
+            registry=command_registry,
+            receive_timeout=receive_timeout,
+            radio_state=radio_state,
+            broadcast_ack_jitter_sec=jitter_ms / 1000.0,
+        )
+        command_receiver.start()
+        logger.info("Command receiver started")
 
         # Start broadcast loop
         broadcast_loop(radio, node_id, sensors, node_state, radio_lock)

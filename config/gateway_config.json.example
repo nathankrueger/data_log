@@ -6,20 +6,10 @@
     ],
     "local_sensor_interval_sec": 5,
     "lora": {
-        "enabled": true,
         "frequency_mhz": 915.0,
         "cs_pin": 24,
         "reset_pin": 25,
         "backend": "rpi"
-    },
-    "led": {
-        "red_bcm": 17,
-        "green_bcm": 27,
-        "blue_bcm": 22,
-        "common_anode": true,
-        "flash_on_recv": true,
-        "flash_color": [255, 0, 0],
-        "flash_duration_sec": 0.1
     },
     "display": {
         "enabled": true,
@@ -30,7 +20,6 @@
         "refresh_interval": 0.5
     },
     "command_server": {
-        "enabled": true,
         "port": 5001,
         "max_queue_size": 128,
         "max_retries": 10,

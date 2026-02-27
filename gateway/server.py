@@ -119,7 +119,7 @@ def run_gateway(
     # Initialize LED if configured
     led = None
     led_config = config.get("led", {})
-    if led_config:
+    if led_config.get("enabled", False):
         try:
             led = RgbLed(
                 red_bcm=led_config.get("red_bcm", 17),
@@ -159,80 +159,75 @@ def run_gateway(
         "retry_multiplier": command_config.get("retry_multiplier", 1.5),
     }
 
-    # Start command server if enabled
-    command_server = None
+    # Start command server
+    port = command_config.get("port", 5001)
+    command_server = CommandServer(
+        port=port,
+        command_queue=command_queue,
+        discovery_config=discovery_config,
+    )
+    command_server.start()
+    logger.info(f"Command server listening on port {port}")
 
-    if command_config.get("enabled", False):
-        port = command_config.get("port", 5001)
-        command_server = CommandServer(
-            port=port,
-            command_queue=command_queue,
-            discovery_config=discovery_config,
-        )
-        command_server.start()
-        logger.info(f"Command server listening on port {port}")
-
-    # Start LoRa transceiver if enabled
+    # Initialize LoRa transceiver
     lora_transceiver = None
     radio = None
     lora_config = config.get("lora", {})
 
-    if lora_config.get("enabled", True):
-        try:
-            # Dual-channel: N2G for sensors+ACKs, G2N for commands
-            n2g_freq = lora_config.get("n2g_frequency_mhz", 915.0)
-            g2n_freq = lora_config.get("g2n_frequency_mhz", 915.5)
+    try:
+        # Dual-channel: N2G for sensors+ACKs, G2N for commands
+        n2g_freq = lora_config.get("n2g_frequency_mhz", 915.0)
+        g2n_freq = lora_config.get("g2n_frequency_mhz", 915.5)
 
-            radio = RFM9xRadio(
-                frequency_mhz=n2g_freq,  # Start on N2G (sensors + ACKs)
-                tx_power=lora_config.get("tx_power", 23),
-                spreading_factor=lora_config.get("spreading_factor", 7),
-                signal_bandwidth=lora_config.get("signal_bandwidth", 125000),
-                cs_pin=lora_config.get("cs_pin", 24),
-                reset_pin=lora_config.get("reset_pin", 25),
-                backend=lora_config.get("backend", "rpi"),
-            )
-            radio.init()
+        radio = RFM9xRadio(
+            frequency_mhz=n2g_freq,  # Start on N2G (sensors + ACKs)
+            tx_power=lora_config.get("tx_power", 23),
+            spreading_factor=lora_config.get("spreading_factor", 7),
+            signal_bandwidth=lora_config.get("signal_bandwidth", 125000),
+            cs_pin=lora_config.get("cs_pin", 24),
+            reset_pin=lora_config.get("reset_pin", 25),
+            backend=lora_config.get("backend", "rpi"),
+        )
+        radio.init()
 
-            # Create RadioState (shared class with nodes)
-            radio_state = RadioState(
-                radio=radio,
-                n2g_freq=n2g_freq,
-                g2n_freq=g2n_freq,
-            )
-            gateway_state.radio_state = radio_state
+        # Create RadioState (shared class with nodes)
+        radio_state = RadioState(
+            radio=radio,
+            n2g_freq=n2g_freq,
+            g2n_freq=g2n_freq,
+        )
+        gateway_state.radio_state = radio_state
 
-            lora_transceiver = LoRaTransceiver(
-                radio,
-                collector,
-                command_queue=command_queue,
-                led=led,
-                flash_color=flash_color,
-                flash_duration=flash_duration,
-                gateway_state=gateway_state,
-                verbose_logging=verbose_logging,
-                n2g_freq=n2g_freq,
-                g2n_freq=g2n_freq,
-            )
-            lora_transceiver.set_flash_enabled(flash_on_recv_default)
-            lora_transceiver.start()
+        lora_transceiver = LoRaTransceiver(
+            radio,
+            collector,
+            command_queue=command_queue,
+            led=led,
+            flash_color=flash_color,
+            flash_duration=flash_duration,
+            gateway_state=gateway_state,
+            verbose_logging=verbose_logging,
+            n2g_freq=n2g_freq,
+            g2n_freq=g2n_freq,
+        )
+        lora_transceiver.set_flash_enabled(flash_on_recv_default)
+        lora_transceiver.start()
 
-            # Log all radio parameters at startup
-            sf = radio_state.spreading_factor
-            bw_hz = radio_state.signal_bandwidth
-            bw_khz = bw_hz // 1000
-            txpwr = radio_state.tx_power
-            logger.info(
-                f"LoRa radio initialized: SF={sf}, BW={bw_khz}kHz, "
-                f"TXpwr={txpwr}dBm, N2G={n2g_freq}MHz, G2N={g2n_freq}MHz"
-            )
-            # Wire transceiver and params to command server
-            if command_server:
-                command_server.set_transceiver(lora_transceiver)
-                command_server.set_gateway_state(gateway_state)
-        except Exception as e:
-            logger.error(f"Failed to initialize LoRa: {e}")
-            logger.info("Continuing without LoRa transceiver")
+        # Log all radio parameters at startup
+        sf = radio_state.spreading_factor
+        bw_hz = radio_state.signal_bandwidth
+        bw_khz = bw_hz // 1000
+        txpwr = radio_state.tx_power
+        logger.info(
+            f"LoRa radio initialized: SF={sf}, BW={bw_khz}kHz, "
+            f"TXpwr={txpwr}dBm, N2G={n2g_freq}MHz, G2N={g2n_freq}MHz"
+        )
+        # Wire transceiver and params to command server
+        command_server.set_transceiver(lora_transceiver)
+        command_server.set_gateway_state(gateway_state)
+    except Exception as e:
+        logger.error(f"Failed to initialize LoRa: {e}")
+        logger.info("Continuing without LoRa transceiver")
 
     # Start local sensor reader if configured
     local_reader = None

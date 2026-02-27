@@ -38,11 +38,11 @@
         "flip": true
     },
     "command_receiver": {
-        "enabled": true,
         "receive_timeout": 0.5,
         "broadcast_ack_jitter_ms": 500
     },
     "led": {
+        "enabled": true,
         "red_bcm": 17,
         "green_bcm": 22,
         "blue_bcm": 27,
