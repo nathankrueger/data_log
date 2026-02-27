@@ -72,6 +72,7 @@ class RFM9xRadio(Radio):
         self._spi = None
         self._cs = None
         self._reset = None
+        self._in_rx = False  # Track RX_CONTINUOUS state (FT232H optimization)
 
     @staticmethod
     def _resolve_pin(board_module, pin: int | str):
@@ -128,6 +129,7 @@ class RFM9xRadio(Radio):
             raise RuntimeError("Radio not initialized. Call init() first.")
         try:
             self._rfm9x.send(data)
+            self._in_rx = False
             return True
         except Exception as e:
             import logging
@@ -143,15 +145,28 @@ class RFM9xRadio(Radio):
             # The Adafruit library's receive() busy-polls the IRQ register with no
             # sleep. Over native RPi SPI this is cheap (memory-mapped), but over
             # FT232H USB-SPI each poll is a ~1ms USB roundtrip that burns CPU.
-            self._rfm9x.listen()
+            #
+            # We also track RX state to skip redundant listen() calls.  The radio
+            # stays in RX_CONTINUOUS until something changes mode (send, idle,
+            # hard_reset, or the library's receive(timeout=0) which calls idle()).
+            # Each listen() is 2-3 SPI writes over USB (~4-6ms), so skipping it
+            # on every poll cycle saves ~30 USB transactions/sec.
+            if not self._in_rx:
+                self._rfm9x.listen()
+                self._in_rx = True
             deadline = time.monotonic() + timeout
             while True:
                 if self._rfm9x.rx_done():
-                    return self._rfm9x.receive(timeout=0)
+                    packet = self._rfm9x.receive(timeout=0)
+                    # receive(timeout=0) calls idle() internally, leaving the
+                    # radio in standby.  Re-enter RX immediately.
+                    self._rfm9x.listen()
+                    # _in_rx stays True
+                    return packet
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
                     return None
-                time.sleep(min(0.05, remaining))
+                time.sleep(min(0.1, remaining))
         else:
             return self._rfm9x.receive(timeout=timeout)
 
@@ -189,6 +204,7 @@ class RFM9xRadio(Radio):
         # The adafruit library doesn't have explicit cleanup,
         # but we clear our references
         self._rfm9x = None
+        self._in_rx = False
         if self._spi:
             self._spi.deinit()
             self._spi = None
@@ -200,6 +216,7 @@ class RFM9xRadio(Radio):
         if self._rfm9x is None:
             raise RuntimeError("Radio not initialized. Call init() first.")
         self._rfm9x.idle()
+        self._in_rx = False
 
     def recover_rx(self) -> None:
         """Soft-recover from a stuck rx_done state.
@@ -214,6 +231,7 @@ class RFM9xRadio(Radio):
         self._rfm9x.sleep()
         time.sleep(0.01)
         self._rfm9x.idle()
+        self._in_rx = False
         # Reset FIFO pointer to RX base address (stale pointers survive SLEEP)
         rx_base = self._rfm9x._read_u8(0x0F)   # RegFifoRxBaseAddr
         self._rfm9x._write_u8(0x0D, rx_base)    # RegFifoAddrPtr
@@ -256,6 +274,7 @@ class RFM9xRadio(Radio):
         self._rfm9x.preamble_length = 8
         self._rfm9x.enable_crc = True
         self._rfm9x._write_u8(0x12, 0xFF)  # Clear all IRQ flags
+        self._in_rx = False
 
     def set_frequency(self, frequency_mhz: float) -> None:
         """Change the radio frequency at runtime.
