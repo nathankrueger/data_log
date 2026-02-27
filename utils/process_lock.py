@@ -26,7 +26,12 @@ def acquire_lock(name: str) -> None:
 
     lock_path = f"/tmp/data_log_{name}.lock"
 
-    _lock_fd = open(lock_path, "w+")
+    # Open without truncating so kill_existing() can still read the PID
+    # of the lock holder.  Fall back to "w+" if the file doesn't exist yet.
+    try:
+        _lock_fd = open(lock_path, "r+")
+    except FileNotFoundError:
+        _lock_fd = open(lock_path, "w+")
     try:
         fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
     except BlockingIOError:
