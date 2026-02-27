@@ -1,9 +1,12 @@
 """RFM9x LoRa radio implementation."""
 
+import logging
 import os
 import time
 
 from .base import Radio
+
+logger = logging.getLogger(__name__)
 
 
 class RFM9xRadio(Radio):
@@ -74,6 +77,12 @@ class RFM9xRadio(Radio):
         self._reset = None
         self._in_rx = False  # Track RX_CONTINUOUS state (FT232H optimization)
 
+        # FT232H polling stats (logged every 30s)
+        self._rx_polls = 0
+        self._rx_listens = 0
+        self._rx_skipped_listens = 0
+        self._rx_stats_time = 0.0
+
     @staticmethod
     def _resolve_pin(board_module, pin: int | str):
         """Resolve a pin specifier to a board pin object.
@@ -122,6 +131,7 @@ class RFM9xRadio(Radio):
         self._rfm9x.coding_rate = 5           # 4/5 (library uses denominator)
         self._rfm9x.preamble_length = 8       # 8 symbol preamble
         self._rfm9x.enable_crc = True         # Enable CRC (should be default, but explicit)
+        self._rx_stats_time = time.monotonic()
 
     def send(self, data: bytes) -> bool:
         """Send data over LoRa."""
@@ -132,8 +142,7 @@ class RFM9xRadio(Radio):
             self._in_rx = False
             return True
         except Exception as e:
-            import logging
-            logging.getLogger(__name__).warning(f"Radio send failed: {e} (payload size: {len(data)} bytes)")
+            logger.warning(f"Radio send failed: {e} (payload size: {len(data)} bytes)")
             return False
 
     def receive(self, timeout: float = 5.0) -> bytes | None:
@@ -154,21 +163,45 @@ class RFM9xRadio(Radio):
             if not self._in_rx:
                 self._rfm9x.listen()
                 self._in_rx = True
+                self._rx_listens += 1
+            else:
+                self._rx_skipped_listens += 1
             deadline = time.monotonic() + timeout
             while True:
+                self._rx_polls += 1
                 if self._rfm9x.rx_done():
                     packet = self._rfm9x.receive(timeout=0)
                     # receive(timeout=0) calls idle() internally, leaving the
                     # radio in standby.  Re-enter RX immediately.
                     self._rfm9x.listen()
+                    self._rx_listens += 1
                     # _in_rx stays True
                     return packet
                 remaining = deadline - time.monotonic()
                 if remaining <= 0:
+                    self._log_rx_stats()
                     return None
                 time.sleep(min(0.1, remaining))
         else:
             return self._rfm9x.receive(timeout=timeout)
+
+    def _log_rx_stats(self) -> None:
+        """Log FT232H polling stats every 30s."""
+        now = time.monotonic()
+        elapsed = now - self._rx_stats_time
+        if elapsed < 30:
+            return
+        polls_sec = self._rx_polls / elapsed if elapsed > 0 else 0
+        logger.info(
+            "FT232H RX stats (%.0fs): polls=%d (%.1f/s), "
+            "listen_calls=%d, listen_skipped=%d",
+            elapsed, self._rx_polls, polls_sec,
+            self._rx_listens, self._rx_skipped_listens,
+        )
+        self._rx_polls = 0
+        self._rx_listens = 0
+        self._rx_skipped_listens = 0
+        self._rx_stats_time = now
 
     def listen(self) -> None:
         """Enter receive mode (like AB01's Radio.Rx(0)).
@@ -245,8 +278,6 @@ class RFM9xRadio(Radio):
         """
         if self._rfm9x is None:
             raise RuntimeError("Radio not initialized. Call init() first.")
-        import logging
-        logger = logging.getLogger(__name__)
 
         logger.warning("Hard reset (SF=%d, BW=%d, freq=%.1f, txpwr=%d)",
                        self._spreading_factor, self._signal_bandwidth,
