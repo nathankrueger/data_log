@@ -54,6 +54,8 @@ import os
 import board
 import busio
 import digitalio
+
+os.environ['BLINKA_FT232H'] = '1'
 import adafruit_rfm9x
 
 
