@@ -1,0 +1,298 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Gateway Status</title>
+<style>
+  * { box-sizing: border-box; margin: 0; padding: 0; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, monospace;
+    background: #1a1a2e; color: #e0e0e0; padding: 20px; max-width: 960px; margin: 0 auto;
+  }
+  h1 { color: #00d4ff; margin-bottom: 4px; font-size: 1.4em; }
+  h2 { color: #7ec8e3; margin: 24px 0 8px 0; font-size: 1.1em; }
+  .header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; }
+  .uptime { color: #888; font-size: 0.9em; }
+  table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+  th { background: #16213e; color: #7ec8e3; text-align: left; padding: 6px 10px; font-size: 0.85em; }
+  td { padding: 5px 10px; border-bottom: 1px solid #2a2a4a; font-size: 0.85em; }
+  tr:hover { background: #16213e; }
+  input[type="number"], input[type="text"] {
+    background: #0f3460; border: 1px solid #444; color: #e0e0e0;
+    padding: 3px 6px; width: 90px; border-radius: 3px; font-family: monospace;
+  }
+  input:focus { border-color: #00d4ff; outline: none; }
+  button {
+    background: #0f3460; border: 1px solid #00d4ff; color: #00d4ff;
+    padding: 3px 10px; border-radius: 3px; cursor: pointer; font-size: 0.8em;
+  }
+  button:hover { background: #00d4ff; color: #1a1a2e; }
+  button:disabled { opacity: 0.4; cursor: not-allowed; }
+  .status { padding: 6px 10px; margin: 8px 0; border-radius: 3px; font-size: 0.85em; min-height: 1.5em; }
+  .status.success { background: #0a3d0a; color: #4caf50; }
+  .status.error { background: #3d0a0a; color: #f44336; }
+  .badge {
+    display: inline-block; padding: 1px 6px; border-radius: 3px; font-size: 0.75em;
+  }
+  .badge.staged { background: #3d2e0a; color: #ffc107; }
+  .badge.immediate { background: #0a2e3d; color: #4fc3f7; }
+  .badge.readonly { background: #2a2a2a; color: #888; }
+  .value-ro { color: #888; font-family: monospace; }
+  .readings-empty { color: #666; padding: 20px; text-align: center; }
+  .sensor-local { color: #81c784; }
+  .sensor-remote { color: #64b5f6; }
+</style>
+</head>
+<body>
+
+<div class="header">
+  <h1>Gateway Status</h1>
+  <span class="uptime" id="uptime">--</span>
+</div>
+
+<h2>Gateway Parameters</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Parameter</th>
+      <th>Value</th>
+      <th>Range</th>
+      <th>Type</th>
+      <th>Action</th>
+    </tr>
+  </thead>
+  <tbody id="params-body"></tbody>
+</table>
+<div class="status" id="status"></div>
+
+<h2>Sensor Feed</h2>
+<table>
+  <thead>
+    <tr>
+      <th>Time</th>
+      <th>Node</th>
+      <th>Sensor</th>
+      <th>Value</th>
+      <th>Source</th>
+    </tr>
+  </thead>
+  <tbody id="readings-body">
+    <tr><td colspan="5" class="readings-empty">Waiting for readings...</td></tr>
+  </tbody>
+</table>
+
+<script>
+const POLL_MS = 5000;
+
+async function refreshParams() {
+  try {
+    const resp = await fetch('/api/params');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    renderParams(data.params);
+    renderUptime(data.uptime_seconds);
+  } catch (e) { /* network error, skip this cycle */ }
+}
+
+async function refreshReadings() {
+  try {
+    const resp = await fetch('/api/readings');
+    if (!resp.ok) return;
+    const data = await resp.json();
+    renderReadings(data.readings);
+  } catch (e) { /* network error, skip this cycle */ }
+}
+
+function renderParams(params) {
+  const tbody = document.getElementById('params-body');
+  const entries = Object.entries(params);
+
+  // Preserve input focus: if user is editing, don't rebuild that row
+  const focused = document.activeElement;
+  const focusedParam = focused && focused.id && focused.id.startsWith('param-')
+    ? focused.id.slice(6) : null;
+
+  tbody.innerHTML = '';
+  for (const [name, info] of entries) {
+    const tr = document.createElement('tr');
+
+    // Name
+    tr.appendChild(td(name));
+
+    // Value
+    if (info.writable) {
+      const input = document.createElement('input');
+      input.type = info.type === 'str' ? 'text' : 'number';
+      input.id = 'param-' + name;
+      input.step = info.type === 'float' ? '0.1' : '1';
+      if (info.min !== null) input.min = info.min;
+      if (info.max !== null) input.max = info.max;
+      // Only update value if this input is NOT focused (don't clobber user edits)
+      if (name !== focusedParam) {
+        input.value = info.value;
+      } else {
+        input.value = focused.value;
+      }
+      const cell = document.createElement('td');
+      cell.appendChild(input);
+      tr.appendChild(cell);
+    } else {
+      const cell = document.createElement('td');
+      cell.className = 'value-ro';
+      cell.textContent = String(info.value);
+      tr.appendChild(cell);
+    }
+
+    // Range
+    const range = (info.min !== null && info.max !== null)
+      ? info.min + ' \u2013 ' + info.max : '\u2014';
+    tr.appendChild(td(range));
+
+    // Type badge
+    const badgeCell = document.createElement('td');
+    const badge = document.createElement('span');
+    badge.className = 'badge ' + (info.writable ? (info.staged ? 'staged' : 'immediate') : 'readonly');
+    badge.textContent = info.writable ? (info.staged ? 'staged' : 'immediate') : 'read-only';
+    badgeCell.appendChild(badge);
+    tr.appendChild(badgeCell);
+
+    // Action
+    if (info.writable) {
+      const btn = document.createElement('button');
+      btn.textContent = 'Update';
+      btn.onclick = () => updateParam(name, info.staged);
+      const cell = document.createElement('td');
+      cell.appendChild(btn);
+      tr.appendChild(cell);
+    } else {
+      tr.appendChild(td('\u2014'));
+    }
+
+    tbody.appendChild(tr);
+  }
+
+  // Restore focus
+  if (focusedParam) {
+    const el = document.getElementById('param-' + focusedParam);
+    if (el) el.focus();
+  }
+}
+
+async function updateParam(name, isStaged) {
+  const input = document.getElementById('param-' + name);
+  const value = input.value;
+  const status = document.getElementById('status');
+
+  // Disable button during update
+  const btn = input.closest('tr').querySelector('button');
+  if (btn) btn.disabled = true;
+
+  try {
+    // Step 1: PUT the value
+    const putResp = await fetch('/gateway/param/' + name, {
+      method: 'PUT',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({value: parseFloat(value)}),
+    });
+    if (!putResp.ok) {
+      const err = await putResp.json();
+      showStatus('Error setting ' + name + ': ' + err.error, 'error');
+      return;
+    }
+
+    if (isStaged) {
+      // Step 2: apply staged config
+      const rcfgResp = await fetch('/gateway/rcfg_radio', {method: 'POST'});
+      if (!rcfgResp.ok) {
+        showStatus(name + ' staged but rcfg_radio failed', 'error');
+        return;
+      }
+    }
+
+    // Persist to config file
+    const saveResp = await fetch('/gateway/savecfg', {method: 'POST'});
+    if (!saveResp.ok) {
+      showStatus(name + ' set but save failed', 'error');
+      return;
+    }
+
+    showStatus(name + ' updated to ' + value, 'success');
+    refreshParams();
+  } catch (e) {
+    showStatus('Network error: ' + e.message, 'error');
+  } finally {
+    if (btn) btn.disabled = false;
+  }
+}
+
+function renderReadings(readings) {
+  const tbody = document.getElementById('readings-body');
+  if (!readings || readings.length === 0) {
+    tbody.innerHTML = '<tr><td colspan="5" class="readings-empty">Waiting for readings...</td></tr>';
+    return;
+  }
+  tbody.innerHTML = '';
+  // Show newest first
+  for (let i = readings.length - 1; i >= 0; i--) {
+    const r = readings[i];
+    const tr = document.createElement('tr');
+
+    // Time
+    const time = new Date(r.timestamp * 1000);
+    tr.appendChild(td(time.toLocaleTimeString()));
+
+    // Node (first tag is node id)
+    tr.appendChild(td(r.tags && r.tags[0] ? r.tags[0] : '--'));
+
+    // Sensor name
+    tr.appendChild(td(r.name));
+
+    // Value + units
+    const val = typeof r.value === 'number' ? r.value.toFixed(2) : r.value;
+    tr.appendChild(td(val + ' ' + (r.units || '')));
+
+    // Source (local vs remote)
+    const srcCell = document.createElement('td');
+    const isLocal = r.category === 'Local Sensors';
+    srcCell.className = isLocal ? 'sensor-local' : 'sensor-remote';
+    srcCell.textContent = isLocal ? 'local' : 'lora';
+    tr.appendChild(srcCell);
+
+    tbody.appendChild(tr);
+  }
+}
+
+function renderUptime(seconds) {
+  if (seconds == null) return;
+  const d = Math.floor(seconds / 86400);
+  const h = Math.floor((seconds % 86400) / 3600);
+  const m = Math.floor((seconds % 3600) / 60);
+  let text = 'Uptime: ';
+  if (d > 0) text += d + 'd ';
+  text += h + 'h ' + m + 'm';
+  document.getElementById('uptime').textContent = text;
+}
+
+function showStatus(msg, type) {
+  const el = document.getElementById('status');
+  el.textContent = msg;
+  el.className = 'status ' + type;
+  setTimeout(() => { el.textContent = ''; el.className = 'status'; }, 5000);
+}
+
+function td(text) {
+  const el = document.createElement('td');
+  el.textContent = String(text);
+  return el;
+}
+
+// Initial load + polling
+refreshParams();
+refreshReadings();
+setInterval(refreshParams, POLL_MS);
+setInterval(refreshReadings, POLL_MS);
+</script>
+
+</body>
+</html>

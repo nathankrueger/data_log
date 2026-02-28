@@ -142,6 +142,9 @@ class CommandHandler(BaseHTTPRequestHandler):
         Handle GET requests for commands that return responses.
 
         Patterns:
+          GET /                           - Status page (HTML)
+          GET /api/params                 - All params with metadata (JSON)
+          GET /api/readings               - Recent sensor readings (JSON)
           GET /discover[?retries=N]       - Discover all reachable nodes
           GET /gateway/params             - Get all gateway parameters
           GET /gateway/param/{name}       - Get single gateway parameter
@@ -150,6 +153,21 @@ class CommandHandler(BaseHTTPRequestHandler):
         """
         parsed = urlparse(self.path)
         path = parsed.path.strip("/")
+
+        # Handle / - serve status page
+        if path == "":
+            self._handle_status_page()
+            return
+
+        # Handle /api/readings - recent sensor readings
+        if path == "api/readings":
+            self._handle_readings_api()
+            return
+
+        # Handle /api/params - all params with metadata for UI
+        if path == "api/params":
+            self._handle_params_api()
+            return
 
         # Handle /discover endpoint
         if path == "discover":
@@ -301,6 +319,59 @@ class CommandHandler(BaseHTTPRequestHandler):
                 "error": "timeout",
                 "message": f"No response from node '{node_id}' within {wait_timeout} seconds",
             }).encode("utf-8"))
+
+    def _handle_status_page(self) -> None:
+        """Handle GET / - serve the status HTML page."""
+        from gateway.status_page import get_status_page_html
+
+        html = get_status_page_html()
+        self.send_response(200)
+        self.send_header("Content-Type", "text/html; charset=utf-8")
+        self.end_headers()
+        self.wfile.write(html.encode("utf-8"))
+
+    def _handle_readings_api(self) -> None:
+        """Handle GET /api/readings - return recent sensor readings."""
+        collector = getattr(self.server, "sensor_collector", None)
+        if collector is None:
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "error": "unavailable",
+                "message": "Sensor collector not initialized",
+            }).encode("utf-8"))
+            return
+
+        readings = collector.get_recent_readings()
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({"readings": readings}).encode("utf-8"))
+
+    def _handle_params_api(self) -> None:
+        """Handle GET /api/params - get all params with metadata for UI."""
+        registry = getattr(self.server, "gateway_params", None)
+        if registry is None:
+            self.send_response(503)
+            self.send_header("Content-Type", "application/json")
+            self.end_headers()
+            self.wfile.write(json.dumps({
+                "error": "unavailable",
+                "message": "Gateway parameter registry not initialized",
+            }).encode("utf-8"))
+            return
+
+        gateway_state = getattr(self.server, "gateway_state", None)
+        uptime = time.time() - gateway_state.start_time if gateway_state else 0
+
+        self.send_response(200)
+        self.send_header("Content-Type", "application/json")
+        self.end_headers()
+        self.wfile.write(json.dumps({
+            "params": registry.get_all_with_meta(),
+            "uptime_seconds": uptime,
+        }).encode("utf-8"))
 
     def _handle_discover(self, parsed) -> None:
         """Handle GET /discover — discover all reachable nodes via broadcast ping."""
@@ -688,6 +759,13 @@ class CommandServer(threading.Thread):
         # Set later via set_gateway_state()
         self.gateway_state = None
         self.gateway_params = None
+        self.sensor_collector = None  # Set later via set_sensor_collector()
+
+    def set_sensor_collector(self, collector) -> None:
+        """Set the sensor collector reference for readings API."""
+        self.sensor_collector = collector
+        if self._server:
+            self._server.sensor_collector = collector  # type: ignore
 
     def set_transceiver(self, transceiver) -> None:
         """Set the transceiver reference for discovery support."""
@@ -721,6 +799,7 @@ class CommandServer(threading.Thread):
         self._server.gateway_state = getattr(self, "gateway_state", None)  # type: ignore
         self._server.gateway_params = self.gateway_params  # type: ignore
         self._server.config_path = getattr(self.gateway_state, "config_path", "") if self.gateway_state else ""  # type: ignore
+        self._server.sensor_collector = self.sensor_collector  # type: ignore
         logger.info(f"Command server listening on port {self.port}")
 
         try:

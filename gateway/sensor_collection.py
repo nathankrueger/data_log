@@ -18,6 +18,7 @@ import logging
 import queue
 import threading
 import time
+from collections import deque
 from dataclasses import dataclass
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
@@ -121,7 +122,7 @@ class SensorDataCollector:
     def __init__(
         self,
         gateway_id: str,
-        dashboard_client: DashboardClient,
+        dashboard_client: DashboardClient | None,
         max_queue_size: int = 100,
     ):
         """
@@ -140,12 +141,16 @@ class SensorDataCollector:
         )
         self._running = False
         self._poster_thread: threading.Thread | None = None
+        self._recent_readings: deque[dict] = deque(maxlen=100)
 
     def start(self) -> None:
         """Start the background poster thread."""
         if self._running:
             return
         self._running = True
+        if self._dashboard_client is None:
+            logger.info("No dashboard client configured, skipping poster thread")
+            return
         self._poster_thread = threading.Thread(
             target=self._poster_loop, daemon=True, name="DashboardPoster"
         )
@@ -224,6 +229,12 @@ class SensorDataCollector:
         if not datapoints:
             return
 
+        for dp in datapoints:
+            self._recent_readings.append(dp)
+
+        if self._dashboard_client is None:
+            return
+
         pending = PendingPost(datapoints=datapoints, node_id=node_id)
 
         # Try to enqueue; if full, drop oldest and retry
@@ -245,6 +256,10 @@ class SensorDataCollector:
                     self._post_queue.put_nowait(pending)
                 except queue.Full:
                     logger.error("Dashboard queue still full after drop, losing readings")
+
+    def get_recent_readings(self) -> list[dict]:
+        """Return a snapshot of recent readings (newest last)."""
+        return list(self._recent_readings)
 
     @property
     def gateway_id(self) -> str:

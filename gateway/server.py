@@ -34,10 +34,6 @@ import sys
 import time
 from pathlib import Path
 
-from gpiozero import Button
-
-from display import OffPage, ScreenManager, SSD1306Display
-from gateway.display_pages import GatewayLocalSensors, LastPacketPage, SystemInfoPage
 from gateway.command_queue import CommandQueue
 from gateway.http_handler import CommandServer
 from gateway.sensor_collection import (
@@ -46,11 +42,7 @@ from gateway.sensor_collection import (
     SensorDataCollector,
     instantiate_sensors,
 )
-from gateway.transceiver import LoRaTransceiver
-from radio import RFM9xRadio
 from utils.gateway_state import GatewayState
-from utils.led import RgbLed
-from utils.radio_state import RadioState
 
 # Configure logging
 logging.basicConfig(
@@ -99,28 +91,29 @@ def run_gateway(
     node_id = config.get("node_id", "gateway")
     dashboard_url = config.get("dashboard_url")
 
-    if not dashboard_url:
-        logger.error("dashboard_url not configured")
-        sys.exit(1)
-
     # Create shared state for gateway components
     gateway_state = GatewayState()
     gateway_state.node_id = node_id
     gateway_state.config_path = config_path
-    gateway_state.dashboard_url = dashboard_url
+    gateway_state.dashboard_url = dashboard_url or ""
 
     # Create dashboard client and collector
-    dashboard_client = DashboardClient(dashboard_url, node_id)
+    dashboard_client = DashboardClient(dashboard_url, node_id) if dashboard_url else None
     collector = SensorDataCollector(node_id, dashboard_client)
     collector.start()
 
-    logger.info(f"Gateway '{node_id}' posting to {dashboard_url}")
+    if dashboard_url:
+        logger.info(f"Gateway '{node_id}' posting to {dashboard_url}")
+    else:
+        logger.info(f"Gateway '{node_id}' running without dashboard (no dashboard_url configured)")
 
     # Initialize LED if configured
     led = None
     led_config = config.get("led", {})
     if led_config.get("enabled", bool(led_config)):
         try:
+            from utils.led import RgbLed
+
             led = RgbLed(
                 red_bcm=led_config.get("red_bcm", 17),
                 green_bcm=led_config.get("green_bcm", 27),
@@ -175,6 +168,10 @@ def run_gateway(
     lora_config = config.get("lora", {})
 
     try:
+        from gateway.transceiver import LoRaTransceiver
+        from radio import RFM9xRadio
+        from utils.radio_state import RadioState
+
         # Dual-channel: N2G for sensors+ACKs, G2N for commands
         n2g_freq = lora_config.get("n2g_frequency_mhz", 915.0)
         g2n_freq = lora_config.get("g2n_frequency_mhz", 915.5)
@@ -225,6 +222,7 @@ def run_gateway(
         # Wire transceiver and params to command server
         command_server.set_transceiver(lora_transceiver)
         command_server.set_gateway_state(gateway_state)
+        command_server.set_sensor_collector(collector)
     except Exception as e:
         logger.error(f"Failed to initialize LoRa: {e}")
         logger.info("Continuing without LoRa transceiver")
@@ -250,6 +248,11 @@ def run_gateway(
 
     if display_config.get("enabled", False):
         try:
+            from gpiozero import Button
+
+            from display import OffPage, ScreenManager, SSD1306Display
+            from gateway.display_pages import GatewayLocalSensors, LastPacketPage, SystemInfoPage
+
             display = SSD1306Display(
                 i2c_port=display_config.get("i2c_port", 1),
                 i2c_address=display_config.get("i2c_address", 0x3C),

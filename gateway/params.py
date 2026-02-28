@@ -261,6 +261,20 @@ class GatewayParamRegistry:
             logger.info(f"gateway param set: {name}={val}")
             return p.getter(), None
 
+    def get_all_with_meta(self) -> dict[str, dict]:
+        """Get all params with metadata for UI display."""
+        result = {}
+        for name, p in sorted(self._params.items()):
+            result[name] = {
+                "value": p.getter(),
+                "writable": p.setter is not None,
+                "staged": p.staged,
+                "min": p.min_val,
+                "max": p.max_val,
+                "type": p.value_type.__name__,
+            }
+        return result
+
     def is_staged(self, name: str) -> bool:
         """Check if a parameter uses staged config."""
         p = self._params.get(name)
