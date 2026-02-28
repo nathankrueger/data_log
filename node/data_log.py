@@ -19,7 +19,8 @@ Configuration is loaded from config/node_config.json:
         "g2n_frequency_hz": 915500000,
         "spreading_factor": 7,
         "bandwidth": 0,
-        "tx_power": 23
+        "tx_power": 23,
+        "inter_packet_delay": 1.0
     }
 }
 
@@ -501,6 +502,7 @@ def broadcast_loop(
     sensors: list[SensorEntry],
     node_state: NodeState | None = None,
     radio_lock: threading.Lock | None = None,
+    inter_packet_delay: float = 1.0,
 ) -> None:
     """
     Main broadcast loop with per-sensor intervals.
@@ -514,6 +516,8 @@ def broadcast_loop(
         sensors: List of SensorEntry objects with interval configuration
         node_state: Optional shared state for display updates
         radio_lock: Optional lock for half-duplex coordination with CommandReceiver
+        inter_packet_delay: Seconds to wait between consecutive packets when a
+            broadcast is split across multiple packets (default: 1.0)
     """
     logger.info(f"Starting broadcast loop for node '{node_id}'")
     logger.info(f"Radio: {radio.frequency_mhz} MHz, TX power: {radio.tx_power} dBm")
@@ -555,7 +559,24 @@ def broadcast_loop(
                     all_success = True
                     total_bytes = 0
 
-                    for packet in packets:
+                    if len(packets) > 1:
+                        logger.info(
+                            f"Multi-packet broadcast: {len(packets)} packets "
+                            f"for {len(readings)} readings"
+                        )
+
+                    for i, packet in enumerate(packets):
+                        # Delay between consecutive packets so the gateway has
+                        # time to read the FIFO before we overwrite it.  Sensor
+                        # broadcasts have no ACKs, so back-to-back sends risk
+                        # the receiver only seeing the last packet.
+                        if i > 0:
+                            logger.debug(
+                                f"Inter-packet delay ({inter_packet_delay}s) "
+                                f"before packet {i + 1}/{len(packets)}"
+                            )
+                            time.sleep(inter_packet_delay)
+
                         # Acquire lock if using half-duplex coordination
                         if radio_lock:
                             with radio_lock:
@@ -820,7 +841,11 @@ def main():
         logger.info("Command receiver started")
 
         # Start broadcast loop
-        broadcast_loop(radio, node_id, sensors, node_state, radio_lock)
+        inter_packet_delay = lora_config.get("inter_packet_delay", 1.0)
+        broadcast_loop(
+            radio, node_id, sensors, node_state, radio_lock,
+            inter_packet_delay=inter_packet_delay,
+        )
 
     except KeyboardInterrupt:
         logger.info("Shutting down...")

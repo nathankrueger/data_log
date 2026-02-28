@@ -20,7 +20,8 @@
         "tx_power": 23,
         "cs_pin": 24,
         "reset_pin": 25,
-        "backend": "rpi"
+        "backend": "rpi",
+        "inter_packet_delay": 1.0
     },
     "display": {
         "enabled": true,
