@@ -21,7 +21,7 @@
         "cs_pin": 24,
         "reset_pin": 25,
         "backend": "rpi",
-        "inter_packet_delay": 1.0
+        "inter_packet_delay": 0.5
     },
     "display": {
         "enabled": true,

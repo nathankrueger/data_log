@@ -20,7 +20,7 @@ Configuration is loaded from config/node_config.json:
         "spreading_factor": 7,
         "bandwidth": 0,
         "tx_power": 23,
-        "inter_packet_delay": 1.0
+        "inter_packet_delay": 0.5
     }
 }
 
@@ -502,7 +502,7 @@ def broadcast_loop(
     sensors: list[SensorEntry],
     node_state: NodeState | None = None,
     radio_lock: threading.Lock | None = None,
-    inter_packet_delay: float = 1.0,
+    inter_packet_delay: float = 0.5,
 ) -> None:
     """
     Main broadcast loop with per-sensor intervals.
@@ -850,7 +850,7 @@ def main():
         logger.info("Command receiver started")
 
         # Start broadcast loop
-        inter_packet_delay = lora_config.get("inter_packet_delay", 1.0)
+        inter_packet_delay = lora_config.get("inter_packet_delay", 0.5)
         broadcast_loop(
             radio, node_id, sensors, node_state, radio_lock,
             inter_packet_delay=inter_packet_delay,
