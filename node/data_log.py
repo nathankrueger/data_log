@@ -647,13 +647,22 @@ def main():
         help="Path to config file (default: config/node_config.json)",
     )
     parser.add_argument(
-        "--sensor-debug",
+        "--debug",
         action="store_true",
-        help="Log raw and transformed sensor values each read cycle",
+        help="Enable DEBUG level logging for all modules",
+    )
+    parser.add_argument(
+        "--verbose",
+        action="store_true",
+        help="Enable verbose output (sensor values, detailed diagnostics)",
     )
     args = parser.parse_args()
 
-    if args.sensor_debug:
+    if args.debug:
+        logging.getLogger().setLevel(logging.DEBUG)
+        logger.debug("Debug logging enabled")
+
+    if args.verbose:
         handler = logging.StreamHandler()
         handler.setFormatter(
             logging.Formatter(
@@ -663,7 +672,7 @@ def main():
         )
         sensor_logger.addHandler(handler)
         sensor_logger.setLevel(logging.DEBUG)
-        sensor_logger.debug("Sensor debug mode active")
+        sensor_logger.debug("Verbose mode active")
 
     # Load configuration
     try:
