@@ -11,10 +11,21 @@
     background: #1a1a2e; color: #e0e0e0; padding: 20px; max-width: 960px; margin: 0 auto;
   }
   h1 { color: #00d4ff; margin-bottom: 4px; font-size: 1.4em; }
-  h2 { color: #7ec8e3; margin: 24px 0 8px 0; font-size: 1.1em; }
   .header { display: flex; justify-content: space-between; align-items: baseline; margin-bottom: 16px; }
   .uptime { color: #888; font-size: 0.9em; }
-  table { width: 100%; border-collapse: collapse; margin-bottom: 12px; }
+  .node-id { color: #888; font-size: 1.0em; margin-left: 8px; }
+  details { margin-top: 16px; }
+  summary {
+    color: #7ec8e3; font-size: 1.1em; font-weight: bold; cursor: pointer;
+    padding: 4px 0; list-style: none; display: flex; align-items: center; gap: 6px;
+  }
+  summary::-webkit-details-marker { display: none; }
+  summary::before {
+    content: '\25B6'; font-size: 0.7em; transition: transform 0.2s;
+    display: inline-block;
+  }
+  details[open] > summary::before { transform: rotate(90deg); }
+  table { width: 100%; border-collapse: collapse; margin: 8px 0 12px 0; }
   th { background: #16213e; color: #7ec8e3; text-align: left; padding: 6px 10px; font-size: 0.85em; }
   td { padding: 5px 10px; border-bottom: 1px solid #2a2a4a; font-size: 0.85em; }
   tr:hover { background: #16213e; }
@@ -47,40 +58,44 @@
 <body>
 
 <div class="header">
-  <h1>Gateway Status</h1>
+  <h1>Gateway Status <span class="node-id" id="node-id"></span></h1>
   <span class="uptime" id="uptime">--</span>
 </div>
 
-<h2>Gateway Parameters</h2>
-<table>
-  <thead>
-    <tr>
-      <th>Parameter</th>
-      <th>Value</th>
-      <th>Range</th>
-      <th>Type</th>
-      <th>Action</th>
-    </tr>
-  </thead>
-  <tbody id="params-body"></tbody>
-</table>
-<div class="status" id="status"></div>
+<details open>
+  <summary>Gateway Parameters</summary>
+  <table>
+    <thead>
+      <tr>
+        <th>Parameter</th>
+        <th>Value</th>
+        <th>Range</th>
+        <th>Type</th>
+        <th>Action</th>
+      </tr>
+    </thead>
+    <tbody id="params-body"></tbody>
+  </table>
+  <div class="status" id="status"></div>
+</details>
 
-<h2>Sensor Feed</h2>
-<table>
-  <thead>
-    <tr>
-      <th>Time</th>
-      <th>Node</th>
-      <th>Sensor</th>
-      <th>Value</th>
-      <th>Source</th>
-    </tr>
-  </thead>
-  <tbody id="readings-body">
-    <tr><td colspan="5" class="readings-empty">Waiting for readings...</td></tr>
-  </tbody>
-</table>
+<details open>
+  <summary>Sensor Feed</summary>
+  <table>
+    <thead>
+      <tr>
+        <th>Time</th>
+        <th>Node</th>
+        <th>Sensor</th>
+        <th>Value</th>
+        <th>Source</th>
+      </tr>
+    </thead>
+    <tbody id="readings-body">
+      <tr><td colspan="5" class="readings-empty">Waiting for readings...</td></tr>
+    </tbody>
+  </table>
+</details>
 
 <script>
 const POLL_MS = 5000;
@@ -92,6 +107,9 @@ async function refreshParams() {
     const data = await resp.json();
     renderParams(data.params);
     renderUptime(data.uptime_seconds);
+    if (data.node_id) {
+      document.getElementById('node-id').textContent = '(' + data.node_id + ')';
+    }
   } catch (e) { /* network error, skip this cycle */ }
 }
 

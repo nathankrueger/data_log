@@ -365,12 +365,15 @@ class CommandHandler(BaseHTTPRequestHandler):
         gateway_state = getattr(self.server, "gateway_state", None)
         uptime = time.time() - gateway_state.start_time if gateway_state else 0
 
+        node_id = gateway_state.node_id if gateway_state else ""
+
         self.send_response(200)
         self.send_header("Content-Type", "application/json")
         self.end_headers()
         self.wfile.write(json.dumps({
             "params": registry.get_all_with_meta(),
             "uptime_seconds": uptime,
+            "node_id": node_id,
         }).encode("utf-8"))
 
     def _handle_discover(self, parsed) -> None:
