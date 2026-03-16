@@ -5,9 +5,9 @@ After=network.target
 [Service]
 Type=simple
 ExecStartPre=/bin/sleep 15
-ExecStart=/bin/bash /home/nkrueger/dev/data_log/scripts/launch_node_broadcast.sh
-User=nkrueger
-WorkingDirectory=/home/nkrueger/dev/data_log
+ExecStart=/bin/bash @REPO@/scripts/launch_node_broadcast.sh
+User=@USER@
+WorkingDirectory=@REPO@
 Restart=on-failure
 RestartSec=10
 

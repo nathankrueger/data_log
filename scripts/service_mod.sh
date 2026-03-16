@@ -83,18 +83,24 @@ list_services() {
 install_service() {
     local service_name="${1}.service"
     local service_file="$SERVICES_DIR/$service_name"
-    
+
     if [ ! -f "$service_file" ]; then
         echo "Error: Service file not found: $service_file"
         exit 1
     fi
-    
+
+    local repo_dir
+    repo_dir="$(cd "$SERVICES_DIR/.." && pwd)"
+
     echo "Installing service: $service_name"
-    
-    # Copy service file
-    sudo cp "$service_file" /etc/systemd/system/
+    echo "  User: $USER"
+    echo "  Repo: $repo_dir"
+
+    # Substitute template variables and install
+    sed -e "s|@USER@|$USER|g" -e "s|@REPO@|$repo_dir|g" \
+        "$service_file" | sudo tee /etc/systemd/system/"$service_name" > /dev/null
     if [ $? -ne 0 ]; then
-        echo "Error: Failed to copy service file"
+        echo "Error: Failed to install service file"
         exit 1
     fi
     
