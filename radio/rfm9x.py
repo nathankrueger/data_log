@@ -107,7 +107,14 @@ class RFM9xRadio(Radio):
         """Initialize the RFM9x radio hardware."""
         if self._backend == "ft232h":
             os.environ["BLINKA_FT232H"] = "1"
+        self._build_stack()
 
+    def _build_stack(self) -> None:
+        """Construct SPI bus, pins, and RFM9x driver, then apply RF params.
+
+        Shared between init() and reconnect() so the construction sequence
+        does not drift.
+        """
         import board
         import busio
         import digitalio
@@ -124,14 +131,52 @@ class RFM9xRadio(Radio):
             self._spi, self._cs, self._reset, self._frequency_mhz
         )
         self._rfm9x.tx_power = self._tx_power
-        
+
         # Match AB01 Arduino radio settings
         self._rfm9x.spreading_factor = self._spreading_factor
         self._rfm9x.signal_bandwidth = self._signal_bandwidth
         self._rfm9x.coding_rate = 5           # 4/5 (library uses denominator)
         self._rfm9x.preamble_length = 8       # 8 symbol preamble
         self._rfm9x.enable_crc = True         # Enable CRC (should be default, but explicit)
+        self._in_rx = False
         self._rx_stats_time = time.monotonic()
+
+    def reconnect(self) -> bool:
+        """Tear down and rebuild the radio stack in-place.
+
+        Used to recover from FT232H USB unplug/replug. Caller is responsible
+        for detecting that recovery is needed and pacing retries; this method
+        attempts a single rebuild and returns success/failure.
+        """
+        # Tear down existing stack. Any of these can throw if the underlying
+        # USB device is gone — that's fine, we just want references cleared.
+        try:
+            if self._spi is not None:
+                self._spi.deinit()
+        except Exception:
+            pass
+        self._rfm9x = None
+        self._spi = None
+        self._cs = None
+        self._reset = None
+
+        # On FT232H, pyftdi caches the USB device handle. After a replug the
+        # cached handle points at the old (now-defunct) libusb address; flush
+        # so the next busio.SPI(...) re-discovers the new enumeration.
+        if self._backend == "ft232h":
+            try:
+                from pyftdi.usbtools import UsbTools
+                UsbTools.release_all_devices()
+                UsbTools.flush_cache()
+            except Exception as e:
+                logger.debug("pyftdi cache flush failed (continuing): %s", e)
+
+        try:
+            self._build_stack()
+            return True
+        except Exception as e:
+            logger.debug("Radio reconnect attempt failed: %s", e)
+            return False
 
     def send(self, data: bytes) -> bool:
         """Send data over LoRa."""

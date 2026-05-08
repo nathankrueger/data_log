@@ -58,6 +58,9 @@ class LoRaTransceiver(threading.Thread):
         self._g2n_freq = g2n_freq  # Gateway to Node: commands
         self._discovery_request: DiscoveryRequest | None = None
         self._discovery_lock = threading.Lock()
+        self._radio_disconnected = False
+        self._disconnect_start: float = 0.0
+        self._next_reconnect_log: float = 0.0
 
     def request_discovery(self, request: DiscoveryRequest) -> bool:
         """Submit a discovery request. Returns False if one is already in progress."""
@@ -77,6 +80,24 @@ class LoRaTransceiver(threading.Thread):
         logger.info("LoRa transceiver started")
 
         while self._running:
+            # Recovery branch: stop normal RX/TX and try to rebuild the radio.
+            if self._radio_disconnected:
+                if self._radio.reconnect():
+                    elapsed = time.time() - self._disconnect_start
+                    logger.info("Radio reconnected after %.1fs", elapsed)
+                    self._radio_disconnected = False
+                else:
+                    now = time.time()
+                    if now >= self._next_reconnect_log:
+                        elapsed_min = (now - self._disconnect_start) / 60.0
+                        logger.info(
+                            "Still trying to reconnect to radio (%.1f min elapsed)",
+                            elapsed_min,
+                        )
+                        self._next_reconnect_log = now + 300.0
+                    time.sleep(3)
+                continue
+
             try:
                 # Apply any pending radio config changes (from HTTP handler)
                 # Must be done here to avoid SPI contention with receive()
@@ -114,8 +135,18 @@ class LoRaTransceiver(threading.Thread):
                 self._process_command_queue()
 
             except Exception as e:
-                logger.error(f"LoRa transceiver error: {e}")
-                time.sleep(1)  # Back off on error
+                # Any radio-touching exception is treated as a likely USB
+                # disconnect.  Subsequent calls may silently return junk
+                # (0xFF reads from a dead SPI), so we can't wait for a
+                # clean failure pattern — we have to trip immediately.
+                # Reconnect is cheap (~100ms) when the device is healthy.
+                logger.warning(
+                    "Radio error (%s). Entering recovery mode.", e
+                )
+                self._radio_disconnected = True
+                self._disconnect_start = time.time()
+                # Schedule first "still trying" log 5 min after disconnect.
+                self._next_reconnect_log = self._disconnect_start + 300.0
 
     def stop(self) -> None:
         self._running = False
