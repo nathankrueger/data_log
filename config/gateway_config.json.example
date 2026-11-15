@@ -2,7 +2,9 @@
     "node_id": "pz2w1-indoor-gateway",
     "dashboard_url": "http://192.168.1.100:5000",
     "local_sensors": [
-        {"class": "BME280TempPressureHumidity"}
+        {"class": "BME280TempPressureHumidity"},
+        {"class": "LoRaRSSI", "interval_sec": 0, "config": {"nodes": ["ab01-7", "ab01-8"]}},
+        {"class": "LoRaSNR", "interval_sec": 600, "config": {"nodes": ["ab01-7"]}}
     ],
     "local_sensor_interval_sec": 5,
     "lora": {

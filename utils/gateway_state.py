@@ -112,14 +112,22 @@ class GatewayState:
         """
         Update local sensor readings (thread-safe).
 
+        Merges by name: sensors on different intervals report separately, so
+        an update only replaces the readings it carries.
+
         Args:
             readings: List of (name, value, units) tuples
         """
         with self._lock:
-            self.local_sensors = [
-                LocalSensorReading(name=name, value=value, units=units)
-                for name, value, units in readings
-            ]
+            by_name = {r.name: r for r in self.local_sensors}
+            for name, value, units in readings:
+                existing = by_name.get(name)
+                if existing is None:
+                    existing = LocalSensorReading(name=name)
+                    self.local_sensors.append(existing)
+                    by_name[name] = existing
+                existing.value = value
+                existing.units = units
 
     def get_local_sensors(self) -> list[LocalSensorReading]:
         """Get a copy of local sensor readings (thread-safe)."""

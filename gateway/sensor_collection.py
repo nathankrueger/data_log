@@ -5,7 +5,8 @@ Classes:
     PendingPost: Data container for readings waiting to be posted
     DashboardClient: HTTP client for posting sensor data to dashboard
     SensorDataCollector: Collects readings from LoRa and local sources
-    LocalSensorReader: Background thread for reading local sensors
+    LocalSensorEntry: A configured local sensor and its publish schedule
+    LocalSensorReader: Background thread that publishes local sensors
 
 Functions:
     get_sensor_class: Get a Sensor class by name using reflection
@@ -24,7 +25,7 @@ from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
 import sensors as sensors_module
-from sensors import Sensor
+from sensors import EVERY_PACKET, LoRaLinkSensor, Sensor
 from utils.gateway_state import GatewayState
 from utils.protocol import SensorReading, make_sensor_id
 
@@ -271,77 +272,136 @@ class SensorDataCollector:
 # =============================================================================
 
 
+@dataclass
+class LocalSensorEntry:
+    """A configured gateway local sensor and its publish schedule."""
+
+    sensor: Sensor
+    class_name: str
+    interval_sec: float
+    next_due: float = 0.0  # 0 = due immediately at startup
+
+    @property
+    def is_link(self) -> bool:
+        """True for LoRa link metrics (fed by the transceiver, not polled)."""
+        return isinstance(self.sensor, LoRaLinkSensor)
+
+    @property
+    def every_packet(self) -> bool:
+        """True if every received packet is published (no rate limit)."""
+        return self.is_link and self.interval_sec == EVERY_PACKET
+
+
 class LocalSensorReader(threading.Thread):
-    """Background thread that reads local sensors and forwards to collector."""
+    """
+    Background thread that publishes gateway local sensors to the collector.
+
+    Each entry runs on its own ``interval_sec``:
+    - Hardware sensors are polled when due and posted under the gateway's
+      node ID.
+    - LoRa link sensors (LoRaRSSI/LoRaSNR) are drained when due -- publishing
+      each node's latest sample, or nothing if no packet arrived since the last
+      publish -- and posted under the node each sample describes.
+    - Link sensors with interval_sec == EVERY_PACKET (0) are drained as soon as
+      the transceiver records a packet (it sets our wake event), so every
+      packet is published.
+    """
 
     def __init__(
         self,
         node_id: str,
-        sensors: list[tuple[Sensor, str]],
+        entries: list[LocalSensorEntry],
         collector: SensorDataCollector,
-        interval_sec: float = 5.0,
         gateway_state: GatewayState | None = None,
     ):
-        super().__init__(daemon=True)
+        super().__init__(daemon=True, name="LocalSensorReader")
         self._node_id = node_id
-        self._sensors = sensors
+        self._entries = entries
         self._collector = collector
-        self._interval_sec = interval_sec
         self._running = False
         self._gateway_state = gateway_state
+        self._wake = threading.Event()
+        for entry in entries:
+            if entry.every_packet:
+                entry.sensor.set_wake_event(self._wake)
 
     def run(self) -> None:
         self._running = True
-        logger.info(
-            f"Local sensor reader started ({len(self._sensors)} sensors, "
-            f"{self._interval_sec}s interval)"
-        )
+        for entry in self._entries:
+            schedule = (
+                "every packet" if entry.every_packet
+                else f"every {entry.interval_sec}s"
+            )
+            nodes = (
+                f" nodes={sorted(entry.sensor.nodes)}" if entry.is_link else ""
+            )
+            logger.info(f"Local sensor {entry.class_name}: {schedule}{nodes}")
 
         while self._running:
-            try:
-                readings = self._read_sensors()
-                if readings:
-                    self._collector.add_readings(
-                        self._node_id, readings, is_local=True
-                    )
-                    # Update gateway state for display
-                    if self._gateway_state:
-                        self._gateway_state.update_local_sensors([
-                            (r.name, r.value, r.units) for r in readings
-                        ])
-            except Exception as e:
-                logger.error(f"Local sensor read error: {e}")
-
-            time.sleep(self._interval_sec)
+            # Clear before the pass: a packet recorded mid-pass sets the event
+            # again, so the wait below returns immediately instead of losing it.
+            self._wake.clear()
+            self._run_due(time.time())
+            self._wake.wait(self._time_until_next_due())
 
     def stop(self) -> None:
         self._running = False
+        self._wake.set()
 
-    def _read_sensors(self) -> list[SensorReading]:
-        """Read all local sensors and return readings."""
-        readings = []
-        timestamp = time.time()
+    def _run_due(self, now: float) -> None:
+        """Publish every entry that is due at ``now``."""
+        hw_readings: list[SensorReading] = []
 
-        for sensor, class_name in self._sensors:
+        for entry in self._entries:
             try:
-                values = sensor.transform(sensor.read())
-                names = sensor.get_names()
-                units = sensor.get_units()
-
-                for value, name, unit in zip(values, names, units):
-                    readings.append(
-                        SensorReading(
-                            name=name,
-                            units=unit,
-                            value=value,
-                            sensor_class=class_name,
-                            timestamp=timestamp,
-                        )
-                    )
+                if entry.every_packet:
+                    self._publish_link(entry)
+                    continue
+                if now < entry.next_due:
+                    continue
+                entry.next_due = now + entry.interval_sec
+                if entry.is_link:
+                    self._publish_link(entry)
+                else:
+                    hw_readings.extend(self._read_sensor(entry, now))
             except Exception as e:
-                logger.error(f"Error reading local {class_name}: {e}")
+                logger.error(f"Local sensor {entry.class_name} error: {e}")
 
-        return readings
+        if hw_readings:
+            self._collector.add_readings(self._node_id, hw_readings, is_local=True)
+            # Update gateway state for display
+            if self._gateway_state:
+                self._gateway_state.update_local_sensors([
+                    (r.name, r.value, r.units) for r in hw_readings
+                ])
+
+    def _publish_link(self, entry: LocalSensorEntry) -> None:
+        """Post a link sensor's pending samples, each under its own node."""
+        for node_id, readings in entry.sensor.drain(latest_only=not entry.every_packet):
+            self._collector.add_readings(node_id, readings, is_local=False)
+
+    def _time_until_next_due(self) -> float | None:
+        """Seconds until the next timed entry is due (None = only wake events)."""
+        timed = [e.next_due for e in self._entries if not e.every_packet]
+        if not timed:
+            return None
+        return max(0.0, min(timed) - time.time())
+
+    @staticmethod
+    def _read_sensor(entry: LocalSensorEntry, timestamp: float) -> list[SensorReading]:
+        """Poll one hardware sensor."""
+        sensor = entry.sensor
+        values = sensor.transform(sensor.read())
+        return [
+            SensorReading(
+                name=name,
+                units=unit,
+                value=value,
+                sensor_class=entry.class_name,
+                timestamp=timestamp,
+            )
+            for value, name, unit in zip(values, sensor.get_names(), sensor.get_units())
+        ]
 
 
 # =============================================================================
@@ -357,9 +417,16 @@ def get_sensor_class(class_name: str) -> type[Sensor] | None:
     return None
 
 
-def instantiate_sensors(sensor_configs: list[dict]) -> list[tuple[Sensor, str]]:
-    """Instantiate sensors from configuration."""
-    sensors = []
+def instantiate_sensors(
+    sensor_configs: list[dict], default_interval: float = 5.0
+) -> list[LocalSensorEntry]:
+    """Instantiate local sensors from configuration.
+
+    Each config dict has ``class``, optional ``config`` (constructor kwargs)
+    and optional ``interval_sec`` (defaults to ``default_interval``). An
+    interval of 0 (EVERY_PACKET) is only meaningful for LoRa link sensors.
+    """
+    entries = []
 
     for config in sensor_configs:
         class_name = config.get("class")
@@ -375,9 +442,26 @@ def instantiate_sensors(sensor_configs: list[dict]) -> list[tuple[Sensor, str]]:
             kwargs = config.get("config", {})
             sensor = sensor_class(**kwargs)
             sensor.init()
-            sensors.append((sensor, class_name))
-            logger.info(f"Initialized local sensor: {class_name}")
         except Exception as e:
             logger.error(f"Failed to initialize {class_name}: {e}")
+            continue
 
-    return sensors
+        interval = config.get("interval_sec", default_interval)
+        is_link = isinstance(sensor, LoRaLinkSensor)
+        valid = (
+            isinstance(interval, (int, float))
+            and not isinstance(interval, bool)
+            and (interval > 0 or (is_link and interval == EVERY_PACKET))
+        )
+        if not valid:
+            logger.warning(
+                f"{class_name}: invalid interval_sec {interval!r} "
+                f"(0 = every packet, LoRa link sensors only); "
+                f"using {default_interval}s"
+            )
+            interval = default_interval
+
+        entries.append(LocalSensorEntry(sensor, class_name, interval))
+        logger.info(f"Initialized local sensor: {class_name}")
+
+    return entries

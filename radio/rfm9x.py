@@ -277,6 +277,16 @@ class RFM9xRadio(Radio):
             return None
         return self._rfm9x.last_rssi
 
+    def get_last_snr(self) -> float | None:
+        """Get SNR of last received packet.
+
+        Like last_rssi, the library caches this during receive(), so reading
+        it never touches SPI (safe from any thread).
+        """
+        if self._rfm9x is None:
+            return None
+        return self._rfm9x.last_snr
+
     def close(self) -> None:
         """Clean up radio resources."""
         # The adafruit library doesn't have explicit cleanup,

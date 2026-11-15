@@ -9,6 +9,7 @@ from .base import Sensor, c_to_f, transform_value
 from .bme280_sensor import BME280TempPressureHumidity
 from .mma8452_sensor import MMA8452Accelerometer
 from .ads1115_sensor import ADS1115ADC
+from .lora_link import EVERY_PACKET, LoRaLinkSensor, LoRaRSSI, LoRaSNR
 
 __all__ = [
     "Sensor",
@@ -17,6 +18,10 @@ __all__ = [
     "BME280TempPressureHumidity",
     "MMA8452Accelerometer",
     "ADS1115ADC",
+    "EVERY_PACKET",
+    "LoRaLinkSensor",
+    "LoRaRSSI",
+    "LoRaSNR",
     "SENSOR_CLASS_IDS",
     "SENSOR_ID_CLASSES",
     "get_sensor_class_id",
@@ -29,6 +34,8 @@ __all__ = [
 # The HTCC AB01 firmware hardcodes these IDs, so changing
 # existing assignments will break cross-device compatibility.
 # When adding a new sensor, append it with the next available ID.
+# Gateway-only sensors that never travel over LoRa (LoRaRSSI, LoRaSNR) need
+# no ID.
 _SENSOR_ID_MAP: dict[str, int] = {
     "BME280TempPressureHumidity": 0,
     "MMA8452Accelerometer": 1,

@@ -14,6 +14,7 @@ from gateway.http_handler import CommandServer
 from gateway.params import GatewayParamRegistry
 from gateway.sensor_collection import (
     DashboardClient,
+    LocalSensorEntry,
     LocalSensorReader,
     PendingPost,
     SensorDataCollector,
@@ -29,6 +30,7 @@ __all__ = [
     "DashboardClient",
     "DiscoveryRequest",
     "GatewayParamRegistry",
+    "LocalSensorEntry",
     "LocalSensorReader",
     "LoRaTransceiver",
     "PendingCommand",

@@ -12,6 +12,7 @@ import time
 from gateway.command_queue import CommandQueue, DiscoveryRequest
 from gateway.sensor_collection import SensorDataCollector
 from radio import RFM9xRadio
+from sensors import LoRaLinkSensor
 from utils.gateway_state import GatewayState
 from utils.led import RgbLed
 from utils.protocol import build_command_packet, parse_ack_packet, parse_lora_packet
@@ -42,6 +43,7 @@ class LoRaTransceiver(threading.Thread):
         verbose_logging: bool = False,
         n2g_freq: float = 915.0,
         g2n_freq: float = 915.5,
+        link_sensors: list[LoRaLinkSensor] | None = None,
     ):
         super().__init__(daemon=True, name="LoRaTransceiver")
         self._radio = radio
@@ -56,6 +58,8 @@ class LoRaTransceiver(threading.Thread):
         self._verbose_logging = verbose_logging
         self._n2g_freq = n2g_freq  # Node to Gateway: sensors + ACKs
         self._g2n_freq = g2n_freq  # Gateway to Node: commands
+        # LoRaRSSI/LoRaSNR local sensors fed with every valid sensor packet
+        self._link_sensors = list(link_sensors or [])
         self._discovery_request: DiscoveryRequest | None = None
         self._discovery_lock = threading.Lock()
         self._radio_disconnected = False
@@ -296,6 +300,7 @@ class LoRaTransceiver(threading.Thread):
         """Validate CRC, parse JSON, forward to collector or handle ACK."""
         receive_time = time.time()
         rssi = self._radio.get_last_rssi()
+        snr = self._radio.get_last_snr()
 
         # First, check if it's an ACK packet
         ack = parse_ack_packet(packet)
@@ -344,8 +349,16 @@ class LoRaTransceiver(threading.Thread):
             if reading.timestamp == 0:
                 reading.timestamp = receive_time
         logger.info(
-            f"LoRa received from '{node_id}': {len(readings)} readings (RSSI: {rssi} dB)"
+            f"LoRa received from '{node_id}': {len(readings)} readings "
+            f"(RSSI: {rssi} dB, SNR: {snr} dB)"
         )
+
+        # Feed link-quality local sensors (they ignore nodes they don't log)
+        for link_sensor in self._link_sensors:
+            try:
+                link_sensor.record_packet(node_id, rssi, snr, receive_time)
+            except Exception as e:
+                logger.error(f"Link sensor {type(link_sensor).__name__} error: {e}")
 
         # Flash LED on successful receive
         if self._led and self._flash_enabled:

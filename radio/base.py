@@ -57,6 +57,17 @@ class Radio(ABC):
         """
         pass
 
+    def get_last_snr(self) -> float | None:
+        """
+        Get the SNR (signal-to-noise ratio) of the last received packet.
+
+        Not abstract: radios that can't measure SNR inherit this default.
+
+        Returns:
+            SNR in dB, or None if not available
+        """
+        return None
+
     @abstractmethod
     def close(self) -> None:
         """

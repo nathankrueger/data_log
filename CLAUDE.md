@@ -55,7 +55,7 @@ data_log/
 │   ├── command_registry.py    # Command handler registration
 │   └── config_persistence.py  # Atomic config file updates
 ├── radio/                      # Radio hardware abstraction
-├── sensors/                    # Sensor hardware abstraction
+├── sensors/                    # Sensor hardware abstraction (+ lora_link.py: gateway RSSI/SNR)
 ├── display/                    # OLED display base classes and hardware
 ├── scripts/                    # Shell scripts and tools
 │   ├── set_radio_params.sh    # Change SF/BW across all nodes + gateway
@@ -258,6 +258,34 @@ JSON config files in `config/`:
 - `gateway_config.json` - Dashboard URL, local sensors, LED, display settings
 
 See `.example` files for templates. Actual config files are gitignored.
+
+### Gateway local sensors and per-node RSSI/SNR logging
+
+Each `local_sensors` entry may set its own `interval_sec`; entries without one use `local_sensor_interval_sec`. `LocalSensorReader` (`gateway/sensor_collection.py`) schedules each entry independently. It sleeps on a `threading.Event` until the next timed entry is due or until a packet arrives for an every-packet entry.
+
+LoRa link quality is logged with two gateway-only "sensors" in `sensors/lora_link.py`, configured like any other local sensor:
+
+```json
+"local_sensors": [
+    {"class": "LoRaRSSI", "interval_sec": 0,   "config": {"nodes": ["ab01-7", "ab01-8"]}},
+    {"class": "LoRaSNR",  "interval_sec": 600, "config": {"nodes": ["ab01-7"]}}
+]
+```
+
+- **`nodes` is required and is the only way a node gets logged.** There is deliberately no "all nodes" mode. An entry without `nodes` fails to initialize and is skipped with an error. To give different nodes different rates, use several entries of the same class.
+- **`interval_sec: 0` (`EVERY_PACKET`)** logs every packet received from the node. This value is valid only for link sensors; hardware sensors fall back to the default interval with a warning.
+- **`interval_sec: N`** logs at most one value per node every N seconds: the most recently received one. Nothing is logged if no packet arrived since the last publish. The effective rate is therefore min(interval, packet rate), and asking for a faster rate than the node transmits never logs repeats.
+- Each value is timestamped with the packet's **receive time**, not the publish time.
+- Values are posted **under the node they describe**, not the gateway (`collector.add_readings(node_id, ..., is_local=False)`). They land on the dashboard as `ab01_7_lorarssi_rssi` / `ab01_7_lorasnr_snr` ("ab01-7 RSSI" in dBm, "ab01-7 SNR" in dB), category "Remote Sensors". The dashboard needs no changes because ingest registers new series automatically.
+- **Data flow:**
+  1. `LoRaTransceiver._process_received_packet()` reads `get_last_rssi()`/`get_last_snr()`.
+  2. For each valid sensor packet (ACKs and packets that fail the CRC are excluded), it calls `record_packet()` on each link sensor. Link sensors ignore nodes they don't list.
+  3. `LocalSensorReader` then calls `drain()`.
+- Both radio values are cached by `adafruit_rfm9x` during `receive()`, so reading them never touches SPI (see "SPI Contention" above).
+- `server.py` instantiates local sensors **before** LoRa init, so the transceiver can be handed the link sensors. The reader thread still starts afterwards.
+- Link sensors are fed by the transceiver, not polled: `read()` returns `()`. They need no `_SENSOR_ID_MAP` entry because they never travel over LoRa.
+- `sensors/lora_link.py` imports `utils.protocol` lazily, because the repo-root package `__init__` imports `sensors` before `utils` is importable.
+- Tests: `tests/test_lora_link.py`.
 
 Display config in `gateway_config.json`:
 ```json

@@ -10,9 +10,15 @@ Configuration is loaded from config/gateway_config.json:
     "node_id": "indoor-gateway",
     "dashboard_url": "http://192.168.1.100:5000",
     "local_sensors": [
-        {"class": "BME280TempPressureHumidity"}
+        {"class": "BME280TempPressureHumidity"},
+        {"class": "LoRaRSSI", "interval_sec": 0, "config": {"nodes": ["ab01-7"]}}
     ],
     "local_sensor_interval_sec": 5,
+
+Each local sensor may set its own "interval_sec" (default:
+local_sensor_interval_sec). LoRaRSSI/LoRaSNR log link quality for the listed
+nodes only; interval_sec 0 logs every packet, N logs at most the latest packet
+per N seconds (and nothing if none arrived).
     "lora": {
         "enabled": true,
         "frequency_mhz": 915.0,
@@ -162,6 +168,14 @@ def run_gateway(
     command_server.start()
     logger.info(f"Command server listening on port {port}")
 
+    # Instantiate local sensors before LoRa: the transceiver feeds the
+    # LoRaRSSI/LoRaSNR ones. The reader thread is started further down.
+    local_entries = instantiate_sensors(
+        config.get("local_sensors", []),
+        default_interval=config.get("local_sensor_interval_sec", 5.0),
+    )
+    link_sensors = [e.sensor for e in local_entries if e.is_link]
+
     # Initialize LoRa transceiver
     lora_transceiver = None
     radio = None
@@ -206,6 +220,7 @@ def run_gateway(
             verbose_logging=verbose_logging,
             n2g_freq=n2g_freq,
             g2n_freq=g2n_freq,
+            link_sensors=link_sensors,
         )
         lora_transceiver.set_flash_enabled(flash_on_recv_default)
         lora_transceiver.start()
@@ -227,18 +242,16 @@ def run_gateway(
         logger.error(f"Failed to initialize LoRa: {e}")
         logger.info("Continuing without LoRa transceiver")
 
+    if link_sensors and lora_transceiver is None:
+        logger.warning("LoRa link sensors configured but LoRa is unavailable")
+
     # Start local sensor reader if configured
     local_reader = None
-    local_sensor_configs = config.get("local_sensors", [])
-
-    if local_sensor_configs:
-        local_sensors = instantiate_sensors(local_sensor_configs)
-        if local_sensors:
-            interval = config.get("local_sensor_interval_sec", 5.0)
-            local_reader = LocalSensorReader(
-                node_id, local_sensors, collector, interval, gateway_state
-            )
-            local_reader.start()
+    if local_entries:
+        local_reader = LocalSensorReader(
+            node_id, local_entries, collector, gateway_state
+        )
+        local_reader.start()
 
     # Initialize OLED display if configured
     screen_manager = None
