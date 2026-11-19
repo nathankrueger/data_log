@@ -19,6 +19,19 @@ chmod +x install.sh
 source install.sh
 ```
 
+## Gateway Web UI
+
+The gateway serves a browser UI on its command port (default `http://<gateway>:5001/`). No internet connection or extra packages are needed:
+
+- **Live**: every node heard (signal, last heard, report interval, latest values), a scrollable sensor feed whose length you set from the page, and the gateway's radio and command parameters.
+- **Logger** (`/logger`): opt-in history recorded on the gateway itself. Build charts from series that share units and choose how long each chart keeps data. Then switch recording on; the gateway logs in the background whether or not a browser is open. Charts stay fast over weeks of data because they read pre-computed 1 min / 5 min / 30 min / 3 h rollups. Each chart can be exported as CSV, and so can everything at once.
+
+With recording off, the logger loads nothing and costs nothing. To preview the UI with synthetic nodes and no hardware:
+
+```bash
+python scripts/web_demo.py --backfill-hours 72   # then open http://localhost:5002/
+```
+
 ## Configuration
 
 Copy example configs and edit for your setup:

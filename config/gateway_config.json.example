@@ -25,6 +25,14 @@
         "i2c_address": 60,
         "refresh_interval": 0.5
     },
+    "web": {
+        "feed_size": 200
+    },
+    "logger": {
+        "data_dir": "data/logger",
+        "flush_interval_s": 30,
+        "prune_interval_s": 300
+    },
     "command_server": {
         "port": 5001,
         "max_queue_size": 128,

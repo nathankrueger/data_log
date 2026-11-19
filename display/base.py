@@ -5,6 +5,7 @@ Provides a modular system for displaying information on OLED displays.
 Includes an abstract Display class for hardware abstraction.
 """
 
+import logging
 import socket
 import threading
 import time
@@ -159,28 +160,44 @@ class ScreenManager:
         self._lock = threading.Lock()
         self._last_autoscroll_time: float = 0.0
 
+    # Button handlers run on GPIO callback threads: an exception escaping
+    # them can kill the callback thread and leave the buttons dead until the
+    # next restart, so they log instead of raising.
+
     def advance_page(self) -> None:
         """Advance to the next page, wrapping to first. Resets scroll offset."""
-        with self._lock:
-            self._current_page_idx = (self._current_page_idx + 1) % len(self._pages)
-            self._line_offset = 0
-            self._last_autoscroll_time = time.time()
-        self._refresh()
+        try:
+            with self._lock:
+                self._current_page_idx = (self._current_page_idx + 1) % len(self._pages)
+                self._line_offset = 0
+                self._last_autoscroll_time = time.time()
+            self._refresh()
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Display page advance failed: {e}")
 
     def set_page(self, index: int) -> None:
         """Set the current page by index (thread-safe). Resets scroll offset."""
-        with self._lock:
-            if 0 <= index < len(self._pages):
-                self._current_page_idx = index
-                self._line_offset = 0
-                self._last_autoscroll_time = time.time()
-        self._refresh()
+        try:
+            with self._lock:
+                if 0 <= index < len(self._pages):
+                    self._current_page_idx = index
+                    self._line_offset = 0
+                    self._last_autoscroll_time = time.time()
+            self._refresh()
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Display page change failed: {e}")
 
     def scroll_page(self, delta: int = 1) -> None:
         """Scroll the visible window by delta lines (positive = down).
 
         Wraps to top when reaching the bottom.
         """
+        try:
+            self._scroll_page(delta)
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Display scroll failed: {e}")
+
+    def _scroll_page(self, delta: int) -> None:
         with self._lock:
             page = self._pages[self._current_page_idx]
             lines = page.get_lines()
@@ -201,9 +218,12 @@ class ScreenManager:
 
     def do_page_action(self) -> None:
         """Execute the current page's action (context-sensitive button behavior)."""
-        with self._lock:
-            page = self._pages[self._current_page_idx]
-        page.do_action()
+        try:
+            with self._lock:
+                page = self._pages[self._current_page_idx]
+            page.do_action()
+        except Exception as e:
+            logging.getLogger(__name__).error(f"Display page action failed: {e}")
 
     def _check_autoscroll(self) -> None:
         """Auto-advance line offset if current page has autoscroll enabled."""

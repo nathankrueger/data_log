@@ -268,9 +268,19 @@ def parse_lora_packet(data: bytes) -> tuple[str, list[SensorReading]] | None:
     try:
         node_id = message["n"]
         timestamp = message["t"]
+        # A valid CRC proves integrity, not intent: reject wrong types here so
+        # downstream code (ids, dict keys, formatting) can rely on them.
+        if not isinstance(node_id, str) or not node_id:
+            return None
+        if isinstance(timestamp, bool) or not isinstance(timestamp, (int, float)):
+            return None
+        if not isinstance(message["r"], list):
+            return None
 
         readings = []
         for r in message["r"]:
+            if not isinstance(r["k"], str) or not isinstance(r["u"], str):
+                return None
             sensor_class = get_sensor_class_name(r["s"])
             if sensor_class is None:
                 sensor_class = f"unknown_{r['s']}"
@@ -444,8 +454,10 @@ def parse_ack_packet(data: bytes) -> AckPacket | None:
     try:
         message = json.loads(data.decode("utf-8"))
     except (json.JSONDecodeError, UnicodeDecodeError) as e:
-        logger = logging.getLogger(__name__)
-        logger.warning("ACK_JSON_FAIL len=%d error=%s data=%r", len(data), e, data[:100])
+        # Debug only: every non-JSON packet lands here first, and a wedged
+        # radio can produce hundreds per second (the transceiver logs a
+        # rate-limited warning for unreadable packets).
+        cmd_logger.debug("ACK_JSON_FAIL len=%d error=%s data=%r", len(data), e, data[:100])
         return None
 
     if not isinstance(message, dict):
@@ -472,10 +484,15 @@ def parse_ack_packet(data: bytes) -> AckPacket | None:
         return None
 
     try:
+        command_id, node_id, payload = message["id"], message["n"], message.get("p")
+        if not isinstance(command_id, str) or not isinstance(node_id, str):
+            return None
+        if payload is not None and not isinstance(payload, dict):
+            return None
         return AckPacket(
-            command_id=message["id"],
-            node_id=message["n"],
-            payload=message.get("p"),  # Optional response payload
+            command_id=command_id,
+            node_id=node_id,
+            payload=payload,  # Optional response payload
         )
     except (KeyError, TypeError, ValueError) as e:
         cmd_logger.debug("ACK_FIELD_ERR error=%s message=%s", e, message)

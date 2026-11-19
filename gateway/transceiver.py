@@ -20,6 +20,22 @@ from utils.protocol import build_command_packet, parse_ack_packet, parse_lora_pa
 logger = logging.getLogger(__name__)
 cmd_logger = logging.getLogger("cmd_debug")
 
+# --- Radio health ------------------------------------------------------------
+# The SX1276 can wedge (rx_done stuck high, FIFO returning stale bytes, or a
+# brownout dropping it back to FSK defaults). Nodes already self-heal; the
+# gateway is the one receiver every node depends on, so it must too.
+
+# receive() returning None this fast means rx_done fired but the packet was
+# dropped (CRC error). Occasional = weak signal; back-to-back = stuck receiver.
+INSTANT_RX_S = 0.005
+BAD_RX_RESET_COUNT = 10  # unreadable packets in a row -> hard reset (node uses 10)
+BAD_TX_RESET_COUNT = 3  # failed transmissions in a row -> hard reset
+SILENCE_RESET_S = 900.0  # no valid packet for this long -> hard reset ...
+SILENCE_RESET_MAX_S = 4 * 3600.0  # ... backing off while it stays quiet
+RECONNECT_INTERVAL_S = 3.0  # recovery mode: pause between rebuild attempts
+RECONNECT_LOG_INTERVAL_S = 300.0  # recovery mode: "still trying" log cadence
+INVALID_LOG_INTERVAL_S = 10.0
+
 
 class LoRaTransceiver(threading.Thread):
     """
@@ -66,6 +82,20 @@ class LoRaTransceiver(threading.Thread):
         self._disconnect_start: float = 0.0
         self._next_reconnect_log: float = 0.0
 
+        # Health (read by the gateway's main-loop watchdog)
+        # Refreshed every loop iteration, including while reconnecting: an
+        # unplugged adapter is handled in process, not by a restart.
+        self.heartbeat = time.monotonic()
+        self.resets = 0
+        self.reconnects = 0
+        self.silence_reset_s = SILENCE_RESET_S  # 0 disables silence resets
+        self._bad_rx = 0
+        self._bad_tx = 0
+        self._last_valid = time.monotonic()
+        self._silence_window = SILENCE_RESET_S
+        self._invalid_suppressed = 0
+        self._invalid_log_next = 0.0
+
     def request_discovery(self, request: DiscoveryRequest) -> bool:
         """Submit a discovery request. Returns False if one is already in progress."""
         with self._discovery_lock:
@@ -81,25 +111,15 @@ class LoRaTransceiver(threading.Thread):
 
     def run(self) -> None:
         self._running = True
+        self._last_valid = time.monotonic()
+        self._silence_window = self.silence_reset_s
         logger.info("LoRa transceiver started")
 
         while self._running:
+            self.heartbeat = time.monotonic()
             # Recovery branch: stop normal RX/TX and try to rebuild the radio.
             if self._radio_disconnected:
-                if self._radio.reconnect():
-                    elapsed = time.time() - self._disconnect_start
-                    logger.info("Radio reconnected after %.1fs", elapsed)
-                    self._radio_disconnected = False
-                else:
-                    now = time.time()
-                    if now >= self._next_reconnect_log:
-                        elapsed_min = (now - self._disconnect_start) / 60.0
-                        logger.info(
-                            "Still trying to reconnect to radio (%.1f min elapsed)",
-                            elapsed_min,
-                        )
-                        self._next_reconnect_log = now + 300.0
-                    time.sleep(3)
+                self._try_reconnect()
                 continue
 
             try:
@@ -126,17 +146,21 @@ class LoRaTransceiver(threading.Thread):
                     continue
 
                 # Receive with short timeout to allow command transmission
-                rx_start = time.time()
+                rx_start = time.monotonic()
                 packet = self._radio.receive(timeout=0.1)
-                rx_ms = (time.time() - rx_start) * 1000
+                rx_s = time.monotonic() - rx_start
                 if packet is not None:
                     cmd_logger.debug(
-                        "RX_PACKET len=%d after=%.0fms", len(packet), rx_ms
+                        "RX_PACKET len=%d after=%.0fms", len(packet), rx_s * 1000
                     )
-                    self._process_received_packet(packet)
+                    valid = self._process_received_packet(packet)
+                else:
+                    valid = False if rx_s < INSTANT_RX_S else None
+                self._note_rx(valid)
 
                 # Check for pending commands to transmit
                 self._process_command_queue()
+                self._command_queue.maybe_cleanup()
 
             except Exception as e:
                 # Any radio-touching exception is treated as a likely USB
@@ -148,12 +172,90 @@ class LoRaTransceiver(threading.Thread):
                     "Radio error (%s). Entering recovery mode.", e
                 )
                 self._radio_disconnected = True
-                self._disconnect_start = time.time()
+                self._disconnect_start = time.monotonic()
                 # Schedule first "still trying" log 5 min after disconnect.
-                self._next_reconnect_log = self._disconnect_start + 300.0
+                self._next_reconnect_log = self._disconnect_start + RECONNECT_LOG_INTERVAL_S
 
-    def stop(self) -> None:
+    def stop(self, timeout: float = 3.0) -> None:
         self._running = False
+        if self.is_alive() and threading.current_thread() is not self:
+            self.join(timeout)
+
+    # -------------------------------------------------------------------------
+    # Radio health
+    # -------------------------------------------------------------------------
+
+    def _try_reconnect(self) -> None:
+        """One recovery-mode attempt to rebuild the radio stack."""
+        try:
+            ok = self._radio.reconnect()
+            if ok:
+                # The cached frequency may be G2N if the radio died mid-command
+                # (the switch back failed), and reconnect() restores the cache.
+                self._radio.set_frequency(self._n2g_freq)
+        except Exception as e:  # reconnect() shouldn't raise; this thread must not die
+            logger.debug("Radio reconnect attempt raised: %s", e)
+            ok = False
+
+        now = time.monotonic()
+        if ok:
+            logger.info("Radio reconnected after %.1fs", now - self._disconnect_start)
+            self._radio_disconnected = False
+            self.reconnects += 1
+            # Fresh radio: restart the receive-health bookkeeping
+            self._bad_rx = 0
+            self._bad_tx = 0
+            self._last_valid = now
+            self._silence_window = self.silence_reset_s
+            return
+
+        if now >= self._next_reconnect_log:
+            logger.info(
+                "Still trying to reconnect to radio (%.1f min elapsed)",
+                (now - self._disconnect_start) / 60.0,
+            )
+            self._next_reconnect_log = now + RECONNECT_LOG_INTERVAL_S
+        time.sleep(RECONNECT_INTERVAL_S)
+
+    def _note_rx(self, valid: bool | None) -> None:
+        """Track receive health. valid: True = good packet, False = unreadable
+        (garbage, or dropped on CRC), None = nothing heard (normal timeout)."""
+        now = time.monotonic()
+        if valid:
+            self._bad_rx = 0
+            self._last_valid = now
+            self._silence_window = self.silence_reset_s
+        elif valid is False:
+            self._bad_rx += 1
+            if self._bad_rx >= BAD_RX_RESET_COUNT:
+                self._reset_radio(f"{self._bad_rx} unreadable packets in a row")
+                self._bad_rx = 0
+        if self.silence_reset_s and now - self._last_valid >= self._silence_window:
+            # Nodes report every few minutes at most; a long silence usually
+            # means the receiver is wedged. If it's genuinely quiet, back off.
+            self._reset_radio(f"no valid packet for {self._silence_window / 60:.0f} min")
+            self._last_valid = now
+            self._silence_window = min(self._silence_window * 2, SILENCE_RESET_MAX_S)
+
+    def _reset_radio(self, reason: str) -> None:
+        logger.warning(f"Resetting LoRa radio: {reason}")
+        try:
+            self._radio.hard_reset()
+            self.resets += 1
+        except Exception as e:
+            logger.error(f"LoRa radio reset failed: {e}")
+
+    def _log_invalid(self, message: str) -> None:
+        """Rate-limited warning: a wedged radio can produce garbage hundreds
+        of times a second, which would bury useful logs and wear the SD card."""
+        self._invalid_suppressed += 1
+        now = time.monotonic()
+        if now >= self._invalid_log_next:
+            extra = self._invalid_suppressed - 1
+            suffix = f" (+{extra} more in the last {INVALID_LOG_INTERVAL_S:.0f}s)" if extra else ""
+            logger.warning(message + suffix)
+            self._invalid_suppressed = 0
+            self._invalid_log_next = now + INVALID_LOG_INTERVAL_S
 
     def _process_command_queue(self) -> None:
         """Send pending commands with retry logic."""
@@ -175,11 +277,11 @@ class LoRaTransceiver(threading.Thread):
         if pending:
             try:
                 # Switch to G2N channel for command transmission
-                tx_start = time.time()
+                tx_start = time.monotonic()
                 cmd_logger.debug("FREQ to=G2N freq=%.1fMHz", self._g2n_freq)
                 self._radio.set_frequency(self._g2n_freq)
                 success = self._radio.send(pending.packet)
-                tx_ms = (time.time() - tx_start) * 1000
+                tx_ms = (time.monotonic() - tx_start) * 1000
                 # Switch back to N2G to receive ACK
                 self._radio.set_frequency(self._n2g_freq)
                 cmd_logger.debug(
@@ -189,6 +291,7 @@ class LoRaTransceiver(threading.Thread):
 
                 target = pending.node_id or "broadcast"
                 if success:
+                    self._bad_tx = 0
                     logger.debug(
                         f"Sent '{pending.cmd}' to {target} on G2N "
                         f"(attempt {pending.retry_count + 1})"
@@ -200,10 +303,14 @@ class LoRaTransceiver(threading.Thread):
                     )
                 else:
                     logger.warning(f"Radio send failed for '{pending.cmd}' to {target}")
+                    self._bad_tx += 1
+                    if self._bad_tx >= BAD_TX_RESET_COUNT:
+                        self._reset_radio(f"{self._bad_tx} failed transmissions in a row")
+                        self._bad_tx = 0
                 self._command_queue.mark_sent()
                 cmd_logger.debug(
                     "CMD_MARK_SENT next_retry_in=%.0fms",
-                    (pending.next_retry_time - time.time()) * 1000,
+                    (pending.next_retry_time - time.monotonic()) * 1000,
                 )
             except Exception as e:
                 logger.error(f"Error sending command: {e}")
@@ -244,9 +351,10 @@ class LoRaTransceiver(threading.Thread):
                 )
 
                 # Listen for ACKs during the backoff window
-                listen_deadline = time.time() + (delay_ms / 1000.0)
-                while time.time() < listen_deadline:
-                    remaining = listen_deadline - time.time()
+                listen_deadline = time.monotonic() + (delay_ms / 1000.0)
+                while time.monotonic() < listen_deadline:
+                    self.heartbeat = time.monotonic()
+                    remaining = listen_deadline - time.monotonic()
                     timeout = min(0.1, max(0.01, remaining))
                     raw = self._radio.receive(timeout=timeout)
 
@@ -296,8 +404,11 @@ class LoRaTransceiver(threading.Thread):
         finally:
             request.done.set()
 
-    def _process_received_packet(self, packet: bytes) -> None:
-        """Validate CRC, parse JSON, forward to collector or handle ACK."""
+    def _process_received_packet(self, packet: bytes) -> bool:
+        """Validate CRC, parse JSON, forward to collector or handle ACK.
+
+        Returns True for a valid packet (ACK or sensor data), False otherwise.
+        """
         receive_time = time.time()
         rssi = self._radio.get_last_rssi()
         snr = self._radio.get_last_snr()
@@ -310,7 +421,7 @@ class LoRaTransceiver(threading.Thread):
             )
             if retired:
                 rtt_ms = (
-                    (time.time() - retired.first_sent_time) * 1000
+                    (time.monotonic() - retired.first_sent_time) * 1000
                     if retired.first_sent_time
                     else 0
                 )
@@ -330,17 +441,17 @@ class LoRaTransceiver(threading.Thread):
                     "ACK_STALE id=%s node=%s rssi=%s current_cmd=%s",
                     ack.command_id, ack.node_id, rssi, current_id,
                 )
-            return
+            return True
 
         # Otherwise, process as sensor data
         result = parse_lora_packet(packet)
         if result is None:
             # Log hex dump for debugging packet issues
             hex_bytes = ' '.join(f'{b:02x}' for b in packet[:80])
-            logger.warning(
+            self._log_invalid(
                 f"Invalid LoRa packet (RSSI: {rssi} dB, len={len(packet)}): {hex_bytes}"
             )
-            return
+            return False
 
         node_id, readings = result
 
@@ -375,4 +486,5 @@ class LoRaTransceiver(threading.Thread):
                 sensor_units=r.units,
             )
 
-        self._collector.add_readings(node_id, readings, is_local=False)
+        self._collector.add_readings(node_id, readings, is_local=False, rssi=rssi)
+        return True

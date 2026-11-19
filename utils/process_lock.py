@@ -14,17 +14,34 @@ import sys
 
 _lock_fd = None
 
+# Distinct exit code so supervisors (scripts/launch_gateway_server.sh) don't
+# restart-loop against an instance that is already running.
+EXIT_ALREADY_RUNNING = 3
+
+
+def lock_path_for(name: str) -> str:
+    """
+    Lock file location: ~/.cache/data_log/{name}.lock.
+
+    Not /tmp: periodic temp cleaners (macOS daily, systemd-tmpfiles) can
+    delete a long-held lock file, after which a second instance would start
+    and both would fight over the radio. Keep in sync with scripts/launch_*.sh.
+    """
+    lock_dir = os.path.join(os.path.expanduser("~"), ".cache", "data_log")
+    os.makedirs(lock_dir, exist_ok=True)
+    return os.path.join(lock_dir, f"{name}.lock")
+
 
 def acquire_lock(name: str) -> None:
     """Acquire an exclusive process lock, or exit if another instance is running.
 
     Args:
         name: Identifier for the lock (e.g. "node", "gateway").
-              Lock file will be /tmp/data_log_{name}.lock
+              Lock file will be ~/.cache/data_log/{name}.lock
     """
     global _lock_fd
 
-    lock_path = f"/tmp/data_log_{name}.lock"
+    lock_path = lock_path_for(name)
 
     # Open without truncating so kill_existing() can still read the PID
     # of the lock holder.  Fall back to "w+" if the file doesn't exist yet.
@@ -43,7 +60,7 @@ def acquire_lock(name: str) -> None:
             f"Another instance of {name} is already running{pid_info}. Exiting.",
             file=sys.stderr,
         )
-        sys.exit(1)
+        sys.exit(EXIT_ALREADY_RUNNING)
 
     # Write our PID so launch scripts can find us
     _lock_fd.seek(0)

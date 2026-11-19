@@ -5,12 +5,14 @@ This package contains:
 - command_queue: Command queue with ACK-based reliability
 - sensor_collection: Sensor data collection and dashboard posting
 - transceiver: LoRa transceiver thread
-- http_handler: HTTP server for command endpoints and gateway params
+- web: HTTP server - command API, gateway params, browser UI (gateway/web/)
+- timeseries: opt-in on-gateway history logger (SQLite rollups, CSV export)
 - server: Main gateway orchestration and entry point
 """
 
 from gateway.command_queue import CommandQueue, DiscoveryRequest, PendingCommand
 from gateway.http_handler import CommandServer
+from gateway.web import WebServer
 from gateway.params import GatewayParamRegistry
 from gateway.sensor_collection import (
     DashboardClient,
@@ -41,4 +43,5 @@ __all__ = [
     "load_config",
     "main",
     "run_gateway",
+    "WebServer",
 ]

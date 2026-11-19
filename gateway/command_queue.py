@@ -5,6 +5,10 @@ Classes:
     PendingCommand: Data container for a command awaiting ACK
     DiscoveryRequest: Coordination object for node discovery
     CommandQueue: Serial command queue with retry logic
+
+All timers use time.monotonic(): the gateway has no RTC, so the wall clock can
+step by hours when NTP syncs after boot. A wall-clock step must never make
+waiters time out early, or stall the retry schedule for the size of the step.
 """
 
 import logging
@@ -28,10 +32,10 @@ class PendingCommand:
     args: list[str]
     node_id: str
     packet: bytes
-    next_retry_time: float
+    next_retry_time: float  # time.monotonic() deadline
     retry_count: int = 0
     max_retries: int = 10
-    first_sent_time: float = 0.0
+    first_sent_time: float = 0.0  # time.monotonic()
 
     # Multi-ACK tracking (used when expected_acks > 1)
     expected_acks: int = 1
@@ -96,10 +100,15 @@ class CommandQueue:
         self._retry_multiplier = retry_multiplier
         self._discovery_retries = discovery_retries
         self._wait_timeout = wait_timeout
+        # Responses nobody may ever collect (fire-and-forget POST /command,
+        # no_wait commands, ACKs that land after a waiter gave up) are swept
+        # after _response_ttl by cleanup_old_responses() and hard-capped, so
+        # they can't accumulate over months of uptime.
         self._completed_responses: dict[str, tuple[float, dict]] = {}
         self._response_ttl = 60.0  # seconds to keep completed responses
         # Preserve partial ACK info when commands expire (for HTTP 504 response)
         self._expired_partials: dict[str, tuple[float, dict]] = {}
+        self._next_cleanup = 0.0
 
     # ─── Runtime Parameter Properties ───────────────────────────────────────
 
@@ -179,10 +188,12 @@ class CommandQueue:
         """
         Calculate max time (seconds) to exhaust all retries.
 
-        This is the sum of all inter-retry delays, not including transmission time.
+        This is the sum of the delay after every attempt (the last attempt also
+        gets its full ACK window before the command expires), not including
+        transmission time.
         """
         total_ms = 0.0
-        for i in range(1, self._max_retries):  # delays between attempts
+        for i in range(1, self._max_retries + 1):  # delay after each attempt
             delay = max(
                 self._min_retry_ms,
                 min(
@@ -260,8 +271,13 @@ class CommandQueue:
                 self._current = self._queue.popleft()
                 self._current.next_retry_time = 0  # Send immediately
 
-            # Check if current command is ready to send (retry timer elapsed)
-            if self._current and time.time() >= self._current.next_retry_time:
+            # Check if current command is ready to send (retry timer elapsed).
+            # Retries are exhausted -> wait for check_expired(), don't resend.
+            if (
+                self._current
+                and self._current.retry_count < self._current.max_retries
+                and time.monotonic() >= self._current.next_retry_time
+            ):
                 return self._current
         return None
 
@@ -271,7 +287,7 @@ class CommandQueue:
             if self._current:
                 self._current.retry_count += 1
                 if self._current.retry_count == 1:
-                    self._current.first_sent_time = time.time()
+                    self._current.first_sent_time = time.monotonic()
                 # Exponential backoff with configurable multiplier, capped and floored
                 delay_ms = max(
                     self._min_retry_ms,
@@ -281,7 +297,7 @@ class CommandQueue:
                         self._max_retry_ms,
                     ),
                 )
-                self._current.next_retry_time = time.time() + (delay_ms / 1000)
+                self._current.next_retry_time = time.monotonic() + (delay_ms / 1000)
                 cmd_logger.debug(
                     "CMD_RETRY cmd=%s attempt=%d next_in=%dms",
                     self._current.cmd, self._current.retry_count, int(delay_ms),
@@ -345,19 +361,13 @@ class CommandQueue:
                     # Store response for retrieval
                     if expected > 1:
                         # Multi-ACK: store all node responses
-                        self._completed_responses[command_id] = (
-                            time.time(),
-                            {
-                                "acked_nodes": list(retired.acked_nodes),
-                                "responses": retired.node_payloads,
-                            },
-                        )
+                        self._store_response(command_id, {
+                            "acked_nodes": list(retired.acked_nodes),
+                            "responses": retired.node_payloads,
+                        })
                     else:
                         # Single ACK: store payload directly (backwards compatible)
-                        self._completed_responses[command_id] = (
-                            time.time(),
-                            payload if payload is not None else {},
-                        )
+                        self._store_response(command_id, payload if payload is not None else {})
                     self._current = None
                     return retired
                 else:
@@ -369,9 +379,23 @@ class CommandQueue:
                     return None
         return None
 
+    _MAX_STORED_RESPONSES = 512
+
+    def _store_response(self, command_id: str, payload: dict) -> None:
+        """Keep a response for a waiter (caller holds the lock). Bounded."""
+        if len(self._completed_responses) >= self._MAX_STORED_RESPONSES:
+            oldest = min(self._completed_responses, key=lambda k: self._completed_responses[k][0])
+            del self._completed_responses[oldest]
+        self._completed_responses[command_id] = (time.monotonic(), payload)
+
     def check_expired(self) -> PendingCommand | None:
         """
         Check if the current command has exceeded max retries.
+
+        A command expires only after its final attempt's retry window has
+        also elapsed, so an ACK to the last transmission can still arrive
+        (a round trip takes ~600-800 ms; expiring right after the last send
+        turned max_retries=1 into a guaranteed timeout).
 
         For multi-ACK broadcast commands, preserves partial ACK info in
         _expired_partials so HTTP handlers can report which nodes responded.
@@ -380,12 +404,19 @@ class CommandQueue:
             The expired PendingCommand if one expired, None otherwise
         """
         with self._lock:
-            if self._current and self._current.retry_count >= self._current.max_retries:
+            if (
+                self._current
+                and self._current.retry_count >= self._current.max_retries
+                and time.monotonic() >= self._current.next_retry_time
+            ):
                 expired = self._current
                 # Preserve partial ACK info for multi-ACK commands
                 if expired.expected_acks > 1:
+                    if len(self._expired_partials) >= self._MAX_STORED_RESPONSES:
+                        oldest = min(self._expired_partials, key=lambda k: self._expired_partials[k][0])
+                        del self._expired_partials[oldest]
                     self._expired_partials[expired.command_id] = (
-                        time.time(),
+                        time.monotonic(),
                         {
                             "acked_nodes": list(expired.acked_nodes),
                             "responses": dict(expired.node_payloads),
@@ -492,9 +523,10 @@ class CommandQueue:
             Response payload dict, or None if timeout/no payload
         """
         logger.info(f"Waiting for response to {command_id} (timeout={timeout}s)")
-        deadline = time.time() + timeout
+        start = time.monotonic()
+        deadline = start + timeout
         poll_count = 0
-        while time.time() < deadline:
+        while time.monotonic() < deadline:
             with self._lock:
                 # Check if response is available
                 if command_id in self._completed_responses:
@@ -508,7 +540,7 @@ class CommandQueue:
                     # Command completed but no response stored
                     logger.info(
                         f"Command {command_id} completed without response "
-                        f"after {poll_count} polls ({time.time() - (deadline - timeout):.1f}s)"
+                        f"after {poll_count} polls ({time.monotonic() - start:.1f}s)"
                     )
                     return None
             poll_count += 1
@@ -516,9 +548,16 @@ class CommandQueue:
         logger.warning(f"Timeout waiting for {command_id} after {poll_count} polls")
         return None
 
+    def maybe_cleanup(self, interval: float = 10.0) -> None:
+        """Sweep stale responses at most every `interval` s (transceiver loop)."""
+        now = time.monotonic()
+        if now >= self._next_cleanup:
+            self._next_cleanup = now + interval
+            self.cleanup_old_responses()
+
     def cleanup_old_responses(self) -> None:
         """Remove expired response payloads and expired partials."""
-        now = time.time()
+        now = time.monotonic()
         with self._lock:
             # Clean up completed responses
             expired = [

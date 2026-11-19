@@ -16,6 +16,13 @@ from display.base import ScreenPage, _format_duration, _get_ip_address
 from utils.gateway_state import GatewayState
 
 
+def _fmt_value(value) -> str:
+    """One decimal for numbers; anything else (None, strings) as text."""
+    if isinstance(value, (int, float)) and not isinstance(value, bool):
+        return f"{value:.1f}"
+    return str(value)
+
+
 class SystemInfoPage(ScreenPage):
     """
     System information page.
@@ -90,7 +97,7 @@ class LastPacketPage(ScreenPage):
         name = last_pkt.sensor_name[:16]
         node = last_pkt.node_id[:16]
         rssi = last_pkt.rssi
-        value_str = f"{last_pkt.sensor_value:.1f} {last_pkt.sensor_units}"
+        value_str = f"{_fmt_value(last_pkt.sensor_value)} {last_pkt.sensor_units}"
 
         return [
             f"Last Packet [RSSI: {rssi}]",
@@ -124,7 +131,7 @@ class GatewayLocalSensors(ScreenPage):
                 s = sensors[i]
                 # Truncate name to fit, leave room for value
                 name = s.name[:8]
-                lines.append(f"{name}: {s.value:.1f} {s.units}")
+                lines.append(f"{name}: {_fmt_value(s.value)} {s.units}")
             else:
                 lines.append("---")
 

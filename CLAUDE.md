@@ -45,9 +45,23 @@ data_log/
 │   ├── server.py              # Main orchestration, run_gateway(), main()
 │   ├── command_queue.py       # CommandQueue, PendingCommand, DiscoveryRequest
 │   ├── transceiver.py         # LoRaTransceiver thread
-│   ├── sensor_collection.py   # SensorDataCollector, DashboardClient, LocalSensorReader
-│   ├── http_handler.py        # HTTP server, gateway param endpoints
-│   └── params.py              # Gateway parameter registry
+│   ├── sensor_collection.py   # SensorDataCollector (+ live feed/nodes/catalog), DashboardClient, LocalSensorReader
+│   ├── params.py              # Gateway parameter registry
+│   ├── http_handler.py        # Compat shim -> gateway.web (CommandServer = WebServer)
+│   ├── web/                   # HTTP server: command API + browser UI
+│   │   ├── server.py          # WebServer thread (ThreadingHTTPServer, HTTP/1.1), WebContext, router assembly
+│   │   ├── core.py            # Request/Response/StreamResponse/Router/HTTPError
+│   │   ├── static_files.py    # Cached static serving (ETag, gzip)
+│   │   ├── routes_commands.py # /command, /discover, /gateway/*, /{cmd}, /{cmd}/{node} (registered LAST)
+│   │   ├── routes_live.py     # /api/status, /api/readings, /api/feed, /api/params
+│   │   ├── routes_logger.py   # /api/logger/*
+│   │   ├── routes_pages.py    # /, /logger, /static/*, /favicon.ico
+│   │   └── static/            # index.html, logger.html, css/, js/ (ES modules), vendor/ (uPlot)
+│   └── timeseries/            # Opt-in history logger (SQLite rollups, CSV export)
+│       ├── service.py         # LoggerService: charts config, recording on/off, queries
+│       ├── recorder.py        # Recorder thread: buffered ingest, rollup accumulators, prune
+│       ├── store.py           # TimeSeriesStore: raw + agg tables, tier selection
+│       └── export.py          # Streamed CSV (wide / long)
 ├── node/                       # Outdoor node package
 │   └── data_log.py            # Sensor broadcasting, CommandReceiver
 ├── utils/                      # Shared utilities
@@ -102,7 +116,7 @@ Dashboard --HTTP POST--> Gateway --LoRa--> Node
 
 **Key files:**
 - `utils/protocol.py` - `build_command_packet()`, `parse_command_packet()`, `build_ack_packet()`, `parse_ack_packet()`
-- `gateway/http_handler.py` - HTTP server (POST /command, gateway param endpoints)
+- `gateway/web/routes_commands.py` - HTTP command API (POST /command, gateway param endpoints)
 - `utils/command_registry.py` - `CommandRegistry`, `CommandScope`, `HandlerEntry`
 - `gateway/command_queue.py` - `CommandQueue`, `PendingCommand`, `DiscoveryRequest`
 - `gateway/transceiver.py` - `LoRaTransceiver`
@@ -206,6 +220,52 @@ The gateway exposes HTTP endpoints for runtime parameter tuning:
 
 Changes are persisted to `gateway_config.json` atomically.
 
+### Web UI and HTTP Server (`gateway/web/`)
+
+One in-process `ThreadingHTTPServer` (HTTP/1.1 keep-alive, thread per connection) serves both the command API and the browser UI on `command_server.port` (5001). It must stay in-process: it shares the command queue, radio state and collector, and the radio has a single owner — don't move it to gunicorn/pre-fork servers. Thread-per-connection matters because command endpoints block for up to `wait_timeout` (and /discover much longer).
+
+- Pages: `/` (Live: nodes, feed, params) and `/logger` (history charts). Static assets in `gateway/web/static/`; no build step, no CDN (works offline on the road). uPlot is vendored in `static/vendor/`.
+- Route order matters: `routes_commands.register()` goes last because `GET /{cmd}` and `GET /{cmd}/{node}` are catch-alls. Names in `RESERVED_SEGMENTS` or containing `.` are never sent over LoRa (browser requests like `/favicon.ico` used to be broadcast as commands).
+- Command API responses keep the historical JSON format (`json_response(..., compact=False)`); UI APIs use compact JSON.
+- Feed: `SensorDataCollector` keeps a bounded deque of tuples with contiguous sequence numbers; `GET /api/readings?after=SEQ&epoch=E` returns only new entries. Size is set from the UI (`PUT /api/feed`), persisted as `web.feed_size`.
+- UI JS: build DOM with `h()` from `js/common.js` (text is never parsed as HTML — node/sensor names come off the radio).
+- UI conventions in `js/common.js`: every scroll region gets edge fades (`.scroll` / `[data-fade-axis]` via `initScrollFades()`, or `scrollFade(el)` for regions built later; set `data-fade-sticky` for sticky headers; keep borders/backgrounds on a wrapper, not the masked scroller). Reorderable cards use `sortable()` + `dragHandle()` (items need `data-id`; renders must not reorder the DOM while `.active`). Collapsible cards are `<details data-collapse-key>` via `initCollapsibles()`. Node card order persists as `web.node_order`, chart order in `logger.json`.
+- Preview without hardware: `python scripts/web_demo.py [--backfill-hours 72]` → http://localhost:5002/
+
+### History Logger (`gateway/timeseries/`)
+
+Opt-in, for watching battery loggers away from home (at home the Pi 5 dashboard stores everything). Users create **charts** (1–8 series sharing units + a max age). A series is recorded while it is on any chart; its retention is the longest max age of those charts. One on/off switch, persisted in `<data_dir>/logger.json`; data in `<data_dir>/timeseries.db` (default `data/logger/`, gitignored).
+
+- **Lean when off:** `sqlite3`, the store and the Recorder thread are only loaded when recording starts; the collector's listener hook is `None`.
+- **Storage:** `raw(sid, ts_ms, v)` and `agg(sid, tier, ts, n, vmin, vmax, vsum)`, both `WITHOUT ROWID` clustered on `(sid, [tier,] ts)`. Tiers: 60/300/1800/10800 s.
+- **Ingest:** `Recorder.ingest()` only appends to a buffer (no I/O on the LoRa thread). The recorder thread flushes every `logger.flush_interval_s` (30 s) in one transaction, updating in-memory per-(series, tier) accumulators — O(tiers) per sample, never re-scanning raw rows. Unflushed samples are merged into raw-tier queries so live charts aren't delayed.
+- **Query:** raw if the window holds ≤ 2×points samples (checked with LIMIT), else the finest tier that fits. O(log n + points) regardless of history length. Incremental polling passes `tier` + `since`.
+- **Timestamps** are the gateway's receive time (one clock for all nodes; node clocks may be wrong without NTP on the road).
+- **Retention** pruning every `logger.prune_interval_s`: index range deletes. Freed pages are reused; `incremental_vacuum` only after big deletes.
+- CSV export streams (chunked) via a k-way merge of per-series cursors: wide (one column per series) or long.
+
+### Reliability Rules (gateway must run unattended for a year)
+
+- **No thread may die silently.** Every loop body catches `Exception` and keeps going; anything that must stay up has a watchdog in the `run_gateway()` main loop (every 30 s: `LoggerService.check_health()` restarts a dead or corrupt-DB recorder with exponential backoff).
+- **Everything keyed by radio input is bounded:** collector nodes/series (`MAX_NODES`/`MAX_SERIES`, least-recently-heard evicted), feed deque, recorder buffer (`MAX_PENDING`, newest kept), HTTP connections (`MAX_CONNECTIONS`, excess closed), request bodies (1 MB), series/time range per logger query.
+- **UI/logging bookkeeping never blocks the dashboard POST path:** `add_readings()` isolates live-state and listener failures.
+- **Self-healing storage:** a damaged `timeseries.db` (SQLITE_CORRUPT/NOTADB, see `store.is_corruption`) is moved aside as `*.corrupt-<stamp>` and recording continues on a fresh file; an unparseable `logger.json` is moved aside, and malformed chart entries are repaired on load. Nothing is ever deleted automatically.
+- **Web server never gives up:** bind failures retry with backoff, and an accept-loop failure rebuilds the server.
+- **Config writes are serialized** (`utils/config_persistence` holds a lock) because HTTP handlers now run concurrently.
+- **The radio must stay healthy or the process restarts.**
+  - **Hard resets:** the transceiver hard-resets the SX1276 after any of these:
+    - 10 unreadable packets in a row (garbage or instant CRC drops).
+    - 3 failed transmissions in a row.
+    - No valid packet for `lora.silence_reset_s`. The default is 900 s, backing off to 4 h; 0 disables it.
+  - **Recovery mode:** any exception in the transceiver loop puts it into recovery mode. Recovery mode rebuilds the radio stack in place every 3 s until it works (`RFM9xRadio.reconnect()`, e.g. FT232H unplug/replug), then retunes to N2G. The web UI and logger stay up meanwhile, and the heartbeat keeps beating.
+  - **Restart:** the main loop checks transceiver liveness and its heartbeat (120 s). If either fails, it exits with code 1, and systemd or `scripts/launch_gateway_server.sh` restarts the gateway. The launch script supervises itself when it isn't running under systemd.
+  - **Boot:** a radio that fails at boot also exits 1, unless `lora.required` is false.
+- **Timers use `time.monotonic()`** (command retries, ACK waits, response TTLs, discovery). Wall-clock time is only for data timestamps. History pruning is held for 24 h after a forward wall-clock jump, so a bogus clock can't wipe history.
+- **Exactly one recorder may write** the history DB: `TimeSeriesStore.set_owner()` fences out a recorder that outlived its stop; reader connections are never re-pooled across a writer close/quarantine.
+- **Config files are written durably** (fsync + rename + dir fsync) with a `.bak` of the previous version; `load_config()` falls back to it if the file is unreadable.
+- Process lock files live in `~/.cache/data_log/` (not `/tmp`, which periodic cleaners may purge).
+- Tests for these live in `tests/test_reliability.py` (concurrency, fault injection, recovery) and `tests/test_gateway_runtime.py` (command queue timing/bounds, transceiver radio health with a scripted fake radio, packet validation). The key invariant: after any interleaving of ingest, crashes, retries and purges, every stored rollup bucket equals what the surviving raw rows imply.
+
 ### Coordinated Radio Parameter Changes
 
 Use `scripts/set_radio_params.sh` to change SF/BW across all nodes and gateway:
@@ -276,7 +336,8 @@ LoRa link quality is logged with two gateway-only "sensors" in `sensors/lora_lin
 - **`interval_sec: 0` (`EVERY_PACKET`)** logs every packet received from the node. This value is valid only for link sensors; hardware sensors fall back to the default interval with a warning.
 - **`interval_sec: N`** logs at most one value per node every N seconds: the most recently received one. Nothing is logged if no packet arrived since the last publish. The effective rate is therefore min(interval, packet rate), and asking for a faster rate than the node transmits never logs repeats.
 - Each value is timestamped with the packet's **receive time**, not the publish time.
-- Values are posted **under the node they describe**, not the gateway (`collector.add_readings(node_id, ..., is_local=False)`). They land on the dashboard as `ab01_7_lorarssi_rssi` / `ab01_7_lorasnr_snr` ("ab01-7 RSSI" in dBm, "ab01-7 SNR" in dB), category "Remote Sensors". The dashboard needs no changes because ingest registers new series automatically.
+- Values are posted **under the node they describe**, not the gateway (`collector.add_readings(node_id, ..., is_local=False, measured=True)`).
+- `measured=True` means the readings are not a packet from the node. They update its series at the packet's receive time, but leave the node's "last heard" time, packet count and interval alone. They are recorded to history at their own timestamps. They land on the dashboard as `ab01_7_lorarssi_rssi` / `ab01_7_lorasnr_snr` ("ab01-7 RSSI" in dBm, "ab01-7 SNR" in dB), category "Remote Sensors". The dashboard needs no changes because ingest registers new series automatically.
 - **Data flow:**
   1. `LoRaTransceiver._process_received_packet()` reads `get_last_rssi()`/`get_last_snr()`.
   2. For each valid sensor packet (ACKs and packets that fail the CRC are excluded), it calls `record_packet()` on each link sensor. Link sensors ignore nodes they don't list.
@@ -299,6 +360,13 @@ Display config in `gateway_config.json`:
 }
 ```
 Both switch pins are optional - the system works without any buttons configured.
+
+Web UI / history logger in `gateway_config.json` (all optional):
+```json
+"web": { "feed_size": 200 },
+"logger": { "data_dir": "data/logger", "flush_interval_s": 30, "prune_interval_s": 300 }
+```
+Charts and the recording switch are managed from the UI and live in `<data_dir>/logger.json`, not the gateway config.
 
 ## Adding New Components
 

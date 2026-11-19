@@ -8,6 +8,9 @@ from .base import Radio
 
 logger = logging.getLogger(__name__)
 
+# Longest legal LoRa packet (255 B at SF12/125 kHz/CR4-5) is ~9 s on air
+XMIT_TIMEOUT_S = 12.0
+
 
 class RFM9xRadio(Radio):
     """
@@ -138,6 +141,10 @@ class RFM9xRadio(Radio):
         self._rfm9x.coding_rate = 5           # 4/5 (library uses denominator)
         self._rfm9x.preamble_length = 8       # 8 symbol preamble
         self._rfm9x.enable_crc = True         # Enable CRC (should be default, but explicit)
+        # The library gives up on a transmission after 2 s by default, but a
+        # full packet at SF12/125 kHz is ~3-9 s on air: it would abort the TX
+        # while we reported success. Allow the slowest legal packet.
+        self._rfm9x.xmit_timeout = XMIT_TIMEOUT_S
         self._in_rx = False
         self._rx_stats_time = time.monotonic()
 
@@ -150,11 +157,14 @@ class RFM9xRadio(Radio):
         """
         # Tear down existing stack. Any of these can throw if the underlying
         # USB device is gone — that's fine, we just want references cleared.
-        try:
-            if self._spi is not None:
-                self._spi.deinit()
-        except Exception:
-            pass
+        # Release the pins too: on the native GPIO backend, re-claiming a pin
+        # that is still held can fail ("GPIO busy") and every rebuild with it.
+        for part in (self._spi, self._cs, self._reset):
+            try:
+                if part is not None:
+                    part.deinit()
+            except Exception:
+                pass
         self._rfm9x = None
         self._spi = None
         self._cs = None
@@ -179,16 +189,20 @@ class RFM9xRadio(Radio):
             return False
 
     def send(self, data: bytes) -> bool:
-        """Send data over LoRa."""
+        """Send data over LoRa. Returns False if the transmission failed or
+        timed out (the library signals a TX timeout by returning False)."""
         if self._rfm9x is None:
             raise RuntimeError("Radio not initialized. Call init() first.")
         try:
-            self._rfm9x.send(data)
+            ok = self._rfm9x.send(data)
             self._in_rx = False
-            return True
         except Exception as e:
             logger.warning(f"Radio send failed: {e} (payload size: {len(data)} bytes)")
             return False
+        if ok is False:
+            logger.warning(f"Radio send timed out (payload size: {len(data)} bytes)")
+            return False
+        return True
 
     def receive(self, timeout: float = 5.0) -> bytes | None:
         """Receive data from LoRa with timeout."""

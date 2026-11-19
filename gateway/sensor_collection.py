@@ -14,6 +14,7 @@ Functions:
 """
 
 import inspect
+import itertools
 import json
 import logging
 import queue
@@ -21,6 +22,7 @@ import threading
 import time
 from collections import deque
 from dataclasses import dataclass
+from typing import Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -111,6 +113,39 @@ class DashboardClient:
 # Sensor Data Collector
 # =============================================================================
 
+FEED_SIZE_DEFAULT = 200
+FEED_SIZE_MIN = 10
+FEED_SIZE_MAX = 5000
+
+# Field order of the tuples kept in the live feed (tuples, not dicts: ~3x less
+# memory per entry, and strings are shared with the series catalog)
+_FEED_FIELDS = ("seq", "t", "node", "id", "name", "units", "value", "src", "rssi")
+
+# Readings closer together than this are treated as one transmission burst
+# (large payloads span several LoRa packets) when estimating report intervals
+_BURST_GAP_S = 2.0
+_MAX_INTERVAL_S = 6 * 3600.0
+
+# Caps on the live catalogs. Ids come off the air, so a misbehaving or foreign
+# transmitter must not be able to grow memory without bound over months of
+# uptime; past the cap the least recently heard entry is forgotten.
+MAX_NODES = 256
+MAX_SERIES = 4096
+
+
+def _evict_oldest(table: dict[str, dict], key: str) -> None:
+    """Drop the entry with the smallest `key` (O(n); only runs past the cap)."""
+    victim = min(table, key=lambda k: table[k][key])
+    del table[victim]
+
+
+def _ema(prev: float | None, sample: float) -> float:
+    return sample if prev is None else prev * 0.75 + sample * 0.25
+
+
+def clamp_feed_size(size: int) -> int:
+    return max(FEED_SIZE_MIN, min(FEED_SIZE_MAX, int(size)))
+
 
 class SensorDataCollector:
     """
@@ -118,6 +153,14 @@ class SensorDataCollector:
 
     Uses a background thread to POST readings asynchronously, preventing
     HTTP latency from blocking the LoRa transceiver thread.
+
+    Also keeps lightweight live state for the web UI:
+      - a bounded feed of recent readings with sequence numbers, so the UI
+        fetches only what is new (O(new) per poll)
+      - per-node stats (last heard, RSSI, packet count, report interval)
+      - a catalog of every series seen since boot with its latest value
+    and an optional listener (the history recorder) that receives every batch.
+    With no listener attached that hook costs a single None check.
     """
 
     def __init__(
@@ -125,6 +168,7 @@ class SensorDataCollector:
         gateway_id: str,
         dashboard_client: DashboardClient | None,
         max_queue_size: int = 100,
+        feed_size: int = FEED_SIZE_DEFAULT,
     ):
         """
         Initialize the collector with async posting.
@@ -133,6 +177,7 @@ class SensorDataCollector:
             gateway_id: Gateway identifier
             dashboard_client: Client for posting to dashboard
             max_queue_size: Maximum pending posts before dropping oldest
+            feed_size: Number of recent readings kept for the web UI feed
         """
         self._gateway_id = gateway_id
         self._dashboard_client = dashboard_client
@@ -142,7 +187,17 @@ class SensorDataCollector:
         )
         self._running = False
         self._poster_thread: threading.Thread | None = None
-        self._recent_readings: deque[dict] = deque(maxlen=100)
+
+        # Live UI state (guarded by _live_lock)
+        self._live_lock = threading.Lock()
+        self._feed: deque[tuple] = deque(maxlen=clamp_feed_size(feed_size))
+        self._feed_seq = 0
+        self._epoch = int(time.time() * 1000)  # lets UI clients detect a restart
+        self._nodes: dict[str, dict] = {}
+        self._series: dict[str, dict] = {}
+
+        # Optional consumer of every batch: fn(datapoints, receive_time)
+        self._listener: Callable[[list[dict], float], None] | None = None
 
     def start(self) -> None:
         """Start the background poster thread."""
@@ -195,7 +250,12 @@ class SensorDataCollector:
             logger.warning(f"Failed to post {len(pending.datapoints)} readings from '{pending.node_id}'")
 
     def add_readings(
-        self, node_id: str, readings: list[SensorReading], is_local: bool = False
+        self,
+        node_id: str,
+        readings: list[SensorReading],
+        is_local: bool = False,
+        rssi: int | None = None,
+        measured: bool = False,
     ) -> None:
         """
         Queue sensor readings for async posting to dashboard.
@@ -207,7 +267,13 @@ class SensorDataCollector:
             node_id: ID of the node that produced the readings
             readings: List of SensorReading objects
             is_local: True if readings are from local sensors (vs LoRa)
+            rssi: Signal strength of the packet that carried them (LoRa only)
+            measured: Readings the gateway measured about node_id (LoRa link
+                quality), each already stamped with its packet's receive time.
+                They update the node's series but are not a packet from it,
+                and are recorded at their own timestamps, not "now".
         """
+        receive_time = time.time()
         datapoints = []
 
         for reading in readings:
@@ -230,8 +296,23 @@ class SensorDataCollector:
         if not datapoints:
             return
 
-        for dp in datapoints:
-            self._recent_readings.append(dp)
+        try:
+            self._update_live_state(
+                node_id, readings, datapoints, is_local, rssi, receive_time, measured
+            )
+        except Exception as e:  # noqa: BLE001 - UI bookkeeping must never block posting
+            logger.error(f"Live state update failed: {e}")
+
+        listener = self._listener
+        if listener is not None:
+            try:
+                if measured:
+                    for dp in datapoints:
+                        listener([dp], dp["timestamp"])
+                else:
+                    listener(datapoints, receive_time)
+            except Exception as e:  # noqa: BLE001 - never let a consumer break ingest
+                logger.error(f"Reading listener error: {e}")
 
         if self._dashboard_client is None:
             return
@@ -258,9 +339,180 @@ class SensorDataCollector:
                 except queue.Full:
                     logger.error("Dashboard queue still full after drop, losing readings")
 
+    # -------------------------------------------------------------------------
+    # Live state for the web UI
+    # -------------------------------------------------------------------------
+
+    def _update_live_state(
+        self,
+        node_id: str,
+        readings: list[SensorReading],
+        datapoints: list[dict],
+        is_local: bool,
+        rssi: int | None,
+        now: float,
+        measured: bool = False,
+    ) -> None:
+        """O(len(readings)): node stats, series catalog and feed entries."""
+        src = "local" if is_local else "lora"
+        with self._live_lock:
+            node = self._nodes.get(node_id)
+            if node is None:
+                if len(self._nodes) >= MAX_NODES:
+                    _evict_oldest(self._nodes, "last_seen")
+                node = self._nodes[node_id] = {
+                    "id": node_id,
+                    "local": is_local,
+                    "first_seen": now,
+                    "last_seen": 0.0,
+                    "packets": 0,
+                    "rssi": None,
+                    "interval": None,
+                }
+            if measured:
+                # Not a packet: the node was heard when these were measured
+                heard = max(r.timestamp for r in readings)
+                node["last_seen"] = max(node["last_seen"], heard)
+            else:
+                dt = now - node["last_seen"]
+                if node["packets"] and _BURST_GAP_S < dt < _MAX_INTERVAL_S:
+                    node["interval"] = _ema(node["interval"], dt)
+                node["last_seen"] = now
+                node["packets"] += 1
+                if rssi is not None:
+                    node["rssi"] = rssi
+
+            for dp, reading in zip(datapoints, readings):
+                sid = dp["id"]
+                series = self._series.get(sid)
+                if series is None:
+                    if len(self._series) >= MAX_SERIES:
+                        _evict_oldest(self._series, "ts")
+                    series = self._series[sid] = {
+                        "id": sid,
+                        "node": node_id,
+                        "name": reading.name,
+                        "units": reading.units,
+                        "local": is_local,
+                        "value": None,
+                        "ts": 0.0,
+                        "interval": None,
+                        "count": 0,
+                    }
+                ts = reading.timestamp if measured else now
+                dt = ts - series["ts"]
+                if series["count"] and _BURST_GAP_S < dt < _MAX_INTERVAL_S:
+                    series["interval"] = _ema(series["interval"], dt)
+                series["value"] = reading.value
+                series["ts"] = ts
+                series["count"] += 1
+
+                self._feed_seq += 1
+                # Reuse the catalog's string objects so feed entries share them
+                self._feed.append((
+                    self._feed_seq, ts, series["node"], series["id"], series["name"],
+                    series["units"], reading.value, src, None if measured else rssi,
+                ))
+
+    def set_listener(self, listener: Callable[[list[dict], float], None] | None) -> None:
+        """Attach (or detach with None) a consumer that receives every batch."""
+        self._listener = listener
+
+    def get_feed(self, after: int = 0, epoch: int | None = None) -> dict:
+        """
+        Return feed entries with seq > after (oldest first).
+
+        Cost is O(returned entries): seq numbers are contiguous, so new entries
+        are the last (seq - after) items of the deque. If the client's epoch
+        doesn't match (gateway restarted) or it fell behind the retained
+        window, everything retained is returned with reset=True.
+        """
+        with self._live_lock:
+            seq = self._feed_seq
+            size = self._feed.maxlen
+            reset = after <= 0 or (epoch is not None and epoch != self._epoch) or after > seq
+            if reset:
+                items = list(self._feed)
+            else:
+                n_new = seq - after
+                if n_new >= len(self._feed):
+                    items = list(self._feed)
+                else:
+                    items = list(itertools.islice(reversed(self._feed), n_new))
+                    items.reverse()
+        return {
+            "epoch": self._epoch,
+            "seq": seq,
+            "size": size,
+            "reset": reset,
+            "readings": [dict(zip(_FEED_FIELDS, item)) for item in items],
+        }
+
     def get_recent_readings(self) -> list[dict]:
-        """Return a snapshot of recent readings (newest last)."""
-        return list(self._recent_readings)
+        """Return a snapshot of the feed (oldest first)."""
+        return self.get_feed()["readings"]
+
+    @property
+    def feed_size(self) -> int:
+        return self._feed.maxlen or 0
+
+    def set_feed_size(self, size: int) -> int:
+        """Resize the feed, keeping the newest entries. Returns the applied size."""
+        size = clamp_feed_size(size)
+        with self._live_lock:
+            if size != self._feed.maxlen:
+                self._feed = deque(self._feed, maxlen=size)
+        return size
+
+    def feed_info(self) -> dict:
+        with self._live_lock:
+            return {"size": self._feed.maxlen, "seq": self._feed_seq, "epoch": self._epoch}
+
+    def get_nodes(self, now: float | None = None) -> list[dict]:
+        """Per-node stats with each node's latest readings."""
+        now = time.time() if now is None else now
+        with self._live_lock:
+            by_node: dict[str, list[dict]] = {}
+            for s in self._series.values():
+                by_node.setdefault(s["node"], []).append({
+                    "id": s["id"],
+                    "name": s["name"],
+                    "units": s["units"],
+                    "value": s["value"],
+                    "age_s": now - s["ts"],
+                })
+            nodes = []
+            for n in self._nodes.values():
+                nodes.append({
+                    "id": n["id"],
+                    "local": n["local"],
+                    "age_s": now - n["last_seen"],
+                    "last_seen": n["last_seen"],
+                    "first_seen": n["first_seen"],
+                    "packets": n["packets"],
+                    "rssi": n["rssi"],
+                    "interval_s": n["interval"],
+                    "readings": by_node.get(n["id"], []),
+                })
+        nodes.sort(key=lambda n: (not n["local"], n["id"].lower()))
+        return nodes
+
+    def get_series_catalog(self) -> list[dict]:
+        """Every series seen since boot, with its latest value and report interval."""
+        with self._live_lock:
+            return [
+                {
+                    "id": s["id"],
+                    "node": s["node"],
+                    "name": s["name"],
+                    "units": s["units"],
+                    "local": s["local"],
+                    "value": s["value"],
+                    "ts": s["ts"],
+                    "interval_s": s["interval"],
+                }
+                for s in self._series.values()
+            ]
 
     @property
     def gateway_id(self) -> str:
@@ -279,7 +531,7 @@ class LocalSensorEntry:
     sensor: Sensor
     class_name: str
     interval_sec: float
-    next_due: float = 0.0  # 0 = due immediately at startup
+    next_due: float = 0.0  # time.monotonic() seconds; 0 = due immediately at startup
 
     @property
     def is_link(self) -> bool:
@@ -338,19 +590,30 @@ class LocalSensorReader(threading.Thread):
             logger.info(f"Local sensor {entry.class_name}: {schedule}{nodes}")
 
         while self._running:
-            # Clear before the pass: a packet recorded mid-pass sets the event
-            # again, so the wait below returns immediately instead of losing it.
-            self._wake.clear()
-            self._run_due(time.time())
-            self._wake.wait(self._time_until_next_due())
+            try:
+                # Clear before the pass: a packet recorded mid-pass sets the event
+                # again, so the wait below returns immediately instead of losing it.
+                self._wake.clear()
+                # Schedule on the monotonic clock (a wall-clock step back would
+                # otherwise stall every sensor); timestamp readings with wall time.
+                self._run_due(time.monotonic(), wall=time.time())
+                self._wake.wait(self._time_until_next_due())
+            except Exception as e:  # noqa: BLE001 - this thread must never die
+                logger.error(f"Local sensor reader error: {e}")
+                time.sleep(1.0)
 
     def stop(self) -> None:
         self._running = False
         self._wake.set()
 
-    def _run_due(self, now: float) -> None:
-        """Publish every entry that is due at ``now``."""
+    def _run_due(self, now: float, wall: float | None = None) -> None:
+        """Publish every entry that is due at ``now`` (the scheduling clock).
+
+        ``wall`` timestamps hardware readings (default: the current time).
+        """
         hw_readings: list[SensorReading] = []
+        if wall is None:
+            wall = time.time()
 
         for entry in self._entries:
             try:
@@ -363,7 +626,7 @@ class LocalSensorReader(threading.Thread):
                 if entry.is_link:
                     self._publish_link(entry)
                 else:
-                    hw_readings.extend(self._read_sensor(entry, now))
+                    hw_readings.extend(self._read_sensor(entry, wall))
             except Exception as e:
                 logger.error(f"Local sensor {entry.class_name} error: {e}")
 
@@ -378,14 +641,14 @@ class LocalSensorReader(threading.Thread):
     def _publish_link(self, entry: LocalSensorEntry) -> None:
         """Post a link sensor's pending samples, each under its own node."""
         for node_id, readings in entry.sensor.drain(latest_only=not entry.every_packet):
-            self._collector.add_readings(node_id, readings, is_local=False)
+            self._collector.add_readings(node_id, readings, is_local=False, measured=True)
 
     def _time_until_next_due(self) -> float | None:
         """Seconds until the next timed entry is due (None = only wake events)."""
         timed = [e.next_due for e in self._entries if not e.every_packet]
         if not timed:
             return None
-        return max(0.0, min(timed) - time.time())
+        return max(0.0, min(timed) - time.monotonic())
 
     @staticmethod
     def _read_sensor(entry: LocalSensorEntry, timestamp: float) -> list[SensorReading]:

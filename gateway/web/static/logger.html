@@ -1,0 +1,134 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Gateway · Logger</title>
+  <link rel="icon" href="/static/img/favicon.jpg" type="image/jpeg">
+  <link rel="stylesheet" href="/static/vendor/uPlot-1.6.31.min.css">
+  <link rel="stylesheet" href="/static/css/app.css">
+  <link rel="stylesheet" href="/static/css/logger.css">
+  <script>
+    try { var t = JSON.parse(localStorage.getItem('gw.theme')); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
+  <script src="/static/vendor/uPlot-1.6.31.iife.min.js"></script>
+  <script type="module" src="/static/js/logger.js"></script>
+</head>
+<body data-title="Logger">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="/">
+        <span class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12.5h4l2.5-7 5 14 2.5-7H21"/></svg></span>
+        <span class="brand-text"><strong>Gateway</strong><span class="brand-sub" id="host">connecting…</span></span>
+      </a>
+      <nav class="nav" aria-label="Pages">
+        <a class="nav-link" href="/">Live</a>
+        <a class="nav-link" href="/logger" aria-current="page">Logger</a>
+      </nav>
+      <div class="topbar-status">
+        <span class="rec-pill" id="rec-pill" title="History recording is on" hidden><span class="rec-dot"></span>REC</span>
+        <span class="conn" id="conn"><span class="dot"></span><span class="conn-label">Connecting…</span></span>
+        <button class="btn-icon" id="theme-btn" type="button"></button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="card recorder" id="recorder">
+      <div class="recorder-main">
+        <label class="switch switch-lg" title="Record history on the gateway">
+          <input type="checkbox" id="rec-toggle" aria-label="Record history">
+          <span class="track"><span class="thumb"></span></span>
+        </label>
+        <div>
+          <div class="recorder-title" id="rec-title">Recording off</div>
+          <div class="recorder-sub" id="rec-sub">&nbsp;</div>
+        </div>
+      </div>
+      <div class="recorder-stats">
+        <div class="mini-stat"><span class="mini-label">Stored</span><span class="mini-value" id="st-size">—</span></div>
+        <div class="mini-stat"><span class="mini-label">Series</span><span class="mini-value" id="st-series">—</span></div>
+        <div class="mini-stat"><span class="mini-label">Last write</span><span class="mini-value" id="st-flush">—</span></div>
+        <div class="recorder-actions">
+          <button class="btn" id="storage-btn" type="button">Storage</button>
+          <button class="btn" id="export-all" type="button" title="Every stored sample, one row per sample">Export all</button>
+        </div>
+      </div>
+    </section>
+
+    <div class="banner" id="rec-error" hidden></div>
+
+    <div class="toolbar">
+      <div class="seg" id="range-seg" role="group" aria-label="Time range"></div>
+      <button class="btn live-btn" id="live-btn" type="button" aria-pressed="true" title="Update charts as data arrives"><span class="live-dot"></span>Live</button>
+      <div class="spacer"></div>
+      <button class="btn btn-primary" id="add-chart" type="button"></button>
+    </div>
+
+    <div class="charts" id="charts"></div>
+
+    <section class="card empty" id="empty" hidden>
+      <div class="empty-icon" id="empty-icon"></div>
+      <h3>No charts yet</h3>
+      <p>A chart picks which series the gateway records and how long it keeps them. Put series that share units on one chart, then switch recording on — the gateway logs in the background, so this page doesn't need to stay open.</p>
+      <button class="btn btn-primary" id="empty-add" type="button" style="margin-top: 8px"></button>
+    </section>
+  </main>
+
+  <dialog class="modal" id="chart-dialog" aria-labelledby="cd-heading">
+    <div class="modal-head">
+      <h2 id="cd-heading">New chart</h2>
+      <button class="btn-icon" type="button" id="cd-close" aria-label="Close"></button>
+    </div>
+    <div class="modal-body scroll">
+      <label class="field">
+        <span class="field-label">Title</span>
+        <input class="input" id="cd-name" maxlength="80" autocomplete="off" placeholder="e.g. Temperatures">
+      </label>
+      <div class="field">
+        <div class="field-label">Series <span class="muted num" id="cd-count"></span></div>
+        <div class="field-hint" id="cd-units"></div>
+        <label class="input-icon" id="cd-search-wrap">
+          <input class="input" id="cd-search" type="search" placeholder="Search by node, sensor or units" autocomplete="off" spellcheck="false">
+        </label>
+        <div class="picker-frame"><div class="picker scroll" id="cd-series" data-fade-sticky=".picker-group"></div></div>
+      </div>
+      <div class="field">
+        <div class="field-label">Keep history for <span class="muted" id="cd-ret-label"></span></div>
+        <div class="ret-row">
+          <div class="seg seg-wrap" id="cd-ret" role="group" aria-label="Keep history for"></div>
+          <span class="ret-custom">
+            <input class="input num" id="cd-ret-n" type="number" min="1" step="any" aria-label="Custom amount">
+            <select class="input" id="cd-ret-u" aria-label="Custom unit">
+              <option value="3600">hours</option>
+              <option value="86400">days</option>
+            </select>
+          </span>
+        </div>
+        <div class="field-hint estimate" id="cd-estimate"></div>
+      </div>
+      <div class="field-error" id="cd-error" hidden></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" type="button" id="cd-cancel">Cancel</button>
+      <button class="btn btn-primary" type="button" id="cd-save">Create chart</button>
+    </div>
+  </dialog>
+
+  <dialog class="modal modal-wide" id="storage-dialog" aria-labelledby="sd-heading">
+    <div class="modal-head">
+      <h2 id="sd-heading">Stored history</h2>
+      <button class="btn-icon" type="button" id="sd-close" aria-label="Close"></button>
+    </div>
+    <div class="modal-body scroll" id="sd-body"></div>
+    <div class="modal-foot">
+      <button class="btn btn-danger" type="button" id="sd-purge-all">Delete all data</button>
+      <div class="spacer"></div>
+      <button class="btn" type="button" id="sd-done">Done</button>
+    </div>
+  </dialog>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+</body>
+</html>

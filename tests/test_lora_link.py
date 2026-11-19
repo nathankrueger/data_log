@@ -26,7 +26,7 @@ class RecordingCollector:
         self.calls: list[tuple[str, list[SensorReading], bool]] = []
         self.posted = threading.Event()
 
-    def add_readings(self, node_id, readings, is_local=False):
+    def add_readings(self, node_id, readings, is_local=False, **kwargs):
         self.calls.append((node_id, list(readings), is_local))
         self.posted.set()
 
@@ -287,6 +287,42 @@ class TestIntegration:
             "ab01_8_lorarssi_rssi": "ab01-8 RSSI",
             "ab01_8_lorasnr_snr": "ab01-8 SNR",
         }
+
+    def test_link_readings_are_not_packets(self):
+        """A rate-limited publish describes an old packet: it must not make a
+        silent node look just heard, count as a packet, or be recorded "now"."""
+        collector = SensorDataCollector("pi5-gateway", dashboard_client=None)
+        collector.add_readings(
+            "ab01-7",
+            [SensorReading("Temperature", "C", 20.0, "BME280TempPressureHumidity", 0)],
+            rssi=-90,
+        )
+        (before,) = collector.get_nodes()
+        recorded = []
+        collector.set_listener(lambda dps, ts: recorded.extend((dp["id"], ts) for dp in dps))
+
+        heard = before["last_seen"] - 600
+        collector.add_readings(
+            "ab01-7", [SensorReading("RSSI", "dBm", -95, "LoRaRSSI", heard)], measured=True
+        )
+
+        (after,) = collector.get_nodes()
+        assert after["last_seen"] == before["last_seen"]
+        assert after["packets"] == before["packets"] == 1
+        assert after["rssi"] == -90
+        assert recorded == [("ab01_7_lorarssi_rssi", heard)]
+        series = {s["id"]: s for s in collector.get_series_catalog()}
+        assert series["ab01_7_lorarssi_rssi"]["ts"] == heard
+
+    def test_link_reading_for_unknown_node_creates_it(self):
+        """Every-packet drains can beat the packet's own add_readings call."""
+        collector = SensorDataCollector("pi5-gateway", dashboard_client=None)
+        heard = time.time()
+        collector.add_readings(
+            "ab01-9", [SensorReading("SNR", "dB", 6.0, "LoRaSNR", heard)], measured=True
+        )
+        (node,) = collector.get_nodes()
+        assert node["id"] == "ab01-9" and node["last_seen"] == heard and node["packets"] == 0
 
     @pytest.fixture
     def transceiver_parts(self):

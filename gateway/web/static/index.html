@@ -1,0 +1,142 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+  <meta name="color-scheme" content="light dark">
+  <title>Gateway · Live</title>
+  <link rel="icon" href="/static/img/favicon.jpg" type="image/jpeg">
+  <link rel="stylesheet" href="/static/css/app.css">
+  <link rel="stylesheet" href="/static/css/live.css">
+  <script>
+    try { var t = JSON.parse(localStorage.getItem('gw.theme')); if (t === 'light' || t === 'dark') document.documentElement.dataset.theme = t; } catch (e) {}
+  </script>
+  <script type="module" src="/static/js/live.js"></script>
+</head>
+<body data-title="Live">
+  <header class="topbar">
+    <div class="topbar-inner">
+      <a class="brand" href="/">
+        <span class="brand-mark"><svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"><path d="M3 12.5h4l2.5-7 5 14 2.5-7H21"/></svg></span>
+        <span class="brand-text"><strong>Gateway</strong><span class="brand-sub" id="host">connecting…</span></span>
+      </a>
+      <nav class="nav" aria-label="Pages">
+        <a class="nav-link" href="/" aria-current="page">Live</a>
+        <a class="nav-link" href="/logger">Logger</a>
+      </nav>
+      <div class="topbar-status">
+        <a class="rec-pill" id="rec-pill" href="/logger" title="History recording is on" hidden><span class="rec-dot"></span>REC</a>
+        <span class="conn" id="conn"><span class="dot"></span><span class="conn-label">Connecting…</span></span>
+        <button class="btn-icon" id="theme-btn" type="button"></button>
+      </div>
+    </div>
+  </header>
+
+  <main class="container">
+    <section class="tiles" aria-label="Summary">
+      <div class="card tile">
+        <span class="tile-label">Nodes live</span>
+        <span class="tile-value num" id="t-nodes">—</span>
+        <span class="tile-sub" id="t-nodes-sub">&nbsp;</span>
+      </div>
+      <div class="card tile">
+        <span class="tile-label">Last packet</span>
+        <span class="tile-value" id="t-last">—</span>
+        <span class="tile-sub" id="t-last-sub">&nbsp;</span>
+      </div>
+      <div class="card tile">
+        <span class="tile-label">Radio</span>
+        <span class="tile-value" id="t-radio">—</span>
+        <span class="tile-sub" id="t-radio-sub">&nbsp;</span>
+      </div>
+      <a class="card tile" href="/logger" title="Open the history logger">
+        <span class="tile-label">History</span>
+        <span class="tile-value" id="t-hist">—</span>
+        <span class="tile-sub" id="t-hist-sub">&nbsp;</span>
+      </a>
+    </section>
+
+    <details class="card" id="nodes-card" data-collapse-key="nodes" open>
+      <summary class="card-head">
+        <span class="chev"></span>
+        <h2 class="card-title">Nodes</h2>
+        <span class="card-sub" id="nodes-sub"></span>
+      </summary>
+      <div class="card-body">
+        <div class="nodes" id="nodes"></div>
+        <div class="empty" id="nodes-empty" hidden>
+          <div class="empty-icon" id="nodes-empty-icon"></div>
+          <h3>Listening for nodes</h3>
+          <p>Nodes appear here as soon as the gateway hears their first packet.</p>
+        </div>
+      </div>
+    </details>
+
+    <details class="card" id="feed-card" data-collapse-key="feed" open>
+      <summary class="card-head">
+        <span class="chev"></span>
+        <h2 class="card-title">Sensor feed</h2>
+        <span class="badge num" id="feed-count">0</span>
+      </summary>
+      <div class="feed-tools">
+        <label class="input-icon" id="feed-search-wrap">
+          <input class="input" id="feed-filter" type="search" placeholder="Filter node or sensor" autocomplete="off" spellcheck="false">
+        </label>
+        <button class="btn btn-sm" id="feed-pause" type="button" aria-pressed="false"></button>
+        <div class="chips" id="feed-chips" role="group" aria-label="Filter by node"></div>
+        <label class="keep" title="How many recent readings the gateway keeps for this feed">
+          Keep last
+          <input class="range" id="feed-size" type="range" min="0" max="6" step="1" value="2">
+          <output id="feed-size-out" class="num">200</output>
+        </label>
+      </div>
+      <div class="feed-wrap">
+        <button class="new-pill" id="feed-new" type="button" hidden></button>
+        <div class="scroll feed-scroll" id="feed-scroll" data-fade-sticky="thead">
+          <table class="table feed-table">
+            <thead>
+              <tr>
+                <th>Time</th>
+                <th>Node</th>
+                <th>Sensor</th>
+                <th class="value">Value</th>
+                <th class="hide-sm">Source</th>
+                <th class="rssi hide-sm">RSSI</th>
+              </tr>
+            </thead>
+            <tbody id="feed-body"></tbody>
+          </table>
+          <div class="feed-empty" id="feed-empty">Waiting for readings…</div>
+        </div>
+      </div>
+    </details>
+
+    <details class="card" id="params-card" data-collapse-key="params" open>
+      <summary class="card-head">
+        <span class="chev"></span>
+        <h2 class="card-title">Gateway parameters</h2>
+        <span class="card-sub" id="params-sub"></span>
+      </summary>
+      <div class="params-body">
+       <div class="params-wrap scroll" data-fade-axis="x">
+        <table class="table params-table">
+          <thead>
+            <tr>
+              <th>Parameter</th>
+              <th>Value</th>
+              <th>Range</th>
+              <th>Applies</th>
+              <th></th>
+            </tr>
+          </thead>
+          <tbody id="params-body"></tbody>
+        </table>
+       </div>
+      </div>
+      <p class="params-note">Staged radio parameters are applied with <span class="mono">rcfg_radio</span>; every change is then saved to the gateway config file. Changing SF or bandwidth here only retunes the gateway — use <span class="mono">scripts/set_radio_params.sh</span> to move nodes too.</p>
+    </details>
+  </main>
+
+  <div class="toasts" id="toasts" aria-live="polite"></div>
+</body>
+</html>
