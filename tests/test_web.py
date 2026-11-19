@@ -126,9 +126,9 @@ def server(tmp_path):
     web.stop()
 
 
-def put(url, body):
+def put(url, body, method="PUT"):
     req = urllib.request.Request(
-        url, data=json.dumps(body).encode(), method="PUT", headers={"Content-Type": "application/json"}
+        url, data=json.dumps(body).encode(), method=method, headers={"Content-Type": "application/json"}
     )
     try:
         with urllib.request.urlopen(req, timeout=5) as r:
@@ -172,6 +172,7 @@ class TestServer:
         assert status == 200 and data["node_id"] == "test-gw"
         assert data["nodes"][0]["id"] == "patio"
         assert data["logger"]["recording"] is False
+        assert data["feed"]["count"] == 1  # shown while the feed card is collapsed
         status, body, _ = get(f"{base}/api/readings?after=0")
         assert json.loads(body)["readings"][0]["value"] == 20.0
 
@@ -196,6 +197,35 @@ class TestServer:
         assert status == 400
         status, body, _ = get(f"{base}/api/logger")
         assert status == 200 and json.loads(body)["enabled"] is False
+
+    def test_chart_rows_and_options(self, server):
+        base, collector, _ = server
+        collector.add_readings("patio", readings(("Temperature", "C", 20.0)))
+        collector.add_readings("shed", readings(("Temperature", "C", 15.0)))
+        made = []
+        for key in ("patio_bme280_temperature", "shed_bme280_temperature"):
+            status, body = put(f"{base}/api/logger/charts", {"series": [key]}, method="POST")
+            assert status == 201
+            assert body["chart"]["auto_range"] is True and body["chart"]["new_row"] is False
+            made.append(body["chart"]["id"])
+        a, b = made
+
+        status, _ = put(f"{base}/api/logger/order", {"ids": [b, a], "new_rows": [b, a]})
+        assert status == 200
+        status, body = put(f"{base}/api/logger/charts/{a}/options", {"auto_range": False})
+        assert status == 200 and body["chart"]["auto_range"] is False
+        _, raw, _ = get(f"{base}/api/logger")
+        charts = [(c["id"], c["new_row"], c["auto_range"]) for c in json.loads(raw)["charts"]]
+        assert charts == [(b, True, True), (a, True, False)]
+
+        assert put(f"{base}/api/logger/order", {"ids": [a], "new_rows": "x"})[0] == 400
+        assert put(f"{base}/api/logger/charts/{a}/options", {"auto_range": 1})[0] == 400
+        assert put(f"{base}/api/logger/charts/nope/options", {"auto_range": True})[0] == 404
+
+        # Nothing recorded yet: auto range has no oldest sample and keeps the window
+        status, raw, _ = get(f"{base}/api/logger/data?s=patio_bme280_temperature&start=1000&end=5000&auto=1")
+        data = json.loads(raw)
+        assert status == 200 and data["first"] is None and data["start"] == 1000
 
     def test_node_order_round_trip(self, server):
         base, _, _ = server

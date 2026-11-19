@@ -3,6 +3,7 @@
 import {
   $,
   api,
+  applyFlow,
   dragHandle,
   fmtAgo,
   fmtBytes,
@@ -47,6 +48,8 @@ const LIVE_MS = 5000;
 const STATE_MS = 15000;
 const FULL_REFRESH_MS = 120000; // periodic re-sync (lets the store re-pick resolution)
 const BYTES_PER_SAMPLE = 36; // raw row + b-tree overhead + rollup tiers, measured-ish
+const AUTO_MIN_SPAN_S = 300; // auto range never shows less than this (matches the gateway)
+const PER_ROW = 2; // charts side by side; a chart alone in its row spans the width
 
 const S = {
   logger: null,
@@ -55,7 +58,7 @@ const S = {
   live: prefs.get('logger.live', true),
   views: new Map(),
   offset: 0, // server clock - browser clock, seconds
-  pendingOrder: null, // chart ids while a reorder is being saved
+  pendingOrder: null, // {ids, newRows} while a reorder is being saved
 };
 
 let chartSort = null; // sortable controller for the chart grid
@@ -77,7 +80,11 @@ class ChartView {
     this.busy = false;
     this.version = 0; // bumped by every full refresh; stale responses are dropped
     this.pendingFull = false;
+    this.first = null; // oldest stored sample (auto range)
+    this.savingAuto = null; // auto_range value being saved (wins over stale polls)
+    this.collapsed = prefs.get(`chart.${cfg.id}.collapsed`, false);
     this._build();
+    this._paintCollapsed();
   }
 
   _build() {
@@ -105,13 +112,19 @@ class ChartView {
     );
     this.legendEl = h('div', { class: 'legend' });
     this.plotEl = h('div', { class: 'plot' });
+    this.collapseBtn = h(
+      'button',
+      { class: 'chart-collapse', type: 'button', onclick: () => this.setCollapsed(!this.collapsed) },
+      icon('chevron'),
+    );
     this.el = h(
       'article',
       { class: 'card chart-card', 'data-id': this.cfg.id },
-      dragHandle('Drag to reorder chart'),
+      dragHandle('Drag to move chart'),
       h(
         'header',
         { class: 'chart-head' },
+        this.collapseBtn,
         h('div', { class: 'chart-titles' }, this.titleEl, this.metaEl),
         h(
           'div',
@@ -133,18 +146,64 @@ class ChartView {
   }
 
   setConfig(cfg) {
+    if (this.savingAuto != null) cfg = { ...cfg, auto_range: this.savingAuto };
     const dataChanged =
       JSON.stringify(cfg.series.map((s) => s.id)) !== JSON.stringify(this.cfg.series.map((s) => s.id)) ||
       cfg.max_age_s !== this.cfg.max_age_s;
+    const rangeChanged = (cfg.auto_range !== false) !== this.autoRange();
     this.cfg = cfg;
     if (dataChanged) {
       this.cols = new Map();
       this.tier = null;
       this.zoom = null;
-      this.refresh(true);
-    } else {
+      this.first = null;
+      this.refresh(true).catch(() => {});
+    } else if (rangeChanged) {
+      this.first = null;
+      this.refresh(true).catch(() => {});
+    } else if (!this.collapsed) {
       this.draw();
     }
+  }
+
+  autoRange() {
+    return this.cfg.auto_range !== false;
+  }
+
+  async setAutoRange(on) {
+    const prev = this.autoRange();
+    if (on === prev) return;
+    this.savingAuto = on;
+    this.cfg = { ...this.cfg, auto_range: on };
+    this.first = null;
+    this.refresh(true).catch(() => {});
+    try {
+      await api(`/api/logger/charts/${encodeURIComponent(this.cfg.id)}/options`, { method: 'PUT', body: { auto_range: on } });
+      const c = S.logger?.charts.find((x) => x.id === this.cfg.id);
+      if (c) c.auto_range = on;
+    } catch (e) {
+      toast(`Could not save auto range: ${e.message}`, 'error');
+      this.cfg = { ...this.cfg, auto_range: prev };
+      this.first = null;
+      this.refresh(true).catch(() => {});
+    } finally {
+      this.savingAuto = null;
+    }
+  }
+
+  setCollapsed(collapsed) {
+    this.collapsed = collapsed;
+    prefs.set(`chart.${this.cfg.id}.collapsed`, collapsed);
+    this._paintCollapsed();
+    if (!collapsed) this.refresh(true).catch(() => {}); // nothing is fetched while collapsed
+  }
+
+  _paintCollapsed() {
+    this.el.classList.toggle('collapsed', this.collapsed);
+    this.collapseBtn.setAttribute('aria-expanded', String(!this.collapsed));
+    const label = this.collapsed ? 'Expand chart' : 'Collapse chart';
+    this.collapseBtn.title = label;
+    this.collapseBtn.setAttribute('aria-label', label);
   }
 
   meta() {
@@ -163,10 +222,15 @@ class ChartView {
   window() {
     if (this.zoom) return this.zoom;
     const now = serverNow();
-    return [now - this.span(), now];
+    let start = now - this.span();
+    // Auto range: begin at the oldest stored sample (the gateway clips the
+    // same way, so the resolution suits the data actually held)
+    if (this.autoRange() && this.first != null) start = Math.max(start, Math.min(this.first, now - AUTO_MIN_SPAN_S));
+    return [start, now];
   }
 
   async refresh(full = false) {
+    if (this.collapsed) return; // fetched (in full) when expanded
     // A full refresh means the window, zoom or series changed: any response
     // still in flight is for the old view and must not be drawn or merged.
     if (full) this.version = (this.version || 0) + 1;
@@ -175,6 +239,7 @@ class ChartView {
       return;
     }
     const version = this.version || 0;
+    const auto = this.autoRange() && !this.zoom;
     const [start, end] = this.window();
     let since = null;
     if (!full && !this.zoom && this.tier != null && Date.now() - this.lastFull < FULL_REFRESH_MS) {
@@ -185,6 +250,7 @@ class ChartView {
     q.set('start', start.toFixed(3));
     q.set('end', end.toFixed(3));
     q.set('points', String(this.chart.pointsBudget()));
+    if (auto) q.set('auto', '1');
     if (since != null) {
       q.set('tier', String(this.tier));
       q.set('since', String(since));
@@ -196,6 +262,7 @@ class ChartView {
       const res = await api(`/api/logger/data?${q}`);
       S.offset = res.now - Date.now() / 1000;
       if (version !== (this.version || 0)) return; // stale: a full refresh follows
+      if (auto) this.first = res.first ?? null;
       if (since != null && res.tier === this.tier) {
         this._merge(res, since, start);
       } else {
@@ -267,7 +334,13 @@ class ChartView {
   renderHeader() {
     this.titleEl.textContent = this.cfg.title;
     const parts = [h('span', { class: 'badge' }, this.cfg.units || 'no units'), h('span', null, `keeps ${fmtSpan(this.cfg.max_age_s)}`)];
-    if (this.tier != null) {
+    if (!this.zoom && this.autoRange() && this.first != null && !this.collapsed) {
+      const [a, b] = this.window();
+      if (b - a < this.span() - 60) {
+        parts.push(h('span', { class: 'sep' }), h('span', { title: 'Auto range: fitted to the data this chart holds' }, `showing ${fmtDur(b - a)}`));
+      }
+    }
+    if (this.tier != null && !this.collapsed) {
       parts.push(h('span', { class: 'sep' }), h('span', { title: 'Resolution chosen for this window' }, TIER_LABEL[this.tier] ?? ''));
     }
     if (this.zoom) parts.push(h('span', { class: 'sep' }), h('span', null, `zoomed to ${fmtDur(this.zoom[1] - this.zoom[0])}`));
@@ -328,6 +401,14 @@ class ChartView {
     const ids = [...S.views.keys()];
     const i = ids.indexOf(this.cfg.id);
     showMenu(anchor, [
+      {
+        label: 'Auto range',
+        icon: 'fit',
+        checked: this.autoRange(),
+        title: `Fit the time axis to the data this chart holds, up to ${fmtSpan(this.cfg.max_age_s)}`,
+        onToggle: (on) => this.setAutoRange(on),
+      },
+      'sep',
       { label: 'Move up', icon: 'up', disabled: i <= 0, onClick: () => moveChart(this.cfg.id, -1) },
       { label: 'Move down', icon: 'down', disabled: i >= ids.length - 1, onClick: () => moveChart(this.cfg.id, 1) },
       'sep',
@@ -354,8 +435,13 @@ async function loadState() {
 function applyState(st) {
   if (S.pendingOrder) {
     // A reorder is still being saved: don't let a stale poll undo it
-    const rank = new Map(S.pendingOrder.map((id, i) => [id, i]));
+    const { ids, newRows } = S.pendingOrder;
+    const rank = new Map(ids.map((id, i) => [id, i]));
     st.charts.sort((a, b) => (rank.get(a.id) ?? 1e9) - (rank.get(b.id) ?? 1e9));
+    if (newRows) {
+      const starts = new Set(newRows);
+      for (const c of st.charts) c.new_row = starts.has(c.id);
+    }
   }
   S.logger = st;
   S.offset = st.now - Date.now() / 1000;
@@ -422,6 +508,10 @@ function syncCharts() {
         v.renderLegend();
       }
     }
+    if (!dragging) {
+      if (cfg.new_row) v.el.dataset.newRow = '1';
+      else delete v.el.dataset.newRow;
+    }
   });
   for (const [id, v] of S.views) {
     if (!seen.has(id) && !dragging) {
@@ -430,7 +520,7 @@ function syncCharts() {
     }
   }
   S.views = new Map(cfgs.map((c) => [c.id, S.views.get(c.id)]));
-  host.classList.toggle('single', cfgs.length === 1);
+  if (!dragging) applyFlow([...S.views.values()].map((v) => v.el), PER_ROW);
   $('#empty').hidden = cfgs.length > 0;
   $('#add-chart').disabled = cfgs.length >= (S.logger.limits?.max_charts ?? 32);
 }
@@ -450,22 +540,22 @@ async function refreshAll(full) {
 // Chart actions
 // ---------------------------------------------------------------------------
 
-async function moveChart(id, dir) {
-  const ids = S.logger.charts.map((c) => c.id);
-  const i = ids.indexOf(id);
-  const j = i + dir;
-  if (i < 0 || j < 0 || j >= ids.length) return;
-  [ids[i], ids[j]] = [ids[j], ids[i]];
-  await saveChartOrder(ids);
+function moveChart(id, dir) {
+  const v = S.views.get(id);
+  if (v) chartSort.move(v.el, dir); // trades places with its neighbour, then saves
 }
 
-async function saveChartOrder(ids) {
+async function saveChartOrder(ids, newRows = null) {
   const byId = new Map(S.logger.charts.map((c) => [c.id, c]));
-  S.logger.charts = ids.map((x) => byId.get(x)).filter(Boolean);
+  const starts = newRows ? new Set(newRows) : null;
+  S.logger.charts = ids
+    .map((x) => byId.get(x))
+    .filter(Boolean)
+    .map((c) => (starts ? { ...c, new_row: starts.has(c.id) } : c));
+  S.pendingOrder = { ids, newRows };
   syncCharts();
-  S.pendingOrder = ids;
   try {
-    await api('/api/logger/order', { method: 'PUT', body: { ids } });
+    await api('/api/logger/order', { method: 'PUT', body: newRows ? { ids, new_rows: newRows } : { ids } });
   } catch (e) {
     toast(`Could not save chart order: ${e.message}`, 'error');
     S.pendingOrder = null;
@@ -959,7 +1049,7 @@ initToolbar();
 initEditor();
 initStorage();
 initScrollFades();
-chartSort = sortable($('#charts'), { item: '.chart-card', handle: '.drag-handle', onDrop: saveChartOrder });
+chartSort = sortable($('#charts'), { item: '.chart-card', handle: '.drag-handle', rows: PER_ROW, onDrop: saveChartOrder });
 startAgeTicker();
 
 loadState()

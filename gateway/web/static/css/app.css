@@ -670,6 +670,8 @@ select.input { padding-right: 28px; }
   z-index: 100;
   box-shadow: var(--shadow-pop) !important;
   will-change: transform;
+  /* Narrows/widens to preview the slot it's over (see fitLifted) */
+  transition: width 0.22s cubic-bezier(0.2, 0.8, 0.2, 1);
 }
 .drag-lifted .drag-handle { opacity: 1; color: var(--accent); }
 .drag-placeholder {
@@ -865,6 +867,33 @@ dialog.modal::backdrop { background: rgba(10, 10, 8, 0.45); backdrop-filter: blu
 .menu button:disabled { opacity: 0.4; cursor: default; background: transparent; }
 .menu button.danger { color: var(--crit-text); }
 .menu hr { border: 0; border-top: 1px solid var(--border); margin: 4px 2px; }
+/* Checkbox rows: label left, a small box right that fills with the accent */
+.menu-check .menu-label { flex: 1; }
+.menu .checkbox {
+  display: inline-grid;
+  place-items: center;
+  flex: none;
+  width: 18px;
+  height: 18px;
+  margin-left: 14px;
+  border-radius: 5px;
+  border: 1.5px solid var(--border-strong);
+  background: var(--surface);
+  color: var(--accent-ink);
+  transition: background 0.15s, border-color 0.15s, box-shadow 0.15s;
+}
+.menu .checkbox .icon {
+  width: 12px;
+  height: 12px;
+  stroke-width: 3;
+  opacity: 0;
+  transform: scale(0.5);
+  transition: opacity 0.15s, transform 0.18s cubic-bezier(0.2, 0.8, 0.2, 1.4);
+}
+.menu-check:hover .checkbox { border-color: var(--accent); }
+.menu-check[aria-checked="true"] .checkbox { background: var(--accent); border-color: var(--accent); }
+.menu-check[aria-checked="true"] .checkbox .icon { opacity: 1; transform: none; }
+.menu-check:focus-visible { outline: none; box-shadow: inset 0 0 0 2px var(--focus); }
 
 /* ------------------------------------------------------------------------ */
 /* Responsive                                                                */

@@ -5,10 +5,10 @@ import time
 import pytest
 
 from gateway.sensor_collection import SensorDataCollector
-from gateway.timeseries.constants import TIERS
+from gateway.timeseries.constants import AUTO_MIN_SPAN_S, TIERS
 from gateway.timeseries.export import csv_long, csv_wide, resolve_tz, safe_filename
 from gateway.timeseries.recorder import Recorder
-from gateway.timeseries.service import LoggerService, NotFound
+from gateway.timeseries.service import LoggerService, NotFound, _clean_chart
 from gateway.timeseries.store import TimeSeriesStore, pick_tier
 from utils.protocol import SensorReading
 
@@ -173,6 +173,38 @@ class TestRecorder:
         res = store.query(["a_bme_temp"], t0 - 1, t0 + 5, 500, unflushed=recorder.unflushed_snapshot())
         assert res["series"]["a_bme_temp"]["v"] == [1.0, 2.0]
 
+    def test_auto_range_fits_the_window_to_stored_data(self, store, recorder):
+        t0 = 1_700_000_000 - (1_700_000_000 % 10800)
+        for i in range(3000):  # ~4 h at 5 s
+            recorder.ingest([dp("a_bme_temp", float(i % 50))], t0 + i * 5)
+        recorder.flush()
+        end = t0 + 3000 * 5
+        week = store.query(["a_bme_temp"], end - 7 * DAY, end, points=200)
+        auto = store.query(["a_bme_temp"], end - 7 * DAY, end, points=200, auto=True)
+        assert week["first"] is None and week["start"] == end - 7 * DAY
+        assert auto["first"] == t0 and auto["start"] == t0
+        assert auto["tier"] < week["tier"]  # resolution picked for the data actually held
+
+    def test_auto_range_never_widens_and_keeps_a_minimum_span(self, store, recorder):
+        t0 = 1_700_000_000.0
+        recorder.ingest([dp("a_bme_temp", 1.0)], t0 - DAY)
+        recorder.ingest([dp("b_bme_temp", 2.0)], t0 - 10)
+        recorder.flush()
+        # Data older than the requested window: the window stands
+        assert store.query(["a_bme_temp"], t0 - 3600, t0, 500, auto=True)["start"] == t0 - 3600
+        # Only seconds of data: still show a few minutes
+        res = store.query(["b_bme_temp"], t0 - DAY, t0, 500, auto=True)
+        assert res["first"] == t0 - 10 and res["start"] == t0 - AUTO_MIN_SPAN_S
+        assert res["series"]["b_bme_temp"]["v"] == [2.0]
+
+    def test_auto_range_sees_buffered_samples(self, store, recorder):
+        t0 = 1_700_000_000.0
+        recorder.ingest([dp("a_bme_temp", 1.0)], t0 - 600)  # never flushed
+        res = store.query(["a_bme_temp"], t0 - DAY, t0, 500, unflushed=recorder.unflushed_snapshot(), auto=True)
+        assert res["first"] == t0 - 600 and res["start"] == t0 - 600
+        assert res["series"]["a_bme_temp"]["v"] == [1.0]
+        assert store.query(["b_bme_temp"], t0 - DAY, t0, 500, auto=True)["first"] is None
+
     def test_prune_applies_retention(self, store, recorder):
         now = time.time()
         recorder.ingest([dp("a_bme_temp", 1.0)], now - 8 * DAY)
@@ -285,6 +317,35 @@ class TestService:
         assert collector._listener is None
         assert chart["id"] in {c["id"] for c in service.state()["charts"]}
 
+    def test_chart_rows_and_view_options(self, service):
+        a = service.create_chart({"series": ["patio_bme280_temperature"]})
+        b = service.create_chart({"series": ["shed_bme280_temperature"]})
+        assert a["auto_range"] is True and a["new_row"] is False
+        service.reorder([b["id"], a["id"]], new_rows=[b["id"], a["id"]])
+        charts = service.state()["charts"]
+        assert [c["id"] for c in charts] == [b["id"], a["id"]]
+        assert all(c["new_row"] for c in charts)
+        service.reorder([a["id"], b["id"]])  # order only: row starts are kept
+        assert all(c["new_row"] for c in service.state()["charts"])
+
+        assert service.set_chart_options(a["id"], {"auto_range": False})["auto_range"] is False
+        edited = service.update_chart(a["id"], {"title": "Patio"})
+        assert edited["auto_range"] is False and edited["new_row"] is True  # edits keep both
+        with pytest.raises(ValueError):
+            service.set_chart_options(a["id"], {"auto_range": "no"})
+        with pytest.raises(NotFound):
+            service.set_chart_options("nope", {"auto_range": True})
+
+    def test_query_auto_range(self, service, collector):
+        service.create_chart({"series": ["patio_bme280_temperature"], "max_age_s": DAY})
+        service.set_enabled(True)
+        collector.add_readings("patio", readings(("Temperature", "C", 21.0)))
+        now = time.time()
+        res = service.query(["patio_bme280_temperature"], now - DAY, now, 500, auto=True)
+        assert res["first"] == pytest.approx(now, abs=5)
+        assert res["start"] == pytest.approx(now - AUTO_MIN_SPAN_S, abs=5)
+        assert res["series"]["patio_bme280_temperature"]["v"] == [21.0]
+
     def test_config_persists(self, tmp_path, collector):
         svc = LoggerService(tmp_path / "logger", collector=collector)
         svc.create_chart({"series": ["shed_bme280_temperature"], "max_age_s": 3 * DAY})
@@ -295,3 +356,25 @@ class TestService:
         assert again.state()["charts"][0]["max_age_s"] == 3 * DAY
         # Remembered metadata keeps the series in the catalog after a restart
         assert any(c["id"] == "shed_bme280_temperature" for c in again.state()["catalog"])
+
+
+def test_old_charts_flow_and_auto_range_by_default():
+    chart = _clean_chart({"id": "x", "series": [{"id": "s"}]})
+    assert chart["new_row"] is False and chart["auto_range"] is True
+    # Only real booleans count
+    chart = _clean_chart({"id": "x", "series": [{"id": "s"}], "new_row": "yes", "auto_range": 0})
+    assert chart["new_row"] is False and chart["auto_range"] is True
+
+
+def test_layout_and_options_survive_a_restart(tmp_path):
+    collector = SensorDataCollector("gw", None)
+    collector.add_readings("shed", readings(("Temperature", "C", 15.0)))
+    svc = LoggerService(tmp_path / "logger", collector=collector)
+    chart = svc.create_chart({"series": ["shed_bme280_temperature"]})
+    svc.reorder([chart["id"]], new_rows=[chart["id"]])
+    svc.set_chart_options(chart["id"], {"auto_range": False})
+    svc.stop()
+    again = LoggerService(tmp_path / "logger", collector=SensorDataCollector("gw", None))
+    (saved,) = again.state()["charts"]
+    assert saved["new_row"] is True and saved["auto_range"] is False
+    again.stop()

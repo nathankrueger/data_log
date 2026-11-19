@@ -45,7 +45,7 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
-from gateway.timeseries.constants import POINTS_MAX, POINTS_MIN, TIERS
+from gateway.timeseries.constants import AUTO_MIN_SPAN_S, POINTS_MAX, POINTS_MIN, TIERS
 
 logger = logging.getLogger(__name__)
 
@@ -178,6 +178,25 @@ def _tx(conn: sqlite3.Connection):
             except sqlite3.Error:
                 pass
         raise
+
+
+def _oldest_sample(conn, sids: dict, keys, unflushed) -> float | None:
+    """Oldest sample (seconds) of any key: stored rows (index seek per series)
+    or samples still in the recorder's write buffer."""
+    oldest: int | None = None
+    for key in keys:
+        sid = sids.get(key)
+        if sid is None:
+            continue
+        row = conn.execute("SELECT ts FROM raw WHERE sid = ? ORDER BY ts LIMIT 1", (sid,)).fetchone()
+        if row and (oldest is None or row[0] < oldest):
+            oldest = row[0]
+        extra = unflushed.get(sid) if unflushed else None
+        if extra:
+            ts = min(r[0] for r in extra)
+            if oldest is None or ts < oldest:
+                oldest = ts
+    return None if oldest is None else oldest / 1000.0
 
 
 def _lookup(conn: sqlite3.Connection, keys: Iterable[str]) -> dict[str, int]:
@@ -513,6 +532,7 @@ class TimeSeriesStore:
         tier: int | None = None,
         since_s: float | None = None,
         unflushed: dict[int, list[tuple[int, float]]] | None = None,
+        auto: bool = False,
     ) -> dict:
         """
         Columnar data for a chart.
@@ -521,30 +541,42 @@ class TimeSeriesStore:
         else the finest aggregate tier that fits). Passing the tier back with
         since_s gives cheap incremental updates: only rows at or after since_s.
 
-        Returns {"tier", "start", "end", "series": {key: columns}} where raw
-        columns are {"t", "v"} (t in seconds) and aggregate columns are
-        {"t", "avg", "min", "max"} (t = bucket start).
+        auto=True fits the window to the data: start moves up to the oldest
+        stored sample (keeping at least AUTO_MIN_SPAN_S), so the resolution is
+        picked for the data actually held. O(keys * log n) extra.
+
+        Returns {"tier", "start", "end", "first", "series": {key: columns}}
+        where raw columns are {"t", "v"} (t in seconds), aggregate columns are
+        {"t", "avg", "min", "max"} (t = bucket start), start is the window
+        actually used and first the oldest sample (auto only, else None).
         """
         budget = 2 * max(POINTS_MIN, min(POINTS_MAX, int(points)))
-        result: dict = {"tier": 0, "start": start_s, "end": end_s, "series": {}}
+        result: dict = {"tier": 0, "start": start_s, "end": end_s, "first": None, "series": {}}
         if not keys or not self.exists():
             if tier:
                 result["tier"] = tier
-            return result
-
-        lo_s = start_s if since_s is None else max(start_s, since_s)
-        lo_ms = math.floor(lo_s * 1000.0)
-        hi_ms = math.ceil(end_s * 1000.0)
-        if tier and (end_s - lo_s) / tier > _MAX_ROWS:
-            # An explicit tier too fine for this window would return
-            # unbounded rows: coarsen it (the client re-syncs on a tier change)
-            tier = pick_tier(end_s - lo_s, budget)
+            return result  # (unflushed samples need the series registry in the DB)
 
         with self._reader() as conn:
             try:
                 sids = _lookup(conn, keys)
             except sqlite3.OperationalError:
                 return result  # schema not created yet
+
+            if auto:
+                first = _oldest_sample(conn, sids, keys, unflushed)
+                if first is not None:
+                    result["first"] = first
+                    start_s = max(start_s, min(first, end_s - AUTO_MIN_SPAN_S))
+                    result["start"] = start_s
+
+            lo_s = start_s if since_s is None else max(start_s, since_s)
+            lo_ms = math.floor(lo_s * 1000.0)
+            hi_ms = math.ceil(end_s * 1000.0)
+            if tier and (end_s - lo_s) / tier > _MAX_ROWS:
+                # An explicit tier too fine for this window would return
+                # unbounded rows: coarsen it (the client re-syncs on a tier change)
+                tier = pick_tier(end_s - lo_s, budget)
 
             raw: dict[str, list] = {}
             if tier is None:

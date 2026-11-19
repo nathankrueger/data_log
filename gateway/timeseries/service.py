@@ -59,6 +59,10 @@ class NotFound(LookupError):
     pass
 
 
+def _flag(value, default: bool) -> bool:
+    return value if isinstance(value, bool) else default
+
+
 def _clean_chart(raw) -> dict | None:
     """Validate/repair one chart from logger.json; None if unusable."""
     if not isinstance(raw, dict) or not isinstance(raw.get("id"), str) or not raw["id"]:
@@ -95,6 +99,10 @@ def _clean_chart(raw) -> dict | None:
         "max_age_s": min(RETENTION_MAX_S, max(RETENTION_MIN_S, max_age)),
         "series": series,
         "created": created if isinstance(created, (int, float)) and not isinstance(created, bool) else time.time(),
+        # Layout: starts a new row in the chart grid (a chart alone in its row
+        # spans the full width). View: fit the time axis to stored data.
+        "new_row": raw.get("new_row") is True,
+        "auto_range": raw.get("auto_range") is not False,
     }
 
 
@@ -529,6 +537,8 @@ class LoggerService:
             "max_age_s": max_age,
             "series": [{"id": sid, "color": colors[sid]} for sid in ids],
             "created": existing.get("created", time.time()) if existing else time.time(),
+            "new_row": bool(existing.get("new_row", False)) if existing else False,
+            "auto_range": _flag(spec.get("auto_range"), existing.get("auto_range", True) if existing else True),
         }
 
     def create_chart(self, spec: dict) -> dict:
@@ -555,12 +565,29 @@ class LoggerService:
             self._cfg["charts"].remove(chart)
             self._commit_charts()
 
-    def reorder(self, ids: list[str]) -> None:
+    def reorder(self, ids: list[str], new_rows: list[str] | None = None) -> None:
+        """Set the display order; new_rows (if given) lists the charts that
+        start a new grid row, and every other chart flows after its neighbour."""
         with self._lock:
             by_id = {c["id"]: c for c in self._cfg["charts"]}
             ordered = [by_id.pop(i) for i in ids if i in by_id]
             self._cfg["charts"] = ordered + list(by_id.values())
+            if new_rows is not None:
+                starts = set(new_rows)
+                for c in self._cfg["charts"]:
+                    c["new_row"] = c["id"] in starts
             self._save()
+
+    def set_chart_options(self, chart_id: str, options: dict) -> dict:
+        """View options that don't touch what is recorded (auto_range)."""
+        with self._lock:
+            chart = self._find(chart_id)
+            if "auto_range" in options:
+                if not isinstance(options["auto_range"], bool):
+                    raise ValueError("'auto_range' must be true or false")
+                chart["auto_range"] = options["auto_range"]
+            self._save()
+            return dict(chart)
 
     def _commit_charts(self) -> None:
         self._prune_series_meta()
@@ -585,6 +612,7 @@ class LoggerService:
         points: int,
         tier: int | None = None,
         since_s: float | None = None,
+        auto: bool = False,
     ) -> dict:
         if tier is not None and tier != 0 and tier not in TIERS:
             raise ValueError(f"tier must be 0 or one of {list(TIERS)}")
@@ -595,7 +623,9 @@ class LoggerService:
         unflushed = rec.unflushed_snapshot(rec.sids_for(keys)) if rec is not None else None
         store = self._get_store()
         try:
-            result = store.query(keys, start_s, end_s, points, tier=tier, since_s=since_s, unflushed=unflushed)
+            result = store.query(
+                keys, start_s, end_s, points, tier=tier, since_s=since_s, unflushed=unflushed, auto=auto
+            )
         except Exception as e:
             self._note_read_error(e)
             raise

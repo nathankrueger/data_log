@@ -281,7 +281,7 @@ export class TimeChart {
   }
 
   _resize() {
-    if (!this.u) return;
+    if (!this.u || !this.host.clientWidth) return; // hidden (collapsed): resize when shown
     const width = this.width;
     const height = Math.max(120, this.host.clientHeight);
     if (width !== this.u.width || height !== this.u.height) this.u.setSize({ width, height });

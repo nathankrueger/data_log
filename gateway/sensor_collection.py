@@ -466,7 +466,12 @@ class SensorDataCollector:
 
     def feed_info(self) -> dict:
         with self._live_lock:
-            return {"size": self._feed.maxlen, "seq": self._feed_seq, "epoch": self._epoch}
+            return {
+                "size": self._feed.maxlen,
+                "count": len(self._feed),
+                "seq": self._feed_seq,
+                "epoch": self._epoch,
+            }
 
     def get_nodes(self, now: float | None = None) -> list[dict]:
         """Per-node stats with each node's latest readings."""

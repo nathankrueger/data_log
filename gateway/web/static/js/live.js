@@ -39,6 +39,7 @@ const state = {
     filter: prefs.get('feed.filter', ''),
     nodes: new Set(prefs.get('feed.nodes', [])),
     sizeEditing: false,
+    held: null, // readings the gateway holds (from /api/status), shown while collapsed
   },
   nodeCards: new Map(),
   nodeOrder: [], // user's drag order (ids), saved on the gateway
@@ -85,6 +86,11 @@ async function pollStatus() {
     state.feed.size = s.feed.size;
     syncSizeSlider();
     trimFeed();
+  }
+  if (s.feed) {
+    // A collapsed feed isn't polled; its badge shows what the gateway holds
+    state.feed.held = s.feed.count;
+    if (!$('#feed-card').open) updateFeedChrome();
   }
 }
 
@@ -331,9 +337,13 @@ function applyFilter() {
 function updateFeedChrome() {
   const f = state.feed;
   const visible = f.nodes.size || f.filter ? f.rows.filter((x) => !x.tr.hidden).length : f.rows.length;
-  $('#feed-count').textContent = f.nodes.size || f.filter
-    ? `${visible} of ${f.rows.length}`
-    : `${f.rows.length} / ${f.size}`;
+  if (!$('#feed-card').open && f.held != null) {
+    $('#feed-count').textContent = `${f.held} / ${f.size}`;
+  } else {
+    $('#feed-count').textContent = f.nodes.size || f.filter
+      ? `${visible} of ${f.rows.length}`
+      : `${f.rows.length} / ${f.size}`;
+  }
   const empty = $('#feed-empty');
   empty.hidden = visible > 0;
   empty.textContent = f.rows.length ? 'No readings match the filter' : 'Waiting for readings…';
@@ -594,7 +604,9 @@ initTheme();
 $('#nodes-empty-icon').append(icon('antenna'));
 initFeedControls();
 initCollapsibles((card, open) => {
-  if (card.id === 'feed-card' && open) feedPoller.now();
+  if (card.id !== 'feed-card') return;
+  updateFeedChrome();
+  if (open) feedPoller.now();
 });
 initScrollFades();
 nodeSort = sortable($('#nodes'), { item: '.node', handle: '.drag-handle', onDrop: saveNodeOrder });

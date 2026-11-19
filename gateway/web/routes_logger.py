@@ -6,8 +6,10 @@ History logger API for the browser UI.
   POST   /api/logger/charts              create chart {title, series: [ids], max_age_s}
   PUT    /api/logger/charts/{id}         update chart (same fields)
   DELETE /api/logger/charts/{id}
-  PUT    /api/logger/order               {"ids": [...]} chart display order
-  GET    /api/logger/data                s=ID (repeat) start end points [tier since]
+  PUT    /api/logger/charts/{id}/options {"auto_range": bool} view options
+  PUT    /api/logger/order               {"ids": [...], "new_rows": [...]} chart order;
+                                         new_rows (optional) = charts starting a grid row
+  GET    /api/logger/data                s=ID (repeat) start end points [tier since auto]
   GET    /api/logger/export.csv          s=ID (repeat; omit for all) start end
                                          tz (IANA) tzo (minutes) name layout=wide|long
   GET    /api/logger/storage             per-series storage details
@@ -69,6 +71,11 @@ def register(router: Router, ctx) -> None:
         chart = call(service().update_chart, req.params["id"], req.json_object())
         return json_response({"chart": chart})
 
+    @router.route("PUT", "/api/logger/charts/{id}/options")
+    def put_chart_options(req: Request):
+        chart = call(service().set_chart_options, req.params["id"], req.json_object())
+        return json_response({"chart": chart})
+
     @router.route("DELETE", "/api/logger/charts/{id}")
     def delete_chart(req: Request):
         call(service().delete_chart, req.params["id"])
@@ -76,10 +83,16 @@ def register(router: Router, ctx) -> None:
 
     @router.route("PUT", "/api/logger/order")
     def put_order(req: Request):
-        ids = req.json_object().get("ids")
+        data = req.json_object()
+        ids = data.get("ids")
         if not isinstance(ids, list) or not all(isinstance(i, str) for i in ids):
             raise HTTPError(400, "'ids' must be a list of chart ids")
-        service().reorder(ids)
+        new_rows = data.get("new_rows")
+        if new_rows is not None and (
+            not isinstance(new_rows, list) or not all(isinstance(i, str) for i in new_rows)
+        ):
+            raise HTTPError(400, "'new_rows' must be a list of chart ids")
+        service().reorder(ids, new_rows)
         return json_response({"ok": True})
 
     def window(req: Request) -> tuple[float, float]:
@@ -110,6 +123,7 @@ def register(router: Router, ctx) -> None:
             req.int_arg("points", 800),
             req.int_arg("tier"),
             req.float_arg("since", lo=TIME_MIN_S, hi=TIME_MAX_S),
+            req.arg("auto") in ("1", "true"),
         )
         return json_response(result)
 

@@ -14,3 +14,8 @@ MAX_CHARTS = 32
 # Chart point budget bounds (the UI sends its plot width in CSS pixels)
 POINTS_MIN = 50
 POINTS_MAX = 4000
+
+# Auto range: a chart's window starts at its oldest stored sample (never
+# earlier than requested), but spans at least this long so new charts aren't
+# stretched over a few seconds of data.
+AUTO_MIN_SPAN_S = 300.0
