@@ -273,6 +273,9 @@ class TestReaderScheduling:
 class TestIntegration:
     def test_dashboard_series_is_per_node(self):
         collector = SensorDataCollector("pi5-gateway", dashboard_client=None)
+        # The listener receives the same datapoints that are posted to the dashboard
+        posted = []
+        collector.set_listener(lambda dps, ts: posted.extend(dps))
         for node in ("ab01-7", "ab01-8"):
             collector.add_readings(
                 node,
@@ -280,12 +283,21 @@ class TestIntegration:
                  SensorReading("SNR", "dB", 7.5, "LoRaSNR", 1000.0)],
                 is_local=False,
             )
-        ids = {dp["id"]: dp["name"] for dp in collector.get_recent_readings()}
+        ids = {dp["id"]: dp["name"] for dp in posted}
         assert ids == {
             "ab01_7_lorarssi_rssi": "ab01-7 RSSI",
             "ab01_7_lorasnr_snr": "ab01-7 SNR",
             "ab01_8_lorarssi_rssi": "ab01-8 RSSI",
             "ab01_8_lorasnr_snr": "ab01-8 SNR",
+        }
+
+        # The web UI feed keeps the node in its own column and the bare reading name
+        feed = {dp["id"]: (dp["node"], dp["name"]) for dp in collector.get_recent_readings()}
+        assert feed == {
+            "ab01_7_lorarssi_rssi": ("ab01-7", "RSSI"),
+            "ab01_7_lorasnr_snr": ("ab01-7", "SNR"),
+            "ab01_8_lorarssi_rssi": ("ab01-8", "RSSI"),
+            "ab01_8_lorasnr_snr": ("ab01-8", "SNR"),
         }
 
     def test_link_readings_are_not_packets(self):
