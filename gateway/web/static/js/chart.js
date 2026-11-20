@@ -253,8 +253,8 @@ export class TimeChart {
           values: (u, splits, axisIdx, space, incr) => splits.map((v) => fmtTick(v, incr)),
         },
       ],
+      // No cursor sync: the crosshair and readout belong to the hovered chart only
       cursor: {
-        sync: { key: 'gw-history' },
         drag: { x: true, y: false, dist: 8 },
         points: {
           size: 9,
