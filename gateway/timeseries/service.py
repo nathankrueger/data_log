@@ -401,7 +401,7 @@ class LoggerService:
             "bytes": self._db_size(),
         }
 
-    def _db_size(self) -> int:
+    def _disk_size(self) -> int:
         total = 0
         for suffix in ("", "-wal"):
             try:
@@ -409,6 +409,17 @@ class LoggerService:
             except OSError:
                 pass
         return total
+
+    def _db_size(self) -> int:
+        """
+        Bytes of history stored: the database's pages, not its files. The WAL
+        holds whole-page copies of recent writes, so file sizes overstate a
+        small history many times over. Measured after every write; until the
+        first one (recording off since start-up) the file size stands in.
+        """
+        store = self._store
+        used = store.used_bytes() if store is not None else None
+        return self._disk_size() if used is None else used
 
     def state(self) -> dict:
         with self._lock:
@@ -687,7 +698,13 @@ class LoggerService:
             row["charts"] = usage.get(row["id"], [])
             row["recording"] = row["id"] in retention and self.recording
         rows.sort(key=lambda r: (str(r["node"]).lower(), str(r["name"]).lower()))
-        return {"bytes": self._db_size(), "path": str(self._db_path), "series": rows}
+        used = store.used_bytes(refresh=True)
+        return {
+            "bytes": self._disk_size() if used is None else used,
+            "disk_bytes": self._disk_size(),
+            "path": str(self._db_path),
+            "series": rows,
+        }
 
     def purge(self, keys: list[str] | None) -> list[int]:
         """Delete stored samples for keys (all series when None)."""

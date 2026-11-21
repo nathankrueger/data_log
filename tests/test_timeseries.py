@@ -1,5 +1,6 @@
 """Tests for the on-gateway history logger (gateway/timeseries)."""
 
+import os
 import time
 
 import pytest
@@ -9,7 +10,7 @@ from gateway.timeseries.constants import AUTO_MIN_SPAN_S, TIERS
 from gateway.timeseries.export import csv_long, csv_wide, resolve_tz, safe_filename
 from gateway.timeseries.recorder import Recorder
 from gateway.timeseries.service import LoggerService, NotFound, _clean_chart
-from gateway.timeseries.store import TimeSeriesStore, pick_tier
+from gateway.timeseries.store import WAL_AUTOCHECKPOINT_PAGES, TimeSeriesStore, pick_tier
 from utils.protocol import SensorReading
 
 DAY = 86400
@@ -67,6 +68,35 @@ class TestStoreBasics:
         assert pick_tier(3600, 1000) == TIERS[0]
         assert pick_tier(7 * DAY, 1000) == 1800
         assert pick_tier(10 * 365 * DAY, 100) == TIERS[-1]
+
+
+class TestStorageSize:
+    def test_size_counts_data_not_the_write_log(self, store, recorder):
+        empty = store.used_bytes()
+        assert empty is not None  # measured when the writer opened
+        t0 = 1_700_000_000.0
+        for i in range(300):  # one commit per sample: worst case for the WAL
+            recorder.ingest([dp("a_bme_temp", float(i))], t0 + i * 60)
+            recorder.flush()
+        used = store.used_bytes()
+        assert empty < used < 128 * 1024  # 300 samples + rollups fill a few pages
+        # Every commit appends whole pages to the WAL; it is folded back into
+        # the database every WAL_AUTOCHECKPOINT_PAGES pages, not every ~4 MB
+        wal = os.path.getsize(f"{store.path}-wal")
+        assert wal <= (WAL_AUTOCHECKPOINT_PAGES + 32) * (4096 + 24) + 32
+        assert store.size_bytes() > used  # the files still carry the log
+
+    def test_purge_and_refresh(self, store, recorder):
+        for i in range(2000):
+            recorder.ingest([dp("a_bme_temp", float(i)), dp("b_bme_temp", float(i))], 1_700_000_000.0 + i)
+        recorder.flush()
+        full = store.used_bytes()
+        recorder.purge(None)
+        assert store.used_bytes() < full
+        # A fresh store object (gateway restart, recording off) measures on demand
+        again = TimeSeriesStore(store.path)
+        assert again.used_bytes() is None
+        assert again.used_bytes(refresh=True) == store.used_bytes()
 
 
 class TestRecorder:
@@ -345,6 +375,17 @@ class TestService:
         assert res["first"] == pytest.approx(now, abs=5)
         assert res["start"] == pytest.approx(now - AUTO_MIN_SPAN_S, abs=5)
         assert res["series"]["patio_bme280_temperature"]["v"] == [21.0]
+
+    def test_stored_bytes_are_the_database_not_its_files(self, service, collector):
+        service.create_chart({"series": ["patio_bme280_temperature"], "max_age_s": DAY})
+        service.set_enabled(True)
+        for i in range(20):
+            collector.add_readings("patio", readings(("Temperature", "C", 20.0 + i)))
+            service._recorder.flush()
+        store = service._store
+        assert service.summary()["bytes"] == store.used_bytes() < store.size_bytes()
+        st = service.storage()
+        assert st["bytes"] == store.used_bytes() and st["disk_bytes"] == store.size_bytes()
 
     def test_config_persists(self, tmp_path, collector):
         svc = LoggerService(tmp_path / "logger", collector=collector)

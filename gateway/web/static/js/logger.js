@@ -883,7 +883,12 @@ function renderStorage(st) {
   const summary = h(
     'div',
     { class: 'storage-summary' },
-    h('div', { class: 'mini-stat' }, h('span', { class: 'mini-label' }, 'On disk'), h('span', { class: 'mini-value' }, fmtBytes(st.bytes))),
+    h(
+      'div',
+      { class: 'mini-stat', title: st.disk_bytes != null ? `${fmtBytes(st.disk_bytes)} on disk, including SQLite's write log` : null },
+      h('span', { class: 'mini-label' }, 'Stored'),
+      h('span', { class: 'mini-value' }, fmtBytes(st.bytes)),
+    ),
     h('div', { class: 'mini-stat' }, h('span', { class: 'mini-label' }, 'Series stored'), h('span', { class: 'mini-value' }, String(rows.length))),
   );
   const scroller = h('div', { class: 'scroll storage-scroll', 'data-fade-sticky': 'thead' });

@@ -132,6 +132,13 @@ NO_WRITER = object()
 _SQLITE_CORRUPT = 11
 _SQLITE_NOTADB = 26
 
+# Every commit appends whole 4 KB pages to the WAL, and SQLite only folds them
+# back into the database after 1000 pages (~4 MB) by default, so a small
+# history sat mostly in a log file that never shrank. Checkpoint every ~400 KB
+# instead, and cut the file back down after an unusually large transaction.
+WAL_AUTOCHECKPOINT_PAGES = 100
+WAL_SIZE_LIMIT_BYTES = 1 << 20
+
 
 def is_corruption(exc: BaseException) -> bool:
     """True if a sqlite3 error means the database file is damaged (not just
@@ -229,6 +236,7 @@ class TimeSeriesStore:
         self._pool_lock = threading.Lock()
         self._pool_gen = 0  # bumped when the file may have been replaced
         self._owner = None  # the one recorder allowed to write_batch(); None = unfenced
+        self._used: int | None = None  # bytes the database holds, measured after each write
 
     # -------------------------------------------------------------------------
     # Connections
@@ -238,6 +246,7 @@ class TimeSeriesStore:
         return self.path.exists()
 
     def size_bytes(self) -> int:
+        """Space the files take on disk (database + WAL)."""
         total = 0
         for suffix in ("", "-wal"):
             try:
@@ -246,6 +255,32 @@ class TimeSeriesStore:
                 pass
         return total
 
+    def used_bytes(self, refresh: bool = False) -> int | None:
+        """
+        Bytes the database holds (its pages, wherever they currently live, minus
+        free pages), as of the last write. None if not measured since start-up
+        and refresh is False. refresh=True measures now with a reader.
+        """
+        if refresh and self.exists():
+            try:
+                with self._reader() as conn:
+                    self._note_size(conn)
+            except sqlite3.Error as e:
+                logger.debug(f"Store size check failed: {e}")
+        return self._used
+
+    def _note_size(self, conn: sqlite3.Connection) -> None:
+        # Never raises: it runs right after a commit, and a flush reported as
+        # failed would be retried (double-counting merged late samples).
+        try:
+            (pages,) = conn.execute("PRAGMA page_count").fetchone()
+            (free,) = conn.execute("PRAGMA freelist_count").fetchone()
+            (page_size,) = conn.execute("PRAGMA page_size").fetchone()
+        except sqlite3.Error as e:
+            logger.debug(f"Store size check failed: {e}")
+            return
+        self._used = max(0, pages - free) * page_size
+
     def _connect(self) -> sqlite3.Connection:
         conn = sqlite3.connect(
             str(self.path), timeout=15.0, isolation_level=None, check_same_thread=False
@@ -253,6 +288,8 @@ class TimeSeriesStore:
         conn.execute("PRAGMA synchronous=NORMAL")
         conn.execute("PRAGMA temp_store=MEMORY")
         conn.execute("PRAGMA cache_size=-1024")  # 1 MiB page cache per connection
+        conn.execute(f"PRAGMA wal_autocheckpoint={WAL_AUTOCHECKPOINT_PAGES}")
+        conn.execute(f"PRAGMA journal_size_limit={WAL_SIZE_LIMIT_BYTES}").fetchall()
         return conn
 
     def _init_schema(self, conn: sqlite3.Connection) -> None:
@@ -276,6 +313,7 @@ class TimeSeriesStore:
             conn = self._connect()
             try:
                 self._init_schema(conn)
+                self._note_size(conn)
             except BaseException:
                 conn.close()
                 raise
@@ -315,6 +353,7 @@ class TimeSeriesStore:
         the damaged copy stays next to it for manual recovery.
         """
         self.close_writer()
+        self._used = None
         stamp = time.strftime("%Y%m%d-%H%M%S")
         moved = None
         for suffix in ("", "-wal", "-shm"):
@@ -465,6 +504,7 @@ class TimeSeriesStore:
                     conn.executemany(_REPLACE_AGG, agg_rows)
                 if merge_rows:
                     conn.executemany(_MERGE_AGG, merge_rows)
+            self._note_size(conn)
 
     def prune(self, now: float | None = None) -> int:
         """Apply each series' retention. Index range deletes: O(log n + deleted)."""
@@ -486,6 +526,7 @@ class TimeSeriesStore:
                         ).rowcount
             if deleted:
                 self._maybe_shrink(conn)
+                self._note_size(conn)
         return deleted
 
     def purge(self, keys: Iterable[str] | None = None) -> list[int]:
@@ -502,6 +543,7 @@ class TimeSeriesStore:
                         conn.execute("DELETE FROM raw WHERE sid = ?", (sid,))
                         conn.execute("DELETE FROM agg WHERE sid = ?", (sid,))
             self._maybe_shrink(conn, force=True)
+            self._note_size(conn)
         return sids
 
     def _maybe_shrink(self, conn: sqlite3.Connection, force: bool = False) -> None:

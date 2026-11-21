@@ -35,6 +35,7 @@ const state = {
     size: 200,
     rows: [], // newest first: {r, tr}
     paused: false,
+    dated: false, // time column shows dates (see syncFeedDates)
     unseen: 0, // rows added while scrolled away from the top
     filter: prefs.get('feed.filter', ''),
     nodes: new Set(prefs.get('feed.nodes', [])),
@@ -248,7 +249,9 @@ const feedScroll = () => $('#feed-scroll');
 
 async function pollFeed() {
   const f = state.feed;
-  if (f.paused || !$('#feed-card').open) return; // collapsed: catch up on reopen
+  if (!$('#feed-card').open) return; // collapsed: catch up on reopen
+  syncFeedDates(); // the day can roll over with no new readings
+  if (f.paused) return;
   const q = new URLSearchParams({ after: String(f.seq) });
   if (f.epoch != null) q.set('epoch', String(f.epoch));
   const data = await api(`/api/readings?${q}`);
@@ -269,14 +272,33 @@ function clearFeed() {
   state.feed.rows = [];
   state.feed.unseen = 0;
   $('#feed-body').replaceChildren();
+  syncFeedDates();
   updateFeedChrome();
+}
+
+// The time column shows dates only while the feed shows readings from before
+// today (an overnight rollover, or nodes that went quiet). Every row uses the
+// same format, so the column stays aligned.
+function feedTime(t, dated) {
+  if (!dated) return [fmtClock(t)];
+  const date = new Date(t * 1000).toLocaleDateString([], { month: 'short', day: 'numeric' });
+  return [h('span', { class: 'date' }, date), fmtClock(t)];
+}
+
+function syncFeedDates() {
+  const f = state.feed;
+  const today = new Date().setHours(0, 0, 0, 0) / 1000;
+  const dated = f.rows.some((x) => !x.tr.hidden && x.r.t < today);
+  if (dated === f.dated) return;
+  f.dated = dated;
+  for (const { r, tr } of f.rows) tr.firstChild.replaceChildren(...feedTime(r.t, dated));
 }
 
 function feedRow(r, fresh) {
   return h(
     'tr',
     { class: fresh ? 'fresh' : null },
-    h('td', { class: 'time', title: new Date(r.t * 1000).toLocaleString() }, fmtClock(r.t)),
+    h('td', { class: 'time', title: new Date(r.t * 1000).toLocaleString() }, ...feedTime(r.t, state.feed.dated)),
     h('td', { class: 'feed-node' }, r.node),
     h('td', { title: r.id }, r.name),
     h('td', { class: 'value' }, fmtNum(r.value), r.units ? h('small', null, r.units) : null),
@@ -307,6 +329,7 @@ function addFeedRows(readings) {
   const grew = scroller.scrollHeight - before;
   f.rows = added.concat(f.rows);
   trimFeed();
+  syncFeedDates();
 
   // Keep the reader's place when they've scrolled down into history
   if (!atTop && !firstLoad) {
@@ -331,6 +354,7 @@ function matchesFilter(r) {
 
 function applyFilter() {
   for (const row of state.feed.rows) row.tr.hidden = !matchesFilter(row.r);
+  syncFeedDates();
   updateFeedChrome();
 }
 

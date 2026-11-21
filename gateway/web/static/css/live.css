@@ -124,6 +124,7 @@
 }
 .feed-table td { white-space: nowrap; }
 .feed-table td.time { color: var(--text-2); font-variant-numeric: tabular-nums; }
+.feed-table td.time .date { color: var(--text-3); margin-right: 7px; }
 .feed-table td.feed-node { font-weight: 500; }
 .feed-table td.value { text-align: right; font-variant-numeric: tabular-nums; font-weight: 500; }
 .feed-table td.value small { color: var(--text-3); font-weight: 400; margin-left: 3px; }
