@@ -7,14 +7,19 @@ Usage: $0 [OPTIONS]
 Install or activate the data_log Python environment.
 
 OPTIONS:
-    -r, --reinstall    Remove existing .venv and reinstall from scratch
-    -u, --update       Update dependencies from requirements.txt
-    -h, --help         Display this help message
+    -r, --reinstall      Remove existing .venv and reinstall from scratch
+    -u, --update         Update dependencies from requirements.txt
+    -p, --python PATH    Python interpreter to create .venv with (default: python3).
+                         A path or a command name; Python 3.9 or newer. Only used
+                         when .venv is created (first run, or with --reinstall).
+    -h, --help           Display this help message
 
 EXAMPLES:
-    $0                 # Activate existing .venv or create if missing
-    $0 --reinstall     # Force fresh installation
-    $0 --update        # Install any new requirements
+    $0                                       # Activate existing .venv or create if missing
+    $0 --reinstall                           # Force fresh installation
+    $0 --update                              # Install any new requirements
+    $0 --reinstall --python python3.12       # Rebuild .venv on another interpreter
+    $0 --reinstall -p /opt/py/bin/python3    # ...or give its full path
 EOF
     return 0
 }
@@ -28,9 +33,25 @@ fi
 # Parse command line arguments
 REINSTALL=false
 UPDATE=false
+PYTHON_BIN=python3
+PYTHON_CUSTOM=false
 
 while [[ $# -gt 0 ]]; do
     case $1 in
+        -p|--python)
+            if [ -z "$2" ]; then
+                echo "Error: $1 needs an interpreter path or command name"
+                return 1 2>/dev/null || exit 1
+            fi
+            PYTHON_BIN="$2"
+            PYTHON_CUSTOM=true
+            shift 2
+            ;;
+        --python=*)
+            PYTHON_BIN="${1#*=}"
+            PYTHON_CUSTOM=true
+            shift
+            ;;
         -r|--reinstall)
             REINSTALL=true
             shift
@@ -50,6 +71,39 @@ while [[ $# -gt 0 ]]; do
             ;;
     esac
 done
+
+# Resolve and check the interpreter before touching anything (only needed
+# when a .venv will be built, or to compare against an explicit --python)
+if [ "$REINSTALL" = true ] || [ ! -d ".venv" ] || [ "$PYTHON_CUSTOM" = true ]; then
+    # Never look the interpreter up in the .venv being replaced (it may be active)
+    SEARCH_PATH=":$PATH:"
+    SEARCH_PATH="${SEARCH_PATH//:$(pwd)\/.venv\/bin:/:}"
+    if [ -n "$VIRTUAL_ENV" ] && [ "$VIRTUAL_ENV" -ef .venv ]; then
+        SEARCH_PATH="${SEARCH_PATH//:$VIRTUAL_ENV\/bin:/:}"
+    fi
+    SEARCH_PATH="${SEARCH_PATH#:}"
+    SEARCH_PATH="${SEARCH_PATH%:}"
+    PYTHON_PATH="$(PATH="$SEARCH_PATH"; command -v "$PYTHON_BIN" 2>/dev/null)"
+    if [ -z "$PYTHON_PATH" ] || [ ! -x "$PYTHON_PATH" ]; then
+        echo "Error: Python interpreter not found: $PYTHON_BIN"
+        return 1 2>/dev/null || exit 1
+    fi
+    if ! "$PYTHON_PATH" -c 'import sys, venv; sys.exit(0 if sys.version_info >= (3, 9) else 1)' 2>/dev/null; then
+        echo "Error: $PYTHON_PATH is not Python 3.9+ with the venv module"
+        echo "       (on Debian/Raspberry Pi OS: sudo apt install python3-venv)"
+        return 1 2>/dev/null || exit 1
+    fi
+    PYTHON_VERSION="$("$PYTHON_PATH" -c 'import platform; print(platform.python_version())')"
+fi
+
+# An existing .venv keeps the interpreter it was built with
+if [ "$PYTHON_CUSTOM" = true ] && [ "$REINSTALL" = false ] && [ -x ".venv/bin/python" ]; then
+    VENV_VERSION="$(.venv/bin/python -c 'import platform; print(platform.python_version())' 2>/dev/null)"
+    if [ "$VENV_VERSION" != "$PYTHON_VERSION" ]; then
+        echo "Warning: .venv uses Python ${VENV_VERSION:-unknown}, not $PYTHON_VERSION ($PYTHON_PATH)."
+        echo "         Add --reinstall to rebuild it with $PYTHON_BIN."
+    fi
+fi
 
 # Handle reinstall option
 if [ "$REINSTALL" = true ]; then
@@ -94,12 +148,16 @@ else
         echo "Installing GPIO library..."
         sudo apt install python3-rpi-lgpio
 
-        echo "Creating new virtual environment..."
+        if [ "$PYTHON_CUSTOM" = true ] && [ "$("$PYTHON_PATH" -c 'import sys; print(sys.base_prefix)')" != "/usr" ]; then
+            echo "Note: python3-rpi-lgpio from apt is installed for the system Python;"
+            echo "      $PYTHON_PATH may not see it (GPIO would fail to import)."
+        fi
+        echo "Creating new virtual environment with Python $PYTHON_VERSION ($PYTHON_PATH)..."
         # use system packages for python3-rpi-lgpio access
-        python3 -m venv --system-site-packages .venv
+        "$PYTHON_PATH" -m venv --system-site-packages .venv || { return 1 2>/dev/null || exit 1; }
     else
-        echo "Creating new virtual environment (dev mode — no hardware deps)..."
-        python3 -m venv .venv
+        echo "Creating new virtual environment with Python $PYTHON_VERSION ($PYTHON_PATH) (dev mode — no hardware deps)..."
+        "$PYTHON_PATH" -m venv .venv || { return 1 2>/dev/null || exit 1; }
     fi
     source .venv/bin/activate
     echo "Updating pip..."
