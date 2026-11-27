@@ -25,10 +25,11 @@ from __future__ import annotations
 
 import logging
 import math
+import shutil
 import threading
 import time
 
-from gateway.timeseries.constants import TIERS
+from gateway.timeseries.constants import MIN_FREE_BYTES, TIERS
 from gateway.timeseries.store import TimeSeriesStore, is_corruption
 
 logger = logging.getLogger(__name__)
@@ -85,6 +86,8 @@ class Recorder(threading.Thread):
         self.last_error: str | None = None
         self.corrupt = False  # set when the DB file is damaged; the service recovers
         self.consecutive_failures = 0  # flushes failing in a row (watchdog input)
+        self.disk_low = False  # writes paused: the filesystem is nearly full
+        self.min_free_bytes = MIN_FREE_BYTES
         self._clock_ref = (time.time(), time.monotonic())
         self._prune_hold_until = 0.0
 
@@ -192,9 +195,39 @@ class Recorder(threading.Thread):
     # Work (all under _work_lock; safe to call from any thread)
     # -------------------------------------------------------------------------
 
+    def _disk_ok(self) -> bool:
+        """
+        False while the data directory's filesystem is nearly full. Writes
+        pause (ingest keeps the newest MAX_PENDING samples in memory) until
+        space is freed, so history kept forever can't fill the SD card and
+        take the gateway's logs and config writes down with it.
+        """
+        try:
+            free = shutil.disk_usage(self._store.path.parent).free
+        except OSError:
+            return True  # can't tell: let SQLite report a real failure
+        low = free < self.min_free_bytes
+        if low != self.disk_low:
+            self.disk_low = low
+            if low:
+                logger.warning(
+                    f"Only {free / 1e6:.0f} MB free on the history disk; recording paused "
+                    f"until more than {self.min_free_bytes / 1e6:.0f} MB is free"
+                )
+            else:
+                logger.info("History disk has space again; recording resumed")
+        if low:
+            self.last_error = (
+                f"Disk nearly full ({free / 1e6:.0f} MB free): recording paused until "
+                f"{self.min_free_bytes / 1e6:.0f} MB is free. Clear old data in Storage."
+            )
+        return not low
+
     def flush(self) -> int:
         """Commit buffered samples. Returns the number written."""
         with self._work_lock:
+            if not self._disk_ok():
+                return 0  # not a failure: nothing to restart, just no room
             with self._lock:
                 batch, self._pending = self._pending, []
                 self._inflight = batch

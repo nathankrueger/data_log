@@ -70,6 +70,7 @@ const ICONS = {
   alert: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v5.5M12 16.5v.01"/>',
   antenna: '<path d="M12 12v9M8.5 21h7"/><circle cx="12" cy="9.5" r="2"/><path d="M7.8 5.3a6 6 0 0 0 0 8.4M16.2 5.3a6 6 0 0 1 0 8.4M5 2.5a10 10 0 0 0 0 14M19 2.5a10 10 0 0 1 0 14"/>',
   clock: '<circle cx="12" cy="12" r="8.5"/><path d="M12 7.5V12l3 2"/>',
+  calendar: '<rect x="3.5" y="5" width="17" height="15.5" rx="2"/><path d="M3.5 10h17M8 3v4M16 3v4"/>',
   nodes: '<rect x="3.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="3.5" width="7" height="7" rx="1.5"/><rect x="3.5" y="13.5" width="7" height="7" rx="1.5"/><rect x="13.5" y="13.5" width="7" height="7" rx="1.5"/>',
   sliders: '<path d="M4 7h10M18 7h2M4 17h4M12 17h8"/><circle cx="16" cy="7" r="2"/><circle cx="10" cy="17" r="2"/>',
   list: '<path d="M8 6h12M8 12h12M8 18h12M4 6h.01M4 12h.01M4 18h.01"/>',
@@ -226,6 +227,11 @@ export function fmtSpan(seconds) {
   if (seconds >= 86400) return `${(seconds / 86400).toFixed(1)} days`;
   if (seconds >= 3600) return `${(seconds / 3600).toFixed(1)} hours`;
   return plural(Math.round(seconds / 60), 'minute');
+}
+
+/** How long a chart keeps history: a span, or "forever" for 0. */
+export function fmtKeep(seconds) {
+  return seconds ? fmtSpan(seconds) : 'forever';
 }
 
 export function fmtBytes(n) {
@@ -454,7 +460,10 @@ document.addEventListener('click', (e) => {
   if (openMenu && !openMenu.parentElement.contains(e.target)) closeMenu();
 });
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape') closeMenu();
+  if (e.key === 'Escape' && openMenu) {
+    closeMenu();
+    e.preventDefault(); // one Escape closes the menu, not the dialog behind it too
+  }
 });
 
 // ---------------------------------------------------------------------------

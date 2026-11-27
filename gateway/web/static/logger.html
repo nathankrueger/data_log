@@ -61,6 +61,7 @@
 
     <div class="toolbar">
       <div class="seg" id="range-seg" role="group" aria-label="Time range"></div>
+      <button class="btn range-btn" id="range-custom" type="button" aria-pressed="false" title="Show a date range"><span id="range-custom-label">Dates</span></button>
       <button class="btn live-btn" id="live-btn" type="button" aria-pressed="true" title="Update charts as data arrives"><span class="live-dot"></span>Live</button>
       <div class="spacer"></div>
       <button class="btn btn-primary" id="add-chart" type="button"></button>
@@ -94,6 +95,11 @@
         </label>
         <div class="picker-frame"><div class="picker scroll" id="cd-series" data-fade-sticky=".picker-group"></div></div>
       </div>
+      <div class="field" id="cd-colors-field" hidden>
+        <div class="field-label">Colors</div>
+        <div class="field-hint">Defaults follow the theme. Pick another palette color, or a custom one.</div>
+        <div class="color-list" id="cd-colors"></div>
+      </div>
       <div class="field">
         <div class="field-label">Keep history for <span class="muted" id="cd-ret-label"></span></div>
         <div class="ret-row">
@@ -113,6 +119,38 @@
     <div class="modal-foot">
       <button class="btn" type="button" id="cd-cancel">Cancel</button>
       <button class="btn btn-primary" type="button" id="cd-save">Create chart</button>
+    </div>
+  </dialog>
+
+  <dialog class="modal modal-narrow" id="range-dialog" aria-labelledby="rd-heading">
+    <div class="modal-head">
+      <h2 id="rd-heading">Date range</h2>
+      <button class="btn-icon" type="button" id="rd-close" aria-label="Close"></button>
+    </div>
+    <div class="modal-body">
+      <div class="field">
+        <div class="field-label">Quick picks</div>
+        <div class="seg seg-wrap" id="rd-presets" role="group" aria-label="Quick picks"></div>
+      </div>
+      <div class="range-fields">
+        <label class="field">
+          <span class="field-label">From</span>
+          <input class="input" id="rd-start" type="datetime-local" step="60">
+        </label>
+        <label class="field">
+          <span class="field-label">To</span>
+          <input class="input" id="rd-end" type="datetime-local" step="60">
+        </label>
+      </div>
+      <label class="check-row">
+        <input type="checkbox" id="rd-now">
+        <span>Until now <span class="muted">— keeps updating as data arrives</span></span>
+      </label>
+      <div class="field-error" id="rd-error" hidden></div>
+    </div>
+    <div class="modal-foot">
+      <button class="btn" type="button" id="rd-cancel">Cancel</button>
+      <button class="btn btn-primary" type="button" id="rd-apply">Show range</button>
     </div>
   </dialog>
 

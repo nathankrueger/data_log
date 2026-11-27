@@ -4,10 +4,12 @@ import {
   $,
   api,
   applyFlow,
+  cssVar,
   dragHandle,
   fmtAgo,
   fmtBytes,
   fmtDur,
+  fmtKeep,
   fmtNum,
   fmtSpan,
   h,
@@ -24,7 +26,7 @@ import {
   startAgeTicker,
   toast,
 } from './common.js';
-import { buildData, TimeChart, TIER_LABEL } from './chart.js';
+import { buildData, seriesColor, TimeChart, TIER_LABEL } from './chart.js';
 
 const RANGES = [
   ['15m', 900],
@@ -33,8 +35,11 @@ const RANGES = [
   ['24h', 86400],
   ['3d', 259200],
   ['7d', 604800],
+  ['30d', 2592000],
+  ['1y', 31536000],
   ['All', 0],
 ];
+const FOREVER = 0; // max_age_s: keep everything (matches the gateway)
 const RETENTIONS = [
   ['1 hour', 3600],
   ['6 hours', 21600],
@@ -43,7 +48,10 @@ const RETENTIONS = [
   ['1 week', 604800],
   ['2 weeks', 1209600],
   ['4 weeks', 2419200],
+  ['1 year', 31536000],
+  ['Forever', FOREVER],
 ];
+const PALETTE_SIZE = 8; // --series-1..8
 const LIVE_MS = 5000;
 const STATE_MS = 15000;
 const FULL_REFRESH_MS = 120000; // periodic re-sync (lets the store re-pick resolution)
@@ -55,6 +63,9 @@ const S = {
   logger: null,
   catalog: new Map(),
   range: prefs.get('logger.range', 0),
+  // Date range instead of a preset: {start, end} (end null = until now) or
+  // {preset} for calendar picks recomputed every time (today, last month...)
+  custom: prefs.get('logger.custom', null),
   live: prefs.get('logger.live', true),
   views: new Map(),
   offset: 0, // server clock - browser clock, seconds
@@ -65,6 +76,81 @@ let chartSort = null; // sortable controller for the chart grid
 
 const serverNow = () => Date.now() / 1000 + S.offset;
 const maxSeries = () => S.logger?.limits?.max_series_per_chart ?? 8;
+
+// ---------------------------------------------------------------------------
+// Date ranges (all charts share one; local calendar time)
+// ---------------------------------------------------------------------------
+
+const DAY_PRESETS = [
+  ['today', 'Today'],
+  ['yesterday', 'Yesterday'],
+  ['month', 'This month'],
+  ['last-month', 'Last month'],
+  ['year', 'This year'],
+  ['last-year', 'Last year'],
+];
+
+function presetBounds(key) {
+  const d = new Date();
+  const y = d.getFullYear();
+  const m = d.getMonth();
+  const day = d.getDate();
+  const at = (yy, mm, dd) => new Date(yy, mm, dd).getTime() / 1000; // local midnight
+  switch (key) {
+    case 'today': return [at(y, m, day), null];
+    case 'yesterday': return [at(y, m, day - 1), at(y, m, day)];
+    case 'month': return [at(y, m, 1), null];
+    case 'last-month': return [at(y, m - 1, 1), at(y, m, 1)];
+    case 'year': return [at(y, 0, 1), null];
+    case 'last-year': return [at(y - 1, 0, 1), at(y, 0, 1)];
+    default: return null;
+  }
+}
+
+/** [start, end] of the date range in use (end null = until now), or null for preset spans. */
+function customBounds() {
+  const c = S.custom;
+  if (!c || typeof c !== 'object') return null;
+  if (c.preset) return presetBounds(c.preset);
+  if (!Number.isFinite(c.start)) return null;
+  return [c.start, Number.isFinite(c.end) ? c.end : null];
+}
+
+/** A range that has ended: nothing new can arrive, so its charts aren't polled. */
+function fixedWindow() {
+  const b = customBounds();
+  return !!b && b[1] != null;
+}
+
+function fmtPoint(ts) {
+  const d = new Date(ts * 1000);
+  const opts = { month: 'short', day: 'numeric' };
+  if (d.getFullYear() !== new Date().getFullYear()) opts.year = 'numeric';
+  if (d.getHours() || d.getMinutes()) Object.assign(opts, { hour: 'numeric', minute: '2-digit' });
+  return d.toLocaleString([], opts);
+}
+
+function customLabel() {
+  const b = customBounds();
+  if (!b) return 'Dates';
+  const preset = S.custom.preset && DAY_PRESETS.find(([k]) => k === S.custom.preset);
+  if (preset) return preset[1];
+  return `${fmtPoint(b[0])} – ${b[1] == null ? 'now' : fmtPoint(b[1])}`;
+}
+
+const pad2 = (n) => String(n).padStart(2, '0');
+
+/** Seconds -> value for <input type="datetime-local"> (local time, minutes). */
+function toLocalInput(ts) {
+  const d = new Date(ts * 1000);
+  return `${d.getFullYear()}-${pad2(d.getMonth() + 1)}-${pad2(d.getDate())}T${pad2(d.getHours())}:${pad2(d.getMinutes())}`;
+}
+
+function fromLocalInput(value) {
+  if (!value) return null;
+  const t = new Date(value).getTime(); // no offset in the string: parsed as local time
+  return Number.isFinite(t) ? t / 1000 : null;
+}
 
 // ---------------------------------------------------------------------------
 // Chart view: one card, its data, and its uPlot instance
@@ -211,21 +297,46 @@ class ChartView {
       const c = S.catalog.get(s.id);
       const name = c?.name ?? s.id;
       const node = c?.node ?? '';
-      return { id: s.id, color: s.color, name, node, units: c?.units ?? this.cfg.units, label: node ? `${node} · ${name}` : name };
+      return {
+        id: s.id,
+        color: s.color,
+        custom_color: s.custom_color || null,
+        name,
+        node,
+        units: c?.units ?? this.cfg.units,
+        label: node ? `${node} · ${name}` : name,
+      };
     });
   }
 
   span() {
-    return S.range ? Math.min(S.range, this.cfg.max_age_s) : this.cfg.max_age_s;
+    const age = this.cfg.max_age_s || Infinity; // 0 = kept forever
+    return S.range ? Math.min(S.range, age) : age;
   }
 
-  window() {
+  /** Fit the window to the stored data: auto range, or an endless span (nothing else bounds it). */
+  fits() {
+    return this.autoRange() || !Number.isFinite(this.span());
+  }
+
+  /** [start, end] shown. query=true: what to ask for before the oldest sample is known. */
+  window(query = false) {
     if (this.zoom) return this.zoom;
     const now = serverNow();
-    let start = now - this.span();
+    const custom = customBounds();
+    if (custom) {
+      const end = custom[1] ?? now;
+      return [Math.min(custom[0], end - 60), end];
+    }
+    const span = this.span();
+    if (!Number.isFinite(span) && this.first == null) {
+      // Kept forever, extent unknown: ask from the start and let the gateway fit it
+      return [query ? 0 : now - AUTO_MIN_SPAN_S, now];
+    }
+    let start = Number.isFinite(span) ? now - span : 0;
     // Auto range: begin at the oldest stored sample (the gateway clips the
     // same way, so the resolution suits the data actually held)
-    if (this.autoRange() && this.first != null) start = Math.max(start, Math.min(this.first, now - AUTO_MIN_SPAN_S));
+    if (this.fits() && this.first != null) start = Math.max(start, Math.min(this.first, now - AUTO_MIN_SPAN_S));
     return [start, now];
   }
 
@@ -239,10 +350,11 @@ class ChartView {
       return;
     }
     const version = this.version || 0;
-    const auto = this.autoRange() && !this.zoom;
-    const [start, end] = this.window();
+    // An explicit date range is shown as picked; presets fit to the data
+    const auto = this.fits() && !this.zoom && !customBounds();
+    const [start, end] = this.window(true);
     let since = null;
-    if (!full && !this.zoom && this.tier != null && Date.now() - this.lastFull < FULL_REFRESH_MS) {
+    if (!full && !this.zoom && !fixedWindow() && this.tier != null && Date.now() - this.lastFull < FULL_REFRESH_MS) {
       for (const d of this.cols.values()) if (d.t.length) since = Math.max(since ?? -Infinity, d.t[d.t.length - 1]);
     }
     const q = new URLSearchParams();
@@ -325,6 +437,7 @@ class ChartView {
 
   _emptyMessage() {
     if (this.zoom) return ['Nothing recorded here', 'Double-click or use Reset zoom to go back.'];
+    if (customBounds()) return ['Nothing recorded in this range', 'Pick other dates, or choose a preset range above.'];
     if (!S.logger?.recording) return ['Recording is off', 'Switch recording on to capture these series.'];
     const quiet = this.cfg.series.every((s) => !S.catalog.get(s.id)?.live);
     if (quiet) return ['Waiting for data', 'These series have not been heard since the gateway started.'];
@@ -333,8 +446,8 @@ class ChartView {
 
   renderHeader() {
     this.titleEl.textContent = this.cfg.title;
-    const parts = [h('span', { class: 'badge' }, this.cfg.units || 'no units'), h('span', null, `keeps ${fmtSpan(this.cfg.max_age_s)}`)];
-    if (!this.zoom && this.autoRange() && this.first != null && !this.collapsed) {
+    const parts = [h('span', { class: 'badge' }, this.cfg.units || 'no units'), h('span', null, `keeps ${fmtKeep(this.cfg.max_age_s)}`)];
+    if (!this.zoom && !customBounds() && this.fits() && this.first != null && !this.collapsed) {
       const [a, b] = this.window();
       if (b - a < this.span() - 60) {
         parts.push(h('span', { class: 'sep' }), h('span', { title: 'Auto range: fitted to the data this chart holds' }, `showing ${fmtDur(b - a)}`));
@@ -366,7 +479,7 @@ class ChartView {
             this.renderLegend();
           },
         },
-        h('span', { class: 'legend-key', style: { background: `var(--series-${m.color + 1})` } }),
+        h('span', { class: 'legend-key', style: { background: seriesColor(m) } }),
         h('span', { class: 'legend-name' }, m.node ? `${m.node} ` : '', h('b', null, m.name)),
         h('span', { class: 'legend-val' }, fmtNum(last), m.units ? h('small', null, m.units) : null),
       );
@@ -405,7 +518,9 @@ class ChartView {
         label: 'Auto range',
         icon: 'fit',
         checked: this.autoRange(),
-        title: `Fit the time axis to the data this chart holds, up to ${fmtSpan(this.cfg.max_age_s)}`,
+        title: this.cfg.max_age_s
+          ? `Fit the time axis to the data this chart holds, up to ${fmtSpan(this.cfg.max_age_s)}`
+          : 'Fit the time axis to the data this chart holds (a chart kept forever always fits under All)',
         onToggle: (on) => this.setAutoRange(on),
       },
       'sep',
@@ -527,7 +642,7 @@ function syncCharts() {
 
 async function refreshAll(full) {
   for (const v of S.views.values()) {
-    if (!full && v.zoom) continue;
+    if (!full && (v.zoom || fixedWindow())) continue;
     try {
       await v.refresh(full);
     } catch {
@@ -567,7 +682,7 @@ async function saveChartOrder(ids, newRows = null) {
 
 async function deleteChart(v) {
   const ok = confirm(
-    `Delete the chart “${v.cfg.title}”?\n\nIts recorded samples stay on the gateway until they age out. Use Storage to clear them now.`,
+    `Delete the chart “${v.cfg.title}”?\n\nIts recorded samples stay on the gateway${v.cfg.max_age_s ? ' until they age out' : ''}. Use Storage to clear them now.`,
   );
   if (!ok) return;
   try {
@@ -613,13 +728,15 @@ function downloadCsv(params) {
 // Chart editor
 // ---------------------------------------------------------------------------
 
-const ED = { editing: null, selected: [], colors: {}, retention: 604800, query: '' };
+// colors: series id -> palette slot; custom: series id -> '#rrggbb' override
+const ED = { editing: null, selected: [], colors: {}, custom: {}, retention: 604800, query: '' };
 
 function openEditor(cfg = null) {
   if (!S.logger) return; // state not loaded yet
   ED.editing = cfg;
   ED.selected = cfg ? cfg.series.map((s) => s.id) : [];
   ED.colors = cfg ? Object.fromEntries(cfg.series.map((s) => [s.id, s.color])) : {};
+  ED.custom = cfg ? Object.fromEntries(cfg.series.filter((s) => s.custom_color).map((s) => [s.id, s.custom_color])) : {};
   ED.retention = cfg ? cfg.max_age_s : prefs.get('logger.lastRetention', 604800);
   ED.query = '';
   $('#cd-heading').textContent = cfg ? 'Edit chart' : 'New chart';
@@ -628,6 +745,7 @@ function openEditor(cfg = null) {
   $('#cd-search').value = '';
   $('#cd-error').hidden = true;
   renderPicker();
+  renderColors();
   renderRetention();
   $('#chart-dialog').showModal();
   $('#cd-series').scrollTop = 0;
@@ -667,10 +785,101 @@ function toggleSeries(id, on) {
   if (!on) {
     ED.selected = ED.selected.filter((x) => x !== id);
     delete ED.colors[id];
+    delete ED.custom[id];
   }
   ED.colors = { ...ED.colors, ...previewColors() };
   renderPicker();
+  renderColors();
   updateEstimate();
+}
+
+const slotColor = (slot) => `var(--series-${slot + 1})`;
+const editorColor = (id, colors) => ED.custom[id] || slotColor(colors[id]);
+
+/** Give a series palette slot k; the series holding it takes the old slot. */
+function setSlot(id, k) {
+  const colors = previewColors();
+  const holder = ED.selected.find((x) => x !== id && colors[x] === k);
+  if (holder) ED.colors[holder] = colors[id];
+  ED.colors[id] = k;
+  delete ED.custom[id];
+  renderPicker();
+  renderColors();
+}
+
+function seriesName(id) {
+  const c = S.catalog.get(id);
+  return c ? (c.node ? `${c.node} · ${c.name}` : c.name) : id;
+}
+
+function colorRow(id, colors) {
+  const slot = colors[id];
+  const custom = ED.custom[id] || null;
+  const c = S.catalog.get(id);
+  const bar = h('span', { class: 'color-bar', style: { background: editorColor(id, colors) } });
+  const swatches = Array.from({ length: PALETTE_SIZE }, (_, k) => {
+    const holder = ED.selected.find((x) => x !== id && colors[x] === k);
+    return h('button', {
+      type: 'button',
+      class: 'swatch',
+      style: { background: slotColor(k) },
+      'aria-pressed': !custom && slot === k,
+      'aria-label': `Palette color ${k + 1}`,
+      title: holder ? `Palette color ${k + 1} (swaps with ${seriesName(holder)})` : `Palette color ${k + 1}`,
+      onclick: () => setSlot(id, k),
+    });
+  });
+  const fallback = cssVar(`--series-${slot + 1}`);
+  const customDot = h('label', { class: `swatch swatch-custom${custom ? ' on' : ''}`, title: 'Custom color', style: custom ? { background: custom } : {} });
+  const input = h('input', {
+    type: 'color',
+    value: custom || (/^#[0-9a-f]{6}$/i.test(fallback) ? fallback.toLowerCase() : '#2a78d6'),
+    'aria-label': `Custom color for ${seriesName(id)}`,
+    // Live preview while the system picker is open (no re-render: it would close it)
+    oninput: (e) => {
+      const v = e.target.value.toLowerCase();
+      ED.custom[id] = v;
+      bar.style.background = v;
+      customDot.style.background = v;
+      customDot.classList.add('on');
+      for (const s of swatches) s.setAttribute('aria-pressed', 'false');
+    },
+    onchange: (e) => {
+      ED.custom[id] = e.target.value.toLowerCase();
+      renderPicker();
+      renderColors();
+    },
+  });
+  customDot.append(input);
+  return h(
+    'div',
+    { class: 'color-row' },
+    bar,
+    h('span', { class: 'color-name', title: id }, c?.node ? `${c.node} ` : '', h('b', null, c?.name ?? id)),
+    h('span', { class: 'swatches', role: 'group', 'aria-label': `Color for ${seriesName(id)}` }, ...swatches, customDot),
+    h(
+      'button',
+      {
+        type: 'button',
+        class: 'btn btn-ghost btn-sm color-reset',
+        hidden: !custom,
+        title: 'Back to its palette color',
+        onclick: () => {
+          delete ED.custom[id];
+          renderPicker();
+          renderColors();
+        },
+      },
+      'Default',
+    ),
+  );
+}
+
+function renderColors() {
+  const field = $('#cd-colors-field');
+  field.hidden = !ED.selected.length;
+  const colors = previewColors();
+  $('#cd-colors').replaceChildren(...ED.selected.map((id) => colorRow(id, colors)));
 }
 
 function renderPicker() {
@@ -721,7 +930,7 @@ function renderPicker() {
           title: mismatch ? `Different units (${c.units || 'none'}) — a chart has one y-axis` : full ? `A chart holds up to ${max} series` : c.id,
         },
         h('input', { type: 'checkbox', checked: sel, disabled, onchange: (e) => toggleSeries(c.id, e.target.checked) }),
-        h('span', { class: 'pick-key', style: sel ? { background: `var(--series-${colors[c.id] + 1})` } : {} }),
+        h('span', { class: 'pick-key', style: sel ? { background: editorColor(c.id, colors) } : {} }),
         h('span', { class: 'pick-main' }, h('span', { class: 'pick-name' }, c.name), h('span', { class: 'pick-sub' }, sub || c.id)),
         h('span', { class: 'badge' }, c.units || '—'),
       ),
@@ -756,10 +965,12 @@ function renderRetention() {
       ),
     ),
   );
-  const unit = ED.retention % 86400 === 0 ? 86400 : 3600;
+  const forever = ED.retention === FOREVER;
+  const unit = forever || ED.retention % 86400 === 0 ? 86400 : 3600;
   $('#cd-ret-u').value = String(unit);
-  $('#cd-ret-n').value = String(Number((ED.retention / unit).toFixed(2)));
-  $('#cd-ret-label').textContent = fmtSpan(ED.retention);
+  $('#cd-ret-n').value = forever ? '' : String(Number((ED.retention / unit).toFixed(2)));
+  $('#cd-ret-n').placeholder = forever ? '∞' : '';
+  $('#cd-ret-label').textContent = fmtKeep(ED.retention);
   updateEstimate();
 }
 
@@ -774,25 +985,29 @@ function readCustomRetention() {
 
 function updateEstimate() {
   const el = $('#cd-estimate');
+  const forever = ED.retention === FOREVER;
   if (!ED.selected.length) {
-    el.textContent = 'Older samples roll off automatically once they pass this age.';
+    el.textContent = forever
+      ? 'Nothing is deleted automatically; clear old data from Storage when you like.'
+      : 'Older samples roll off automatically once they pass this age.';
     return;
   }
+  const horizon = forever ? 365 * 86400 : ED.retention; // forever: estimate a year's growth
   let samples = 0;
   let unknown = 0;
   for (const id of ED.selected) {
     const c = S.catalog.get(id);
-    if (c?.interval_s) samples += ED.retention / c.interval_s;
+    if (c?.interval_s) samples += horizon / c.interval_s;
     else unknown++;
   }
   const parts = [];
   if (samples) {
     parts.push(
-      `≈ ${fmtBytes(samples * BYTES_PER_SAMPLE)} on the gateway at current report rates (${Math.round(samples).toLocaleString()} samples)`,
+      `≈ ${fmtBytes(samples * BYTES_PER_SAMPLE)} ${forever ? 'per year' : 'on the gateway'} at current report rates (${Math.round(samples).toLocaleString()} samples)`,
     );
   }
   if (unknown) parts.push(`${unknown} series with unknown rate`);
-  parts.push('older samples roll off automatically');
+  parts.push(forever ? 'kept until you clear it; recording pauses if the disk gets nearly full' : 'older samples roll off automatically');
   el.replaceChildren(icon('database'), parts.join(' · '));
 }
 
@@ -807,7 +1022,7 @@ async function saveEditor() {
   const colors = previewColors();
   const body = {
     title: $('#cd-name').value.trim(),
-    series: ED.selected.map((id) => ({ id, color: colors[id] })),
+    series: ED.selected.map((id) => ({ id, color: colors[id], custom_color: ED.custom[id] || null })),
     max_age_s: ED.retention,
   };
   const btn = $('#cd-save');
@@ -913,9 +1128,15 @@ function renderStorage(st) {
                 null,
                 h('td', null, h('div', { class: 'name' }, s.name || s.id), h('div', { class: 'sub' }, s.node ? `${s.node} · ${s.id}` : s.id)),
                 h('td', null, s.units || '—'),
-                h('td', null, fmtSpan(s.retention_s)),
+                h('td', null, fmtKeep(s.retention_s)),
                 h('td', { class: 'num' }, s.first_ts != null ? `${fmtDur(now - s.first_ts)}` : 'empty', s.recording ? h('div', { class: 'sub' }, 'recording') : null),
-                h('td', null, s.charts.length ? s.charts.join(', ') : h('span', { class: 'muted' }, 'none — ages out')),
+                h(
+                  'td',
+                  null,
+                  s.charts.length
+                    ? s.charts.join(', ')
+                    : h('span', { class: 'muted' }, s.retention_s ? 'none — ages out' : 'none — kept until cleared'),
+                ),
                 h(
                   'td',
                   { class: 'r' },
@@ -978,11 +1199,100 @@ function initStorage() {
 // Toolbar
 // ---------------------------------------------------------------------------
 
+function paintRange() {
+  const custom = !!customBounds();
+  for (const b of $('#range-seg').children) {
+    b.setAttribute('aria-pressed', String(!custom && Number(b.dataset.secs) === S.range));
+  }
+  const btn = $('#range-custom');
+  btn.setAttribute('aria-pressed', String(custom));
+  $('#range-custom-label').textContent = custom ? customLabel() : 'Dates';
+  btn.title = custom ? `Showing ${customLabel()}. Click to change` : 'Show a date range';
+}
+
+/** Switch every chart to a new window (a preset span, or a date range). */
+function applyRange() {
+  paintRange();
+  for (const v of S.views.values()) v.zoom = null;
+  refreshAll(true);
+}
+
+function setCustomRange(custom) {
+  S.custom = custom;
+  prefs.set('logger.custom', custom);
+  applyRange();
+}
+
+function openRangeDialog() {
+  const b = customBounds();
+  const now = serverNow();
+  const end = b ? b[1] : null;
+  $('#rd-start').value = toLocalInput(b ? b[0] : now - (S.range || 7 * 86400));
+  $('#rd-end').value = toLocalInput(end ?? now);
+  $('#rd-now').checked = end == null;
+  $('#rd-end').disabled = end == null;
+  $('#rd-error').hidden = true;
+  $('#rd-presets').replaceChildren(
+    ...DAY_PRESETS.map(([key, label]) =>
+      h(
+        'button',
+        {
+          type: 'button',
+          'aria-pressed': S.custom?.preset === key,
+          onclick: () => {
+            $('#range-dialog').close();
+            setCustomRange({ preset: key });
+          },
+        },
+        label,
+      ),
+    ),
+  );
+  $('#range-dialog').showModal();
+}
+
+function applyRangeDialog() {
+  const err = $('#rd-error');
+  const untilNow = $('#rd-now').checked;
+  const start = fromLocalInput($('#rd-start').value);
+  const end = untilNow ? null : fromLocalInput($('#rd-end').value);
+  let problem = null;
+  if (start == null) problem = 'Pick a start date and time.';
+  else if (!untilNow && end == null) problem = 'Pick an end date and time, or tick “Until now”.';
+  else if ((end ?? Date.now() / 1000) <= start) problem = untilNow ? 'The start must be in the past.' : 'The end must be after the start.';
+  if (problem) {
+    err.textContent = problem;
+    err.hidden = false;
+    return;
+  }
+  $('#range-dialog').close();
+  setCustomRange({ start, end });
+}
+
+function initRangeDialog() {
+  const dlg = $('#range-dialog');
+  $('#range-custom').prepend(icon('calendar'));
+  $('#range-custom').addEventListener('click', openRangeDialog);
+  $('#rd-close').append(icon('x'));
+  $('#rd-close').addEventListener('click', () => dlg.close());
+  $('#rd-cancel').addEventListener('click', () => dlg.close());
+  $('#rd-apply').addEventListener('click', applyRangeDialog);
+  $('#rd-now').addEventListener('change', (e) => {
+    $('#rd-end').disabled = e.target.checked;
+    if (!e.target.checked) $('#rd-end').focus();
+  });
+  for (const id of ['#rd-start', '#rd-end']) {
+    $(id).addEventListener('keydown', (e) => {
+      if (e.key === 'Enter') applyRangeDialog();
+    });
+  }
+  dlg.addEventListener('click', (e) => {
+    if (e.target === dlg) dlg.close(); // backdrop
+  });
+}
+
 function initToolbar() {
   const seg = $('#range-seg');
-  const paint = () => {
-    for (const b of seg.children) b.setAttribute('aria-pressed', String(Number(b.dataset.secs) === S.range));
-  };
   for (const [label, secs] of RANGES) {
     seg.append(
       h(
@@ -994,16 +1304,16 @@ function initToolbar() {
           onclick: () => {
             S.range = secs;
             prefs.set('logger.range', secs);
-            paint();
-            for (const v of S.views.values()) v.zoom = null;
-            refreshAll(true);
+            S.custom = null; // a preset replaces any date range
+            prefs.set('logger.custom', null);
+            applyRange();
           },
         },
         label,
       ),
     );
   }
-  paint();
+  paintRange();
 
   const live = $('#live-btn');
   const paintLive = () => live.setAttribute('aria-pressed', String(S.live));
@@ -1051,6 +1361,7 @@ window.addEventListener('themechange', () => {
 
 initTheme();
 initToolbar();
+initRangeDialog();
 initEditor();
 initStorage();
 initScrollFades();

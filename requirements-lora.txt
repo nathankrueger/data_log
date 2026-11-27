@@ -1,0 +1,9 @@
+# LoRa radio (RFM9x) dependencies, installed on every platform by install.sh.
+# The same stack drives native SPI on a Raspberry Pi and the FT232H USB-to-SPI
+# adapter (lora.backend = "ft232h") on macOS, Linux and Windows.
+# FT232H also needs the libusb system library:
+#   macOS:  brew install libusb   (install.sh does this when Homebrew is present)
+#   Linux:  sudo apt install libusb-1.0-0
+adafruit-blinka
+adafruit-circuitpython-rfm9x
+pyftdi

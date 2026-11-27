@@ -807,6 +807,7 @@ dialog.modal {
   overflow: hidden;
 }
 dialog.modal.modal-wide { width: min(880px, calc(100vw - 24px)); }
+dialog.modal.modal-narrow { width: min(460px, calc(100vw - 24px)); }
 dialog.modal[open] { display: flex; flex-direction: column; animation: modal-in 0.2s cubic-bezier(0.2, 0.8, 0.3, 1); }
 dialog.modal::backdrop { background: rgba(10, 10, 8, 0.45); backdrop-filter: blur(2px); }
 @keyframes modal-in { from { opacity: 0; transform: translateY(8px) scale(0.98); } }

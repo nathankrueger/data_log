@@ -227,6 +227,16 @@ class TestServer:
         data = json.loads(raw)
         assert status == 200 and data["first"] is None and data["start"] == 1000
 
+        # Keep forever, a custom series color, and the derived (daily) tier
+        series = [{"id": "patio_bme280_temperature", "custom_color": "#112233"}]
+        status, body = put(f"{base}/api/logger/charts/{a}", {"max_age_s": 0, "series": series})
+        assert status == 200 and body["chart"]["max_age_s"] == 0
+        assert body["chart"]["series"][0]["custom_color"] == "#112233"
+        bad = [{"id": "patio_bme280_temperature", "custom_color": "red"}]
+        assert put(f"{base}/api/logger/charts/{a}", {"series": bad})[0] == 400
+        status, raw, _ = get(f"{base}/api/logger/data?s=patio_bme280_temperature&start=0&end=40000000&tier=86400")
+        assert status == 200 and json.loads(raw)["tier"] == 86400
+
     def test_node_order_round_trip(self, server):
         base, _, _ = server
         status, body = put(f"{base}/api/nodes/order", {"ids": ["shed", "patio", "shed"]})

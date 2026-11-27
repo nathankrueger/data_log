@@ -2,11 +2,12 @@
 
 import os
 import time
+from types import SimpleNamespace
 
 import pytest
 
 from gateway.sensor_collection import SensorDataCollector
-from gateway.timeseries.constants import AUTO_MIN_SPAN_S, TIERS
+from gateway.timeseries.constants import AUTO_MIN_SPAN_S, QUERY_TIERS, TIERS
 from gateway.timeseries.export import csv_long, csv_wide, resolve_tz, safe_filename
 from gateway.timeseries.recorder import Recorder
 from gateway.timeseries.service import LoggerService, NotFound, _clean_chart
@@ -67,7 +68,67 @@ class TestStoreBasics:
     def test_pick_tier(self):
         assert pick_tier(3600, 1000) == TIERS[0]
         assert pick_tier(7 * DAY, 1000) == 1800
-        assert pick_tier(10 * 365 * DAY, 100) == TIERS[-1]
+        assert pick_tier(2 * 365 * DAY, 1000) == 86400  # derived: summed from 3-hour buckets
+        assert pick_tier(10 * 365 * DAY, 100) == QUERY_TIERS[-1]
+
+
+class TestLongHistory:
+    DAY0 = 1_699_920_000  # a UTC midnight: day buckets start here
+
+    def test_long_windows_use_daily_buckets_summed_from_3h(self, store, recorder):
+        for i in range(4 * 48):  # every 30 min for 4 days
+            recorder.ingest([dp("a_bme_temp", float(i))], self.DAY0 + i * 1800)
+        recorder.flush()
+        # 30 days at 50 points: too long for 3-hour buckets, so daily ones
+        res = store.query(["a_bme_temp"], self.DAY0 - 26 * DAY, self.DAY0 + 4 * DAY, 50)
+        assert res["tier"] == 86400
+        col = res["series"]["a_bme_temp"]
+        assert col["t"] == [self.DAY0 + k * DAY for k in range(4)]
+        assert col["min"] == [48.0 * k for k in range(4)]
+        assert col["max"] == [48.0 * k + 47 for k in range(4)]
+        assert col["avg"] == [48.0 * k + 23.5 for k in range(4)]
+        # Incremental polling at a derived tier returns the newest bucket on
+        inc = store.query(
+            ["a_bme_temp"], self.DAY0 - 26 * DAY, self.DAY0 + 4 * DAY, 50, tier=86400, since_s=self.DAY0 + 3 * DAY
+        )
+        assert inc["tier"] == 86400 and inc["series"]["a_bme_temp"]["t"] == [self.DAY0 + 3 * DAY]
+
+    def test_weekly_buckets_nest_daily_ones(self, store, recorder):
+        for i in range(30 * 8):  # every 3 h for 30 days
+            recorder.ingest([dp("a_bme_temp", 1.0)], self.DAY0 + i * 10800)
+        recorder.flush()
+        res = store.query(["a_bme_temp"], self.DAY0, self.DAY0 + 30 * DAY, 50, tier=604800)
+        col = res["series"]["a_bme_temp"]
+        assert all(t % 604800 == 0 for t in col["t"])
+        assert sum(col["avg"]) == len(col["t"])  # every bucket averages 1.0
+
+    def test_forever_is_never_pruned(self, store):
+        rec = Recorder(store, flush_interval=3600)
+        rec.set_series(store.ensure_series([("keep", "n", "T", "C", 0), ("brief", "n", "T", "C", 3600)]))
+        t = 1_000_000_000.0  # 2001
+        rec.ingest([dp("keep", 1.0), dp("brief", 2.0)], t)
+        rec.flush()
+        store.prune(now=t + 20 * 365 * DAY)
+        assert store.query(["keep"], t - 1, t + 1, 100)["series"]["keep"]["v"] == [1.0]
+        assert store.query(["brief"], t - 1, t + 1, 100)["series"]["brief"]["v"] == []
+        assert agg_row(store, "keep", 10800, int(t) - int(t) % 10800) is not None
+
+
+class TestDiskGuard:
+    def test_pauses_writes_while_the_disk_is_nearly_full(self, store, recorder, monkeypatch):
+        free = {"bytes": 10 * 1024 * 1024}
+        monkeypatch.setattr(
+            "gateway.timeseries.recorder.shutil.disk_usage",
+            lambda path: SimpleNamespace(total=1 << 40, used=0, free=free["bytes"]),
+        )
+        recorder.ingest([dp("a_bme_temp", 1.0)], 1_700_000_000.0)
+        assert recorder.flush() == 0
+        assert recorder.disk_low and "Disk nearly full" in recorder.last_error
+        assert recorder.consecutive_failures == 0  # not a fault: the watchdog leaves it alone
+        assert recorder.pending_count == 1  # held in memory meanwhile
+        free["bytes"] = 10 * 1024**3
+        assert recorder.flush() == 1
+        assert not recorder.disk_low and recorder.last_error is None
 
 
 class TestStorageSize:
@@ -333,6 +394,43 @@ class TestService:
         assert updated["series"][0]["color"] == colors["shed_bme280_temperature"]
         assert chart["title"] == "Temperature"  # defaults to the first series' name
 
+    def test_custom_colors_and_slot_swaps(self, service):
+        chart = service.create_chart({"series": ["patio_bme280_temperature", "shed_bme280_temperature"]})
+        p, s = (x["id"] for x in chart["series"])
+        assert [x["color"] for x in chart["series"]] == [0, 1]
+        assert all("custom_color" not in x for x in chart["series"])  # stored only when set
+        # The editor swaps two palette slots by requesting both; requests beat prior slots
+        swapped = service.update_chart(chart["id"], {"series": [
+            {"id": p, "color": 1, "custom_color": None},
+            {"id": s, "color": 0, "custom_color": "#3A7BD5"},
+        ]})
+        assert [(x["color"], x.get("custom_color")) for x in swapped["series"]] == [(1, None), (0, "#3a7bd5")]
+        # Edits that don't send series keep custom colors
+        assert service.update_chart(chart["id"], {"title": "T"})["series"][1]["custom_color"] == "#3a7bd5"
+        # Null clears it and the series keeps its palette slot
+        cleared = service.update_chart(chart["id"], {"series": [{"id": p}, {"id": s, "custom_color": None}]})
+        assert cleared["series"][1] == {"id": s, "color": 0}
+        with pytest.raises(ValueError, match="custom_color"):
+            service.update_chart(chart["id"], {"series": [{"id": p, "custom_color": "blue"}]})
+
+    def test_keep_forever(self, service):
+        forever = service.create_chart({"series": ["patio_bme280_temperature"], "max_age_s": 0})
+        assert forever["max_age_s"] == 0
+        service.create_chart({"series": ["patio_bme280_temperature"], "max_age_s": DAY})
+        service.create_chart({"series": ["shed_bme280_temperature"], "max_age_s": DAY})
+        retention = service._retention_map()
+        assert retention == {"patio_bme280_temperature": 0, "shed_bme280_temperature": DAY}  # forever wins
+        with pytest.raises(ValueError, match="keep everything"):
+            service.create_chart({"series": ["shed_bme280_temperature"], "max_age_s": -5})
+        assert service.state()["limits"]["retention_forever"] == 0
+
+    def test_derived_tiers_are_valid_query_tiers(self, service):
+        service.create_chart({"series": ["patio_bme280_temperature"], "max_age_s": 0})
+        res = service.query(["patio_bme280_temperature"], 0, 400 * DAY, 500, tier=86400)
+        assert res["tier"] == 86400
+        with pytest.raises(ValueError, match="tier"):
+            service.query(["patio_bme280_temperature"], 0, 400 * DAY, 500, tier=12345)
+
     def test_records_through_collector(self, service, collector):
         chart = service.create_chart({"series": ["patio_bme280_temperature"], "max_age_s": DAY})
         service.set_enabled(True)
@@ -405,6 +503,16 @@ def test_old_charts_flow_and_auto_range_by_default():
     # Only real booleans count
     chart = _clean_chart({"id": "x", "series": [{"id": "s"}], "new_row": "yes", "auto_range": 0})
     assert chart["new_row"] is False and chart["auto_range"] is True
+
+
+def test_clean_chart_keeps_forever_and_valid_custom_colors():
+    chart = _clean_chart({
+        "id": "x",
+        "max_age_s": 0,
+        "series": [{"id": "a", "color": 0, "custom_color": "#ABCDEF"}, {"id": "b", "custom_color": "nope"}],
+    })
+    assert chart["max_age_s"] == 0
+    assert chart["series"] == [{"id": "a", "color": 0, "custom_color": "#abcdef"}, {"id": "b", "color": 1}]
 
 
 def test_layout_and_options_survive_a_restart(tmp_path):

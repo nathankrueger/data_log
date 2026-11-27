@@ -22,7 +22,9 @@ from __future__ import annotations
 
 import json
 import logging
+import math
 import os
+import re
 import secrets
 import tempfile
 import threading
@@ -35,7 +37,9 @@ from gateway.timeseries.constants import (
     MAX_SERIES_PER_CHART,
     POINTS_MAX,
     POINTS_MIN,
+    QUERY_TIERS,
     RETENTION_DEFAULT_S,
+    RETENTION_FOREVER,
     RETENTION_MAX_S,
     RETENTION_MIN_S,
     TIERS,
@@ -63,6 +67,27 @@ def _flag(value, default: bool) -> bool:
     return value if isinstance(value, bool) else default
 
 
+_HEX_COLOR = re.compile(r"#[0-9a-f]{6}")
+
+
+def _hex_color(value) -> str | None:
+    """A custom series color: '#rrggbb' (lowercased), else None."""
+    if isinstance(value, str) and _HEX_COLOR.fullmatch(value.lower()):
+        return value.lower()
+    return None
+
+
+def _age_rank(max_age_s: int) -> float:
+    """Order max ages by how long they keep history (0 = forever)."""
+    return math.inf if max_age_s == RETENTION_FOREVER else max_age_s
+
+
+def _clamp_age(max_age_s: int) -> int:
+    if max_age_s == RETENTION_FOREVER:
+        return max_age_s
+    return min(RETENTION_MAX_S, max(RETENTION_MIN_S, max_age_s))
+
+
 def _clean_chart(raw) -> dict | None:
     """Validate/repair one chart from logger.json; None if unusable."""
     if not isinstance(raw, dict) or not isinstance(raw.get("id"), str) or not raw["id"]:
@@ -80,7 +105,11 @@ def _clean_chart(raw) -> dict | None:
             used.add(color)
         else:
             color = None
-        series.append({"id": item["id"], "color": color})
+        entry = {"id": item["id"], "color": color}
+        custom = _hex_color(item.get("custom_color"))
+        if custom:
+            entry["custom_color"] = custom  # overrides the palette slot when drawn
+        series.append(entry)
     if not series:
         return None
     for s in series:
@@ -96,7 +125,7 @@ def _clean_chart(raw) -> dict | None:
         "id": raw["id"],
         "title": str(raw.get("title") or "")[:80] or series[0]["id"],
         "units": str(raw.get("units") or ""),
-        "max_age_s": min(RETENTION_MAX_S, max(RETENTION_MIN_S, max_age)),
+        "max_age_s": _clamp_age(max_age),
         "series": series,
         "created": created if isinstance(created, (int, float)) and not isinstance(created, bool) else time.time(),
         # Layout: starts a new row in the chart grid (a chart alone in its row
@@ -339,13 +368,13 @@ class LoggerService:
     # -------------------------------------------------------------------------
 
     def _retention_map(self) -> dict[str, int]:
-        """Recorded series -> retention (longest max age of charts using it)."""
+        """Recorded series -> retention (longest max age of charts using it; 0 = forever)."""
         out: dict[str, int] = {}
         for chart in self._cfg["charts"]:
             age = int(chart.get("max_age_s", RETENTION_DEFAULT_S))
             for s in chart.get("series", []):
                 key = s.get("id")
-                if key and age > out.get(key, 0):
+                if key and (key not in out or _age_rank(age) > _age_rank(out[key])):
                     out[key] = age
         return out
 
@@ -456,6 +485,7 @@ class LoggerService:
                     "max_charts": MAX_CHARTS,
                     "retention_min_s": RETENTION_MIN_S,
                     "retention_max_s": RETENTION_MAX_S,
+                    "retention_forever": RETENTION_FOREVER,
                 },
                 "tiers": list(TIERS),
             }
@@ -480,14 +510,22 @@ class LoggerService:
             raise ValueError("'series' must be a list")
         ids: list[str] = []
         requested_colors: dict[str, int] = {}
+        requested_custom: dict[str, str | None] = {}  # only series that sent the key
         for item in raw_series:
             sid = item.get("id") if isinstance(item, dict) else item
             if not isinstance(sid, str) or not sid:
                 raise ValueError("each series must be a series id")
             if sid not in ids:
                 ids.append(sid)
-            if isinstance(item, dict) and isinstance(item.get("color"), int):
+            if not isinstance(item, dict):
+                continue
+            if isinstance(item.get("color"), int) and not isinstance(item.get("color"), bool):
                 requested_colors[sid] = item["color"]
+            if "custom_color" in item:
+                custom = item["custom_color"]
+                if custom is not None and _hex_color(custom) is None:
+                    raise ValueError("'custom_color' must be a color like '#3a7bd5', or null")
+                requested_custom[sid] = _hex_color(custom)
         if not ids:
             raise ValueError("pick at least one series")
         if len(ids) > MAX_SERIES_PER_CHART:
@@ -504,30 +542,39 @@ class LoggerService:
             max_age = int(spec.get("max_age_s", existing["max_age_s"] if existing else RETENTION_DEFAULT_S))
         except (TypeError, ValueError):
             raise ValueError("'max_age_s' must be a number of seconds") from None
-        if not RETENTION_MIN_S <= max_age <= RETENTION_MAX_S:
+        if max_age != RETENTION_FOREVER and not RETENTION_MIN_S <= max_age <= RETENTION_MAX_S:
             raise ValueError(
                 f"max age must be between {RETENTION_MIN_S // 60} minutes and {RETENTION_MAX_S // 86400} days"
+                f", or {RETENTION_FOREVER} to keep everything"
             )
 
         title = spec.get("title", existing["title"] if existing else "")
         title = str(title or "").strip()[:80] or catalog[ids[0]]["name"]
 
-        # Color follows the series: keep existing assignments, honour requests,
-        # then hand out the lowest free palette slot.
-        prior = {s["id"]: s.get("color") for s in (existing or {}).get("series", [])}
+        # Color follows the series. Requested palette slots win (the editor
+        # swaps two series' slots by requesting both), then existing
+        # assignments are kept, then the lowest free slot is handed out.
+        prior_series = (existing or {}).get("series", [])
+        prior = {s["id"]: s.get("color") for s in prior_series}
+        prior_custom = {s["id"]: s.get("custom_color") for s in prior_series}
         used: set[int] = set()
         colors: dict[str, int] = {}
-        for sid in ids:
-            for candidate in (prior.get(sid), requested_colors.get(sid)):
-                if isinstance(candidate, int) and 0 <= candidate < MAX_SERIES_PER_CHART and candidate not in used:
+        for source in (requested_colors, prior):
+            for sid in ids:
+                candidate = source.get(sid)
+                if sid in colors or not isinstance(candidate, int):
+                    continue
+                if 0 <= candidate < MAX_SERIES_PER_CHART and candidate not in used:
                     colors[sid] = candidate
                     used.add(candidate)
-                    break
         for sid in ids:
             if sid not in colors:
                 slot = next(i for i in range(MAX_SERIES_PER_CHART) if i not in used)
                 colors[sid] = slot
                 used.add(slot)
+        # A custom color overrides the slot when drawn; the slot is kept, so
+        # clearing the custom color returns the series to its palette color
+        custom = {sid: requested_custom.get(sid, prior_custom.get(sid)) for sid in ids}
 
         # Remember metadata so the chart still renders after a restart,
         # before its nodes transmit again
@@ -546,7 +593,10 @@ class LoggerService:
             "title": title,
             "units": units.pop(),
             "max_age_s": max_age,
-            "series": [{"id": sid, "color": colors[sid]} for sid in ids],
+            "series": [
+                {"id": sid, "color": colors[sid], **({"custom_color": custom[sid]} if custom[sid] else {})}
+                for sid in ids
+            ],
             "created": existing.get("created", time.time()) if existing else time.time(),
             "new_row": bool(existing.get("new_row", False)) if existing else False,
             "auto_range": _flag(spec.get("auto_range"), existing.get("auto_range", True) if existing else True),
@@ -625,8 +675,8 @@ class LoggerService:
         since_s: float | None = None,
         auto: bool = False,
     ) -> dict:
-        if tier is not None and tier != 0 and tier not in TIERS:
-            raise ValueError(f"tier must be 0 or one of {list(TIERS)}")
+        if tier is not None and tier != 0 and tier not in QUERY_TIERS:
+            raise ValueError(f"tier must be 0 or one of {list(QUERY_TIERS)}")
         points = max(POINTS_MIN, min(POINTS_MAX, points))
         rec = self._recorder
         # Snapshot unflushed samples *before* reading the DB: anything flushed

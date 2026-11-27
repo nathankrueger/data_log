@@ -3,7 +3,9 @@ History logger API for the browser UI.
 
   GET    /api/logger                     state: switch, charts, series catalog, storage
   PUT    /api/logger                     {"enabled": bool}
-  POST   /api/logger/charts              create chart {title, series: [ids], max_age_s}
+  POST   /api/logger/charts              create chart {title, series, max_age_s}; series:
+                                         [id | {id, color: slot, custom_color: "#rrggbb"|null}];
+                                         max_age_s 0 = keep forever
   PUT    /api/logger/charts/{id}         update chart (same fields)
   DELETE /api/logger/charts/{id}
   PUT    /api/logger/charts/{id}/options {"auto_range": bool} view options

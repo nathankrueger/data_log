@@ -18,7 +18,19 @@ export const TIER_LABEL = {
   300: '5-min averages',
   1800: '30-min averages',
   10800: '3-hour averages',
+  86400: 'daily averages',
+  604800: 'weekly averages',
 };
+
+/** CSS color for a series: its custom color, else its theme palette slot. */
+export function seriesColor(s) {
+  return s.custom_color || `var(--series-${s.color + 1})`;
+}
+
+/** Resolved color (canvas needs a real value, not var()). */
+function seriesStroke(s) {
+  return s.custom_color || cssVar(`--series-${s.color + 1}`) || '#2a78d6';
+}
 
 function hexA(hex, alpha) {
   const m = /^#?([0-9a-f]{6})$/i.exec(hex);
@@ -142,7 +154,7 @@ export class TimeChart {
 
   render(series, tier, data, range) {
     this.last = { series, tier, data, range };
-    const key = JSON.stringify([series.map((s) => [s.id, s.color]), tier > 0]);
+    const key = JSON.stringify([series.map((s) => [s.id, s.color, s.custom_color || null]), tier > 0]);
     if (!this.u || key !== this.key) {
       this._build(series, tier, data);
       this.key = key;
@@ -204,7 +216,7 @@ export class TimeChart {
     const bands = [];
     this.map = [];
     series.forEach((s) => {
-      const color = cssVar(`--series-${s.color + 1}`) || '#2a78d6';
+      const color = seriesStroke(s);
       const show = !this.hidden.has(s.id);
       const m = { avg: useries.length };
       useries.push({
@@ -328,7 +340,7 @@ export class TimeChart {
         h(
           'div',
           { class: 'tt-row' },
-          h('span', { class: 'tt-key', style: { background: `var(--series-${s.color + 1})` } }),
+          h('span', { class: 'tt-key', style: { background: seriesColor(s) } }),
           h('span', { class: 'tt-val' }, fmtNum(v), s.units ? h('small', null, s.units) : null),
           h('span', { class: 'tt-name' }, s.label),
           tier && v != null
@@ -343,7 +355,11 @@ export class TimeChart {
     }
 
     let when;
-    if (tier) {
+    if (tier >= 86400) {
+      // Day/week buckets are epoch-aligned (UTC midnight), so show both ends in full
+      const start = Math.floor(x / tier) * tier;
+      when = `${fmtDateTime(start, false)} – ${fmtDateTime(start + tier, false)}`;
+    } else if (tier) {
       const start = Math.floor(x / tier) * tier;
       when = `${fmtDateTime(start, false)} – ${fmtHM(start + tier)}`;
     } else {

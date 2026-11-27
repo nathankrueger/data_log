@@ -8,7 +8,7 @@ Install or activate the data_log Python environment.
 
 OPTIONS:
     -r, --reinstall      Remove existing .venv and reinstall from scratch
-    -u, --update         Update dependencies from requirements.txt
+    -u, --update         Install any new dependencies into the existing .venv
     -p, --python PATH    Python interpreter to create .venv with (default: python3).
                          A path or a command name; Python 3.9 or newer. Only used
                          when .venv is created (first run, or with --reinstall).
@@ -26,9 +26,45 @@ EOF
 
 # Platform detection
 IS_PI=false
-if [ "$(uname -s)" = "Linux" ]; then
-    IS_PI=true
-fi
+IS_MAC=false
+case "$(uname -s)" in
+    Linux)  IS_PI=true ;;
+    Darwin) IS_MAC=true ;;
+esac
+
+# macOS: the FT232H radio backend reaches the adapter through libusb
+datalog_ensure_libusb() {
+    local brew_bin candidate
+    brew_bin="$(command -v brew 2>/dev/null)"
+    for candidate in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+        [ -n "$brew_bin" ] && break
+        [ -x "$candidate" ] && brew_bin="$candidate"
+    done
+    if [ -n "$brew_bin" ]; then
+        if ! "$brew_bin" list --versions libusb >/dev/null 2>&1; then
+            echo "Installing libusb (needed for the FT232H radio adapter)..."
+            "$brew_bin" install libusb || echo "Warning: brew install libusb failed"
+        fi
+    fi
+    if ! python -c 'import sys, usb.backend.libusb1 as b; sys.exit(0 if b.get_backend() else 1)' 2>/dev/null; then
+        echo "Warning: libusb not found, so the FT232H radio adapter won't work."
+        echo "         Install Homebrew (https://brew.sh), then: brew install libusb"
+    fi
+}
+
+# Install all Python requirements for this platform into the active venv
+datalog_install_requirements() {
+    pip install -r requirements.txt || return 1
+    echo "Installing LoRa radio dependencies (RFM9x over native SPI or FT232H)..."
+    pip install -r requirements-lora.txt || return 1
+    if [ "$IS_PI" = true ]; then
+        echo "Installing hardware dependencies..."
+        pip install -r requirements-hw.txt || return 1
+    fi
+    if [ "$IS_MAC" = true ]; then
+        datalog_ensure_libusb
+    fi
+}
 
 # Parse command line arguments
 REINSTALL=false
@@ -128,10 +164,7 @@ if [ "$UPDATE" = true ]; then
         echo "Activating virtual environment..."
         source .venv/bin/activate
         echo "Updating requirements..."
-        pip install -r requirements.txt
-        if [ "$IS_PI" = true ]; then
-            pip install -r requirements-hw.txt
-        fi
+        datalog_install_requirements || { return 1 2>/dev/null || exit 1; }
     else
         echo "Error: No .venv directory found. Run without --update first to create it."
         return 1 2>/dev/null || exit 1
@@ -156,16 +189,12 @@ else
         # use system packages for python3-rpi-lgpio access
         "$PYTHON_PATH" -m venv --system-site-packages .venv || { return 1 2>/dev/null || exit 1; }
     else
-        echo "Creating new virtual environment with Python $PYTHON_VERSION ($PYTHON_PATH) (dev mode — no hardware deps)..."
+        echo "Creating new virtual environment with Python $PYTHON_VERSION ($PYTHON_PATH) (no Pi hardware deps)..."
         "$PYTHON_PATH" -m venv .venv || { return 1 2>/dev/null || exit 1; }
     fi
     source .venv/bin/activate
     echo "Updating pip..."
     pip install --upgrade pip
     echo "Installing requirements..."
-    pip install -r requirements.txt
-    if [ "$IS_PI" = true ]; then
-        echo "Installing hardware dependencies..."
-        pip install -r requirements-hw.txt
-    fi
+    datalog_install_requirements || { return 1 2>/dev/null || exit 1; }
 fi

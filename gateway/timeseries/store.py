@@ -45,7 +45,14 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Iterable, Iterator, Sequence
 
-from gateway.timeseries.constants import AUTO_MIN_SPAN_S, POINTS_MAX, POINTS_MIN, TIERS
+from gateway.timeseries.constants import (
+    AUTO_MIN_SPAN_S,
+    DERIVED_TIERS,
+    POINTS_MAX,
+    POINTS_MIN,
+    QUERY_TIERS,
+    TIERS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -97,6 +104,12 @@ _RAW_RANGE = "SELECT ts, v FROM raw WHERE sid = ? AND ts >= ? AND ts <= ? ORDER 
 _AGG_RANGE = (
     "SELECT ts, n, vmin, vmax, vsum FROM agg "
     "WHERE sid = ? AND tier = ? AND ts >= ? AND ts <= ? ORDER BY ts"
+)
+# A derived tier (see DERIVED_TIERS): sum the stored base-tier buckets inside
+# each wider bucket. One index range scan; the base tier divides it evenly.
+_DERIVED_RANGE = (
+    "SELECT ts - ts % ? AS b, sum(n), min(vmin), max(vmax), sum(vsum) FROM agg "
+    "WHERE sid = ? AND tier = ? AND ts >= ? AND ts <= ? GROUP BY b ORDER BY b"
 )
 _INSERT_RAW = "INSERT OR REPLACE INTO raw (sid, ts, v) VALUES (?, ?, ?)"
 _REPLACE_AGG = (
@@ -157,11 +170,11 @@ def to_ms(seconds: float) -> int:
 
 
 def pick_tier(span_s: float, budget: int) -> int:
-    """Finest aggregate tier whose bucket count over span_s fits the budget."""
-    for tier in TIERS:
+    """Finest aggregate tier (stored or derived) whose bucket count over span_s fits the budget."""
+    for tier in QUERY_TIERS:
         if span_s / tier <= budget:
             return tier
-    return TIERS[-1]
+    return QUERY_TIERS[-1]
 
 
 def _sig(x: float) -> float:
@@ -514,6 +527,8 @@ class TimeSeriesStore:
             series = conn.execute("SELECT sid, retention_s FROM series").fetchall()
             with _tx(conn):
                 for sid, retention in series:
+                    if retention <= 0:
+                        continue  # kept forever
                     cutoff = now - retention
                     deleted += conn.execute(
                         "DELETE FROM raw WHERE sid = ? AND ts < ?", (sid, to_ms(cutoff))
@@ -661,15 +676,23 @@ class TimeSeriesStore:
                         "v": [r[1] for r in rows],
                     }
             else:
-                if tier not in TIERS:
+                if tier not in QUERY_TIERS:
                     raise ValueError(f"unknown tier {tier}")
                 b0 = math.floor(lo_s / tier) * tier
                 b1 = math.floor(end_s)
+                # Even the coarsest tier can't cover a window this long within
+                # the row cap: keep the newest buckets rather than the oldest
+                b0 = max(b0, (b1 // tier - _MAX_ROWS + 1) * tier)
                 for key in keys:
                     sid = sids.get(key)
                     if sid is None:
                         continue
-                    rows = conn.execute(_AGG_RANGE + " LIMIT ?", (sid, tier, b0, b1, _MAX_ROWS)).fetchall()
+                    if tier in DERIVED_TIERS:
+                        rows = conn.execute(
+                            _DERIVED_RANGE + " LIMIT ?", (tier, sid, TIERS[-1], b0, b1, _MAX_ROWS)
+                        ).fetchall()
+                    else:
+                        rows = conn.execute(_AGG_RANGE + " LIMIT ?", (sid, tier, b0, b1, _MAX_ROWS)).fetchall()
                     series[key] = {
                         "t": [r[0] for r in rows],
                         "avg": [_sig(r[4] / r[1]) for r in rows],
